@@ -1,0 +1,111 @@
+import AppKit
+import ApplicationServices
+
+// Two related sources colocated: which app is frontmost, and what window
+// has focus inside it. NSWorkspace fires on app switches; for within-app
+// focus changes a future iteration installs an AXObserver per-app on
+// kAXFocusedWindowChangedNotification. v0 just slow-ticks instead.
+
+final class WorkspaceObserver {
+    static let shared = WorkspaceObserver()
+
+    private var subs: [() -> Void] = []
+    private var token: NSObjectProtocol?
+
+    private init() {
+        token = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didActivateApplicationNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            for cb in self?.subs ?? [] { cb() }
+        }
+    }
+
+    func subscribe(_ callback: @escaping () -> Void) {
+        subs.append(callback)
+    }
+
+    func unsubscribeAll() {
+        subs.removeAll()
+    }
+}
+
+enum Workspace {
+    static func frontmostApp() -> [String: Any]? {
+        guard let app = NSWorkspace.shared.frontmostApplication else { return nil }
+        return [
+            "pid": Int(app.processIdentifier),
+            "name": app.localizedName ?? "",
+            "bundleId": app.bundleIdentifier ?? "",
+            "active": app.isActive
+        ]
+    }
+}
+
+enum Windows {
+    // Focused window for the frontmost app, via Accessibility.
+    static func focused() -> [String: Any]? {
+        guard let app = NSWorkspace.shared.frontmostApplication else { return nil }
+        let pid = app.processIdentifier
+        let appEl = AXUIElementCreateApplication(pid)
+        // Cap blocking calls — an unresponsive app shouldn't hang the daemon.
+        AXUIElementSetMessagingTimeout(appEl, 0.1)
+
+        var focusedRef: AnyObject?
+        let err = AXUIElementCopyAttributeValue(appEl, kAXFocusedWindowAttribute as CFString, &focusedRef)
+        guard err == .success, let focused = focusedRef else { return nil }
+        // swiftlint:disable:next force_cast
+        let win = focused as! AXUIElement
+
+        var titleRef: AnyObject?
+        _ = AXUIElementCopyAttributeValue(win, kAXTitleAttribute as CFString, &titleRef)
+        let title = (titleRef as? String) ?? ""
+
+        var posRef: AnyObject?
+        var sizeRef: AnyObject?
+        _ = AXUIElementCopyAttributeValue(win, kAXPositionAttribute as CFString, &posRef)
+        _ = AXUIElementCopyAttributeValue(win, kAXSizeAttribute as CFString, &sizeRef)
+        var pt = CGPoint.zero
+        var sz = CGSize.zero
+        if let p = posRef { AXValueGetValue(p as! AXValue, .cgPoint, &pt) }
+        if let s = sizeRef { AXValueGetValue(s as! AXValue, .cgSize, &sz) }
+
+        return [
+            "app": app.localizedName ?? "",
+            "pid": Int(pid),
+            "title": title,
+            "frame": ["x": Int(pt.x), "y": Int(pt.y), "w": Int(sz.width), "h": Int(sz.height)]
+        ]
+    }
+
+    // All on-screen normal windows from CGWindowList.
+    static func all() -> [[String: Any]] {
+        guard let raw = CGWindowListCopyWindowInfo(
+            [.optionOnScreenOnly, .excludeDesktopElements],
+            kCGNullWindowID
+        ) else { return [] }
+        let list = raw as! [[String: Any]]
+        return list.compactMap { info -> [String: Any]? in
+            guard let num   = info[kCGWindowNumber as String]    as? Int,
+                  let layer = info[kCGWindowLayer  as String]    as? Int,
+                  layer == 0,
+                  let owner = info[kCGWindowOwnerName as String] as? String,
+                  let pid   = info[kCGWindowOwnerPID  as String] as? Int,
+                  let bounds = info[kCGWindowBounds as String]   as? [String: CGFloat]
+            else { return nil }
+            return [
+                "id": num,
+                "app": owner,
+                "pid": pid,
+                "title": info[kCGWindowName as String] as? String ?? "",
+                "frame": [
+                    "x": Int(bounds["X"] ?? 0),
+                    "y": Int(bounds["Y"] ?? 0),
+                    "w": Int(bounds["Width"] ?? 0),
+                    "h": Int(bounds["Height"] ?? 0)
+                ]
+            ]
+        }
+    }
+}
