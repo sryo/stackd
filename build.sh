@@ -20,6 +20,14 @@ SWIFT_SOURCES=(
   Sources/DataSources/EventTap.swift
   Sources/DataSources/Workspace.swift
   Sources/DataSources/Gesture.swift
+  Sources/DataSources/Appearance.swift
+  Sources/DataSources/Input.swift
+  Sources/DataSources/Defaults.swift
+  Sources/DataSources/NetSource.swift
+  Sources/DataSources/Audio.swift
+  Sources/DataSources/Display.swift
+  Sources/DataSources/MenuBar.swift
+  Sources/DataSources/Media.swift
 )
 
 C_SOURCES=(

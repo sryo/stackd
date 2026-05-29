@@ -6,7 +6,7 @@ import WebKit
 final class StackWindow: NSPanel, WKNavigationDelegate {
     let webView: WKWebView
 
-    init(frame: NSRect, clickThrough: Bool, schemeHandler: StackdSchemeHandler) {
+    init(frame: NSRect, clickThrough: Bool, schemeHandler: StackdSchemeHandler, level: NSWindow.Level = .statusBar) {
         let config = WKWebViewConfiguration()
         config.setURLSchemeHandler(schemeHandler, forURLScheme: "sd")
         let prefs = WKPreferences()
@@ -31,7 +31,7 @@ final class StackWindow: NSPanel, WKNavigationDelegate {
         self.isOpaque = false
         self.backgroundColor = .clear
         self.hasShadow = false
-        self.level = .statusBar
+        self.level = level
         self.collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary, .ignoresCycle]
         self.ignoresMouseEvents = clickThrough
         self.isMovableByWindowBackground = false

@@ -3,7 +3,8 @@ import AppKit
 struct StackManifest: Decodable {
     let id: String
     let name: String
-    let anchor: Anchor
+    let anchor: Anchor?
+    let region: String?             // "menubar" — overrides anchor, spans screen width
     let size: Size
     let clickThrough: Bool?
     let permissions: [String]
@@ -13,7 +14,7 @@ struct StackManifest: Decodable {
     let display: String?            // "primary" (default) | "all" | "<index>"
 
     struct Anchor: Decodable { let edge: String; let inset: [Int] }
-    struct Size: Decodable { let w: Int; let h: Int }
+    struct Size: Decodable { let w: Int?; let h: Int }
     struct Hotkey: Decodable { let key: String; let callback: String }
     struct EventTap: Decodable { let event: String; let callback: String }
 }
@@ -75,6 +76,13 @@ final class StackHost {
         HotkeyRegistry.shared.unbindAll()
         EventTapRegistry.shared.unregisterAll()
         WorkspaceObserver.shared.unsubscribeAll()
+        AppearanceObserver.shared.unsubscribeAll()
+        InputObserver.shared.unsubscribeAll()
+        NetworkObserver.shared.unsubscribeAll()
+        AudioObserver.shared.unsubscribeAll()
+        DisplayObserver.shared.unsubscribeAll()
+        MediaObserver.shared.unsubscribeAll()
+        MenuBarVisibility.resetForReload()
     }
 
     // MARK: - CLI ops
@@ -149,30 +157,18 @@ final class StackHost {
     }
 
     private func spawnInstance(manifest: StackManifest, key: String, screen: NSScreen) {
-        let vf = screen.visibleFrame
-        let w = CGFloat(manifest.size.w)
-        let h = CGFloat(manifest.size.h)
-        let insetY = CGFloat(manifest.anchor.inset.indices.contains(0) ? manifest.anchor.inset[0] : 16)
-        let insetX = CGFloat(manifest.anchor.inset.indices.contains(1) ? manifest.anchor.inset[1] : 16)
+        let frame = frameFor(manifest: manifest, screen: screen)
 
-        let frame: NSRect
-        switch manifest.anchor.edge {
-        case "top-right":
-            frame = NSRect(x: vf.maxX - w - insetX, y: vf.maxY - h - insetY, width: w, height: h)
-        case "top-left":
-            frame = NSRect(x: vf.minX + insetX, y: vf.maxY - h - insetY, width: w, height: h)
-        case "bottom-right":
-            frame = NSRect(x: vf.maxX - w - insetX, y: vf.minY + insetY, width: w, height: h)
-        case "bottom-left":
-            frame = NSRect(x: vf.minX + insetX, y: vf.minY + insetY, width: w, height: h)
-        default:
-            frame = NSRect(x: vf.midX - w/2, y: vf.midY - h/2, width: w, height: h)
-        }
-
+        // Default HUDs sit at .statusBar (25), below the macOS menu bar which
+        // composites at a higher visual level. region:"menubar" needs to draw
+        // OVER the menu bar — bump to .screenSaver (1000), same trick
+        // SketchyBar uses.
+        let level: NSWindow.Level = manifest.region == "menubar" ? .screenSaver : .statusBar
         let win = StackWindow(
             frame: frame,
             clickThrough: manifest.clickThrough ?? true,
-            schemeHandler: schemeHandler
+            schemeHandler: schemeHandler,
+            level: level
         )
         let bridge = Bridge(webView: win.webView)
         bridge.start(manifest: manifest)
@@ -182,6 +178,38 @@ final class StackHost {
         win.webView.load(URLRequest(url: entry))
         win.orderFrontRegardless()
         windows[key] = win
+    }
+
+    /// Compute the on-screen frame for a stack, honoring `region:` overrides
+    /// (currently only "menubar") and otherwise falling back to anchor/inset.
+    private func frameFor(manifest: StackManifest, screen: NSScreen) -> NSRect {
+        let h = CGFloat(manifest.size.h)
+
+        if manifest.region == "menubar" {
+            // Full-bleed top bar that covers the system menu bar. screen.frame
+            // includes the menu-bar region; visibleFrame excludes it. The menu
+            // bar's actual height varies (24 on classic Macs, ~39 on notched
+            // MBPs, 57 on "More Space" scaling) — auto-grow to cover it if the
+            // manifest height is smaller.
+            let full = screen.frame
+            let menuBarHeight = full.size.height - screen.visibleFrame.size.height
+            let height = max(h, menuBarHeight)
+            return NSRect(x: full.minX, y: full.maxY - height, width: full.size.width, height: height)
+        }
+
+        let vf = screen.visibleFrame
+        let w = CGFloat(manifest.size.w ?? Int(vf.width))
+        let anchor = manifest.anchor ?? StackManifest.Anchor(edge: "top-right", inset: [16, 16])
+        let insetY = CGFloat(anchor.inset.indices.contains(0) ? anchor.inset[0] : 16)
+        let insetX = CGFloat(anchor.inset.indices.contains(1) ? anchor.inset[1] : 16)
+
+        switch anchor.edge {
+        case "top-right":    return NSRect(x: vf.maxX - w - insetX, y: vf.maxY - h - insetY, width: w, height: h)
+        case "top-left":     return NSRect(x: vf.minX + insetX,     y: vf.maxY - h - insetY, width: w, height: h)
+        case "bottom-right": return NSRect(x: vf.maxX - w - insetX, y: vf.minY + insetY,     width: w, height: h)
+        case "bottom-left":  return NSRect(x: vf.minX + insetX,     y: vf.minY + insetY,     width: w, height: h)
+        default:             return NSRect(x: vf.midX - w/2,        y: vf.midY - h/2,        width: w, height: h)
+        }
     }
 
     private static func screensFor(displaySpec: String) -> [(Int, NSScreen)] {

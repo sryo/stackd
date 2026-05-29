@@ -45,6 +45,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ note: Notification) {
+        // Never inherit a "menu bar hidden" state from a crashed previous daemon.
+        MenuBarVisibility.forceRestoreOnLaunch()
+
         let root = stackdRoot()
         let runtime = runtimePath()
         let host = StackHost(rootPath: root, runtimePath: runtime)
@@ -75,6 +78,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ note: Notification) {
+        // Safety: never leave the user's menu bar hidden if we exit while suppressing.
+        MenuBarVisibility.resetForReload()
         watcher?.stop()
         ipc?.stop()
     }

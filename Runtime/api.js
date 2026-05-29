@@ -31,11 +31,67 @@ window.__sd_push = (name, payload) => {
   channel(name).value = payload;
 };
 
+// Request/response (used by sd.defaults.read). Native fires window.__sd_response(id, value).
+const pending = new Map();
+let nextRequestId = 1;
+window.__sd_response = (id, value) => {
+  const resolve = pending.get(id);
+  if (resolve) { pending.delete(id); resolve(value); }
+};
+function request(payload) {
+  const requestId = nextRequestId++;
+  return new Promise((resolve) => {
+    pending.set(requestId, resolve);
+    try {
+      window.webkit.messageHandlers.sd.postMessage({ ...payload, requestId });
+    } catch (e) {
+      pending.delete(requestId);
+      resolve(null);
+    }
+  });
+}
+
 export const sd = {
-  battery: channel("battery"),
-  mouse:   channel("mouse"),
-  app:     { frontmost: channel("frontApp") },
-  windows: { focused:   channel("focusedWindow") },
+  battery:    channel("battery"),
+  mouse:      channel("mouse"),
+  appearance: channel("appearance"),
+  app:        { frontmost: channel("frontApp") },
+  windows:    { focused:   channel("focusedWindow") },
+  input:      { layout:    channel("inputLayout") },
+  net:        {
+    wifi: channel("netWifi"),
+    lan:  channel("netLan")
+  },
+  defaults: {
+    read(bundleId, key) {
+      return request({ type: "defaults.read", bundleId, key });
+    }
+  },
+  audio: {
+    output:     channel("audioOutput"),
+    setVolume(v) { return request({ type: "audio.setVolume", value: v }); },
+    setMuted(m)  { return request({ type: "audio.setMuted",  value: !!m }); }
+  },
+  display: {
+    all:        channel("displays"),
+    setBrightness(displayID, value) {
+      return request({ type: "display.setBrightness", displayID, value });
+    }
+  },
+  menubar: {
+    // Reference-counted system menu-bar visibility.
+    // Multiple stacks can suppress; the bar reappears only once every
+    // suppressor has called restore().
+    suppress() { return request({ type: "menubar.suppress" }); },
+    restore()  { return request({ type: "menubar.restore"  }); }
+  },
+  media: {
+    // Covers Spotify / Apple Music / Podcasts / browser audio.
+    // command(name) — "play" | "pause" | "toggle" | "stop" | "next" |
+    //                 "previous" | "skipForward" | "skipBackward"
+    nowPlaying: channel("media"),
+    command(name) { return request({ type: "media.command", name }); }
+  }
 };
 
 // Handshake: tell native we're ready so it can replay buffered state.
