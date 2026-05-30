@@ -49,13 +49,42 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         return WKUserScript(source: source, injectionTime: .atDocumentStart, forMainFrameOnly: true)
     }()
 
-    init(webView: WKWebView) {
+    init(webView: WKWebView, screen: NSScreen? = nil, screenIndex: Int = 0) {
         self.webView = webView
         super.init()
         let ucc = webView.configuration.userContentController
         ucc.add(self, name: "sd")
         ucc.add(self, name: "log")
         ucc.addUserScript(Bridge.consoleHookScript)
+        // Per-instance window.__sd_screen so items like spacenum + brightness
+        // can target the screen they're rendered on. Injected at document
+        // start so it's visible before any module script runs.
+        if let scr = screen {
+            let payload = Bridge.jsonify(Bridge.screenInfo(screen: scr, index: screenIndex))
+            let source = "window.__sd_screen = \(payload);"
+            let inject = WKUserScript(source: source, injectionTime: .atDocumentStart, forMainFrameOnly: true)
+            ucc.addUserScript(inject)
+        }
+    }
+
+    static func screenInfo(screen: NSScreen, index: Int) -> [String: Any] {
+        let id = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID ?? 0
+        let uuid: String = {
+            guard let cf = CGDisplayCreateUUIDFromDisplayID(id)?.takeRetainedValue() else { return "" }
+            return CFUUIDCreateString(nil, cf) as String? ?? ""
+        }()
+        return [
+            "uuid":         uuid,
+            "displayID":    Int(id),
+            "index":        index,
+            "frame":        rect(screen.frame),
+            "visibleFrame": rect(screen.visibleFrame)
+        ]
+    }
+
+    private static func rect(_ r: CGRect) -> [String: Int] {
+        ["x": Int(r.origin.x), "y": Int(r.origin.y),
+         "w": Int(r.size.width), "h": Int(r.size.height)]
     }
 
     func start(manifest: StackManifest) {

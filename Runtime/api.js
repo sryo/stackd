@@ -61,6 +61,10 @@ function request(payload) {
 }
 
 export const sd = {
+  // Per-instance screen info, injected before this script runs (see Bridge.swift).
+  // Read .current synchronously — items like spacenum + brightness need to
+  // know which screen they're rendered on without an async round-trip.
+  screen:     { current: window.__sd_screen || null },
   battery:    channel("battery"),
   mouse:      channel("mouse"),
   appearance: channel("appearance"),

@@ -201,11 +201,11 @@ final class StackHost {
 
         for (i, screen) in targets {
             let key = (targets.count == 1) ? manifest.id : "\(manifest.id)@\(i)"
-            spawnInstance(manifest: manifest, key: key, screen: screen)
+            spawnInstance(manifest: manifest, key: key, screen: screen, screenIndex: i)
         }
     }
 
-    private func spawnInstance(manifest: StackManifest, key: String, screen: NSScreen) {
+    private func spawnInstance(manifest: StackManifest, key: String, screen: NSScreen, screenIndex: Int) {
         let frame = frameFor(manifest: manifest, screen: screen)
 
         // Default HUDs sit at .statusBar (25), below the macOS menu bar which
@@ -230,7 +230,7 @@ final class StackHost {
             level: level,
             invocable: invocable
         )
-        let bridge = Bridge(webView: win.webView)
+        let bridge = Bridge(webView: win.webView, screen: screen, screenIndex: screenIndex)
         bridge.start(manifest: manifest)
         bridges[key] = bridge
 
