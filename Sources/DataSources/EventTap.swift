@@ -39,6 +39,8 @@ final class EventTapRegistry {
             (1 << CGEventType.leftMouseDown.rawValue) |
             (1 << CGEventType.rightMouseDown.rawValue) |
             (1 << CGEventType.otherMouseDown.rawValue) |
+            (1 << CGEventType.leftMouseDragged.rawValue) |
+            (1 << CGEventType.rightMouseDragged.rawValue) |
             (1 << CGEventType.mouseMoved.rawValue) |
             (1 << CGEventType.scrollWheel.rawValue) |
             gestureBit
@@ -101,10 +103,12 @@ final class EventTapRegistry {
         case "keyDown":         return .keyDown
         case "keyUp":           return .keyUp
         case "flagsChanged":    return .flagsChanged
-        case "leftMouseDown":   return .leftMouseDown
-        case "rightMouseDown":  return .rightMouseDown
-        case "otherMouseDown":  return .otherMouseDown
-        case "mouseMoved":      return .mouseMoved
+        case "leftMouseDown":     return .leftMouseDown
+        case "rightMouseDown":    return .rightMouseDown
+        case "otherMouseDown":    return .otherMouseDown
+        case "leftMouseDragged":  return .leftMouseDragged
+        case "rightMouseDragged": return .rightMouseDragged
+        case "mouseMoved":        return .mouseMoved
         case "scrollWheel":     return .scrollWheel
         case "gesture":         return Gesture.cgEventType
         default: return nil
@@ -116,10 +120,12 @@ final class EventTapRegistry {
         case .keyDown:         return "keyDown"
         case .keyUp:           return "keyUp"
         case .flagsChanged:    return "flagsChanged"
-        case .leftMouseDown:   return "leftMouseDown"
-        case .rightMouseDown:  return "rightMouseDown"
-        case .otherMouseDown:  return "otherMouseDown"
-        case .mouseMoved:      return "mouseMoved"
+        case .leftMouseDown:     return "leftMouseDown"
+        case .rightMouseDown:    return "rightMouseDown"
+        case .otherMouseDown:    return "otherMouseDown"
+        case .leftMouseDragged:  return "leftMouseDragged"
+        case .rightMouseDragged: return "rightMouseDragged"
+        case .mouseMoved:        return "mouseMoved"
         case .scrollWheel:     return "scrollWheel"
         default:
             if type.rawValue == Gesture.cgEventType.rawValue { return "gesture" }
