@@ -13,6 +13,7 @@ struct StackManifest: Decodable {
     let eventtap: [EventTap]?
     let display: String?            // "primary" (default) | "all" | "<index>"
     let invocable: Bool?            // window starts hidden + can take key on .invoke()
+    let level: String?              // "high" → above default .statusBar (for toasts on fullscreen stacks)
 
     struct Anchor: Decodable { let edge: String; let inset: [Int] }
     struct Size: Decodable { let w: Int?; let h: Int }
@@ -212,7 +213,15 @@ final class StackHost {
         // SketchyBar uses. Invocable stacks (palettes / choosers) need to
         // take key, which a click-through HUD can't.
         let invocable = manifest.invocable ?? false
-        let level: NSWindow.Level = manifest.region == "menubar" ? .screenSaver : .statusBar
+        // Fullscreen stacks all share level .statusBar, so multiple fullscreens
+        // (TimeTrail + UndoClose, future cursor overlays) get z-order set by
+        // load order. For HUDs that need to win against ambient fullscreens,
+        // manifest can set `level: "high"` to use .screenSaver-1.
+        let level: NSWindow.Level = {
+            if manifest.region == "menubar" { return .screenSaver }
+            if manifest.level == "high"     { return NSWindow.Level(rawValue: 999) }
+            return .statusBar
+        }()
         let win = StackWindow(
             frame: frame,
             clickThrough: invocable ? false : (manifest.clickThrough ?? true),
