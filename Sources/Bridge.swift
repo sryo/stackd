@@ -24,6 +24,7 @@ final class Bridge: NSObject, WKScriptMessageHandler {
     private var settings: StackSettings?
     private var fsWatches: [Int: FSWatch] = [:]
     private var handlesBangs: Set<String> = []
+    private let axHandles = AX.HandleStore()
 
     private static let consoleHookScript: WKUserScript = {
         let source = """
@@ -239,6 +240,42 @@ final class Bridge: NSObject, WKScriptMessageHandler {
                 handleSpacesWindowSpaces(body)
             } else if type == "ax.focused" {
                 handleAxFocused(body)
+            } else if type == "ax.application" {
+                handleAxApplication(body)
+            } else if type == "ax.system" {
+                handleAxSystem(body)
+            } else if type == "ax.systemElementAtPosition" {
+                handleAxSystemElementAtPosition(body)
+            } else if type == "ax.focusedElement" {
+                handleAxFocusedElement(body)
+            } else if type == "ax.attributeNames" {
+                handleAxAttributeNames(body)
+            } else if type == "ax.attribute" {
+                handleAxAttribute(body)
+            } else if type == "ax.attributes" {
+                handleAxAttributes(body)
+            } else if type == "ax.parameterizedAttributeNames" {
+                handleAxParameterizedAttributeNames(body)
+            } else if type == "ax.parameterizedAttribute" {
+                handleAxParameterizedAttribute(body)
+            } else if type == "ax.actionNames" {
+                handleAxActionNames(body)
+            } else if type == "ax.isAttributeSettable" {
+                handleAxIsAttributeSettable(body)
+            } else if type == "ax.setAttribute" {
+                handleAxSetAttribute(body)
+            } else if type == "ax.performAction" {
+                handleAxPerformAction(body)
+            } else if type == "ax.children" {
+                handleAxChildren(body)
+            } else if type == "ax.parent" {
+                handleAxParent(body)
+            } else if type == "ax.role" {
+                handleAxRole(body)
+            } else if type == "ax.release" {
+                handleAxRelease(body)
+            } else if type == "ax.releaseAll" {
+                handleAxReleaseAll(body)
             } else if type == "window.invoke" {
                 handleWindowInvoke(body)
             } else if type == "window.dismiss" {
@@ -622,7 +659,194 @@ final class Bridge: NSObject, WKScriptMessageHandler {
     private func handleAxFocused(_ body: [String: Any]) {
         let requestId = body["requestId"] as? Int ?? -1
         guard permissions.contains("ax") else { respond(requestId: requestId, value: nil); return }
-        respond(requestId: requestId, value: AX.focusedElement())
+        DispatchQueue.main.async { [weak self] in
+            self?.respond(requestId: requestId, value: AX.focusedElement())
+        }
+    }
+
+    // All AX traffic stays on main: AXUIElement APIs claim thread safety but
+    // real-world apps deadlock under cross-thread calls.
+
+    private func handleAxApplication(_ body: [String: Any]) {
+        let requestId = body["requestId"] as? Int ?? -1
+        guard permissions.contains("ax") else { respond(requestId: requestId, value: nil); return }
+        let pid = pid_t((body["pid"] as? Int) ?? 0)
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            self.respond(requestId: requestId, value: AX.application(pid: pid, store: self.axHandles))
+        }
+    }
+
+    private func handleAxSystem(_ body: [String: Any]) {
+        let requestId = body["requestId"] as? Int ?? -1
+        guard permissions.contains("ax") else { respond(requestId: requestId, value: nil); return }
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            self.respond(requestId: requestId, value: AX.systemWide(store: self.axHandles))
+        }
+    }
+
+    private func handleAxSystemElementAtPosition(_ body: [String: Any]) {
+        let requestId = body["requestId"] as? Int ?? -1
+        guard permissions.contains("ax") else { respond(requestId: requestId, value: nil); return }
+        let x = Float((body["x"] as? Double) ?? 0)
+        let y = Float((body["y"] as? Double) ?? 0)
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            self.respond(requestId: requestId, value: AX.systemElementAtPosition(x: x, y: y, store: self.axHandles))
+        }
+    }
+
+    private func handleAxFocusedElement(_ body: [String: Any]) {
+        let requestId = body["requestId"] as? Int ?? -1
+        guard permissions.contains("ax") else { respond(requestId: requestId, value: nil); return }
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            self.respond(requestId: requestId, value: AX.focusedElementHandle(store: self.axHandles))
+        }
+    }
+
+    private func handleAxAttributeNames(_ body: [String: Any]) {
+        let requestId = body["requestId"] as? Int ?? -1
+        guard permissions.contains("ax") else { respond(requestId: requestId, value: nil); return }
+        let h = (body["handle"] as? Int) ?? -1
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            self.respond(requestId: requestId, value: AX.attributeNames(handle: h, store: self.axHandles))
+        }
+    }
+
+    private func handleAxAttribute(_ body: [String: Any]) {
+        let requestId = body["requestId"] as? Int ?? -1
+        guard permissions.contains("ax") else { respond(requestId: requestId, value: nil); return }
+        let h = (body["handle"] as? Int) ?? -1
+        let name = (body["name"] as? String) ?? ""
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            self.respond(requestId: requestId, value: AX.attribute(handle: h, name: name, store: self.axHandles))
+        }
+    }
+
+    private func handleAxAttributes(_ body: [String: Any]) {
+        let requestId = body["requestId"] as? Int ?? -1
+        guard permissions.contains("ax") else { respond(requestId: requestId, value: nil); return }
+        let h = (body["handle"] as? Int) ?? -1
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            self.respond(requestId: requestId, value: AX.attributes(handle: h, store: self.axHandles))
+        }
+    }
+
+    private func handleAxParameterizedAttributeNames(_ body: [String: Any]) {
+        let requestId = body["requestId"] as? Int ?? -1
+        guard permissions.contains("ax") else { respond(requestId: requestId, value: nil); return }
+        let h = (body["handle"] as? Int) ?? -1
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            self.respond(requestId: requestId, value: AX.parameterizedAttributeNames(handle: h, store: self.axHandles))
+        }
+    }
+
+    private func handleAxParameterizedAttribute(_ body: [String: Any]) {
+        let requestId = body["requestId"] as? Int ?? -1
+        guard permissions.contains("ax") else { respond(requestId: requestId, value: nil); return }
+        let h = (body["handle"] as? Int) ?? -1
+        let name = (body["name"] as? String) ?? ""
+        let param = body["param"]
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            self.respond(requestId: requestId, value: AX.parameterizedAttribute(handle: h, name: name, param: param, store: self.axHandles))
+        }
+    }
+
+    private func handleAxActionNames(_ body: [String: Any]) {
+        let requestId = body["requestId"] as? Int ?? -1
+        guard permissions.contains("ax") else { respond(requestId: requestId, value: nil); return }
+        let h = (body["handle"] as? Int) ?? -1
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            self.respond(requestId: requestId, value: AX.actionNames(handle: h, store: self.axHandles))
+        }
+    }
+
+    private func handleAxIsAttributeSettable(_ body: [String: Any]) {
+        let requestId = body["requestId"] as? Int ?? -1
+        guard permissions.contains("ax") else { respond(requestId: requestId, value: nil); return }
+        let h = (body["handle"] as? Int) ?? -1
+        let name = (body["name"] as? String) ?? ""
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            self.respond(requestId: requestId, value: AX.isAttributeSettable(handle: h, name: name, store: self.axHandles))
+        }
+    }
+
+    private func handleAxSetAttribute(_ body: [String: Any]) {
+        let requestId = body["requestId"] as? Int ?? -1
+        guard permissions.contains("ax") else { respond(requestId: requestId, value: false); return }
+        let h = (body["handle"] as? Int) ?? -1
+        let name = (body["name"] as? String) ?? ""
+        let value = body["value"]
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            self.respond(requestId: requestId, value: AX.setAttribute(handle: h, name: name, value: value, store: self.axHandles))
+        }
+    }
+
+    private func handleAxPerformAction(_ body: [String: Any]) {
+        let requestId = body["requestId"] as? Int ?? -1
+        guard permissions.contains("ax") else { respond(requestId: requestId, value: false); return }
+        let h = (body["handle"] as? Int) ?? -1
+        let action = (body["action"] as? String) ?? ""
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            self.respond(requestId: requestId, value: AX.performAction(handle: h, action: action, store: self.axHandles))
+        }
+    }
+
+    private func handleAxChildren(_ body: [String: Any]) {
+        let requestId = body["requestId"] as? Int ?? -1
+        guard permissions.contains("ax") else { respond(requestId: requestId, value: nil); return }
+        let h = (body["handle"] as? Int) ?? -1
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            self.respond(requestId: requestId, value: AX.children(handle: h, store: self.axHandles))
+        }
+    }
+
+    private func handleAxParent(_ body: [String: Any]) {
+        let requestId = body["requestId"] as? Int ?? -1
+        guard permissions.contains("ax") else { respond(requestId: requestId, value: nil); return }
+        let h = (body["handle"] as? Int) ?? -1
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            self.respond(requestId: requestId, value: AX.parent(handle: h, store: self.axHandles))
+        }
+    }
+
+    private func handleAxRole(_ body: [String: Any]) {
+        let requestId = body["requestId"] as? Int ?? -1
+        guard permissions.contains("ax") else { respond(requestId: requestId, value: nil); return }
+        let h = (body["handle"] as? Int) ?? -1
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            self.respond(requestId: requestId, value: AX.role(handle: h, store: self.axHandles))
+        }
+    }
+
+    private func handleAxRelease(_ body: [String: Any]) {
+        let requestId = body["requestId"] as? Int ?? -1
+        let h = (body["handle"] as? Int) ?? -1
+        DispatchQueue.main.async { [weak self] in
+            self?.respond(requestId: requestId, value: self?.axHandles.release(h) ?? false)
+        }
+    }
+
+    private func handleAxReleaseAll(_ body: [String: Any]) {
+        let requestId = body["requestId"] as? Int ?? -1
+        DispatchQueue.main.async { [weak self] in
+            self?.axHandles.releaseAll()
+            self?.respond(requestId: requestId, value: true)
+        }
     }
 
     private func handleWindowInvoke(_ body: [String: Any]) {
@@ -965,5 +1189,6 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         mouseTimer?.invalidate()
         workspaceTimer?.invalidate()
         for w in fsWatches.values { w.stop() }
+        axHandles.releaseAll()
     }
 }

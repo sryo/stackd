@@ -206,11 +206,42 @@ export const sd = {
     file(path, opts)    { return request({ type: "icons.file", path,     size: (opts && opts.size) || 64 }); }
   },
   ax: {
-    // Returns the focused UI element of the frontmost app:
+    // Back-compat: focused UI element of the frontmost app as a dict
     // { app, pid, role, roleDescription?, value?, selectedText?,
     //   selectedRange?: {location, length}, caretBounds?: {x,y,w,h} }
-    // Returns null if no element is focused or AX isn't granted.
-    focused() { return request({ type: "ax.focused" }); }
+    focused() { return request({ type: "ax.focused" }); },
+
+    // Generic axuielement-style API. Element handles are opaque integers
+    // owned by this stack's bridge. Every read that returns an AXUIElement
+    // (or array of them) mints a *new* handle — release with .release(h)
+    // or .releaseAll() to keep the store from growing without bound.
+    //
+    // Marshalling:
+    //   AXValue<CGRect>  ↔ {x,y,w,h}    AXValue<CGPoint>  ↔ {x,y}
+    //   AXValue<CGSize>  ↔ {w,h}        AXValue<CFRange>  ↔ {location,length}
+    //   AXUIElement      → number       arrays/dicts recurse
+    application(pid)                  { return request({ type: "ax.application", pid }); },
+    system()                          { return request({ type: "ax.system" }); },
+    systemElementAtPosition(x, y)     { return request({ type: "ax.systemElementAtPosition", x, y }); },
+    focusedElement()                  { return request({ type: "ax.focusedElement" }); },
+    attributeNames(handle)            { return request({ type: "ax.attributeNames", handle }); },
+    attribute(handle, name)           { return request({ type: "ax.attribute", handle, name }); },
+    attributes(handle)                { return request({ type: "ax.attributes", handle }); },
+    parameterizedAttributeNames(handle) { return request({ type: "ax.parameterizedAttributeNames", handle }); },
+    parameterizedAttribute(handle, name, param) {
+      return request({ type: "ax.parameterizedAttribute", handle, name, param });
+    },
+    actionNames(handle)               { return request({ type: "ax.actionNames", handle }); },
+    isAttributeSettable(handle, name) { return request({ type: "ax.isAttributeSettable", handle, name }); },
+    setAttribute(handle, name, value) { return request({ type: "ax.setAttribute", handle, name, value }); },
+    performAction(handle, action)     { return request({ type: "ax.performAction", handle, action }); },
+    children(handle)                  { return request({ type: "ax.children", handle }); },
+    parent(handle)                    { return request({ type: "ax.parent", handle }); },
+    role(handle)                      { return request({ type: "ax.role", handle }); },
+    release(handle)                   { return request({ type: "ax.release", handle }); },
+    releaseAll()                      { return request({ type: "ax.releaseAll" }); }
+    // observe(...) deferred — see README. Stacks that need AX notifications
+    // can poll via sd.app.frontmost + a setTimeout for now.
   },
   window: {
     // Only meaningful for stacks declared with `invocable: true` in their
