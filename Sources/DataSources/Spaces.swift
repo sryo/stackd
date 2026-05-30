@@ -21,6 +21,9 @@ enum SkyLightSpaces {
     static let spaceGetType: SpaceGetTypeFn? = sym("SLSSpaceGetType")
     static let getActiveSpace: GetActiveSpaceFn? = sym("SLSGetActiveSpace")
 
+    typealias CopySpacesForWindowsFn = @convention(c) (Int32, UInt32, CFArray) -> Unmanaged<CFArray>?
+    static let copySpacesForWindows: CopySpacesForWindowsFn? = sym("SLSCopySpacesForWindows")
+
     static let cid: Int32 = {
         guard let fn = mainConnection else { return 0 }
         return fn()
@@ -83,6 +86,20 @@ enum Spaces {
         let id = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID ?? 0
         guard let cf = CGDisplayCreateUUIDFromDisplayID(id)?.takeRetainedValue() else { return nil }
         return CFUUIDCreateString(nil, cf) as String?
+    }
+
+    /// Spaces the given window appears on, by CGWindowID. Backed by
+    /// SLSCopySpacesForWindows (private SPI). Hammerspoon exposes this as
+    /// hs.spaces.windowSpaces — tilers need it to know which space a window
+    /// belongs to without trusting NSScreen-derived heuristics.
+    static func windowSpaces(windowID: UInt32) -> [UInt64] {
+        guard let fn = SkyLightSpaces.copySpacesForWindows else { return [] }
+        let cid = SkyLightSpaces.cid
+        // 0x7 covers all space-set masks (current, others, fullscreen, etc.)
+        let arr: CFArray = [NSNumber(value: windowID)] as CFArray
+        guard let cfRef = fn(cid, 0x7, arr)?.takeRetainedValue() else { return [] }
+        let nums = (cfRef as? [NSNumber]) ?? []
+        return nums.map { $0.uint64Value }
     }
 }
 

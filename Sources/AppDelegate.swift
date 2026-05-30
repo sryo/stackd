@@ -84,6 +84,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         WindowsLifecycleObserver.shared.onDestroy = { [weak host] info in
             log("window destroyed: \(info.app) — \(info.title) (id=\(info.id))")
+            // Drop the AX cache for this pid — a destroyed window's AXUIElement
+            // may still resolve briefly but actions on it raise -25204.
+            WindowsByID.invalidateCache(pid: pid_t(info.pid))
             host?.bang(name: "sd.window.destroyed", detail: WindowsLifecycleObserver.detail(info))
         }
         WindowsLifecycleObserver.shared.onTitleChange = { [weak host] info, oldTitle in

@@ -221,6 +221,22 @@ final class Bridge: NSObject, WKScriptMessageHandler {
                 handleWindowsFullscreen(body)
             } else if type == "windows.raise" {
                 handleWindowsRaise(body)
+            } else if type == "windows.byId.setFrame" {
+                handleWindowsByIdSetFrame(body)
+            } else if type == "windows.byId.minimize" {
+                handleWindowsByIdMinimize(body)
+            } else if type == "windows.byId.fullscreen" {
+                handleWindowsByIdFullscreen(body)
+            } else if type == "windows.byId.raise" {
+                handleWindowsByIdRaise(body)
+            } else if type == "windows.byId.focus" {
+                handleWindowsByIdFocus(body)
+            } else if type == "windows.byId.close" {
+                handleWindowsByIdClose(body)
+            } else if type == "windows.byId.frame" {
+                handleWindowsByIdFrame(body)
+            } else if type == "spaces.windowSpaces" {
+                handleSpacesWindowSpaces(body)
             } else if type == "ax.focused" {
                 handleAxFocused(body)
             } else if type == "window.invoke" {
@@ -531,6 +547,76 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         let requestId = body["requestId"] as? Int ?? -1
         guard permissions.contains("windows") else { respond(requestId: requestId, value: false); return }
         respond(requestId: requestId, value: Windows.raiseFocused())
+    }
+
+    private func handleWindowsByIdSetFrame(_ body: [String: Any]) {
+        let requestId = body["requestId"] as? Int ?? -1
+        guard permissions.contains("windows") else { respond(requestId: requestId, value: false); return }
+        let id = CGWindowID((body["id"] as? Int) ?? 0)
+        let x = body["x"] as? Double ?? 0
+        let y = body["y"] as? Double ?? 0
+        let w = body["w"] as? Double ?? 0
+        let h = body["h"] as? Double ?? 0
+        respond(requestId: requestId, value: WindowsByID.setFrame(windowID: id, x: x, y: y, w: w, h: h))
+    }
+
+    private func handleWindowsByIdMinimize(_ body: [String: Any]) {
+        let requestId = body["requestId"] as? Int ?? -1
+        guard permissions.contains("windows") else { respond(requestId: requestId, value: false); return }
+        let id = CGWindowID((body["id"] as? Int) ?? 0)
+        let value = body["value"] as? Bool ?? true
+        respond(requestId: requestId, value: WindowsByID.minimize(windowID: id, value))
+    }
+
+    private func handleWindowsByIdFullscreen(_ body: [String: Any]) {
+        let requestId = body["requestId"] as? Int ?? -1
+        guard permissions.contains("windows") else { respond(requestId: requestId, value: false); return }
+        let id = CGWindowID((body["id"] as? Int) ?? 0)
+        let value = body["value"] as? Bool ?? true
+        respond(requestId: requestId, value: WindowsByID.fullscreen(windowID: id, value))
+    }
+
+    private func handleWindowsByIdRaise(_ body: [String: Any]) {
+        let requestId = body["requestId"] as? Int ?? -1
+        guard permissions.contains("windows") else { respond(requestId: requestId, value: false); return }
+        let id = CGWindowID((body["id"] as? Int) ?? 0)
+        respond(requestId: requestId, value: WindowsByID.raise(windowID: id))
+    }
+
+    private func handleWindowsByIdFocus(_ body: [String: Any]) {
+        let requestId = body["requestId"] as? Int ?? -1
+        guard permissions.contains("windows") else { respond(requestId: requestId, value: false); return }
+        let id = CGWindowID((body["id"] as? Int) ?? 0)
+        respond(requestId: requestId, value: WindowsByID.focus(windowID: id))
+    }
+
+    private func handleWindowsByIdClose(_ body: [String: Any]) {
+        let requestId = body["requestId"] as? Int ?? -1
+        guard permissions.contains("windows") else { respond(requestId: requestId, value: false); return }
+        let id = CGWindowID((body["id"] as? Int) ?? 0)
+        respond(requestId: requestId, value: WindowsByID.close(windowID: id))
+    }
+
+    private func handleWindowsByIdFrame(_ body: [String: Any]) {
+        let requestId = body["requestId"] as? Int ?? -1
+        guard permissions.contains("windows") else { respond(requestId: requestId, value: nil); return }
+        let id = CGWindowID((body["id"] as? Int) ?? 0)
+        if let r = WindowsByID.frame(windowID: id) {
+            respond(requestId: requestId, value: [
+                "x": Int(r.origin.x), "y": Int(r.origin.y),
+                "w": Int(r.size.width), "h": Int(r.size.height)
+            ])
+        } else {
+            respond(requestId: requestId, value: nil)
+        }
+    }
+
+    private func handleSpacesWindowSpaces(_ body: [String: Any]) {
+        let requestId = body["requestId"] as? Int ?? -1
+        guard permissions.contains("spaces") else { respond(requestId: requestId, value: []); return }
+        let id = UInt32((body["id"] as? Int) ?? 0)
+        let result = Spaces.windowSpaces(windowID: id).map { NSNumber(value: $0) }
+        respond(requestId: requestId, value: result)
     }
 
     private func handleAxFocused(_ body: [String: Any]) {

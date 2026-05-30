@@ -71,12 +71,22 @@ enum Windows {
         if let p = posRef { AXValueGetValue(p as! AXValue, .cgPoint, &pt) }
         if let s = sizeRef { AXValueGetValue(s as! AXValue, .cgSize, &sz) }
 
-        return [
+        // Recover CGWindowID via the private SPI so per-window-id consumers
+        // (sd.windows.byId, tiler-style stacks) can target this exact window.
+        var winId: CGWindowID = 0
+        var idVal: Int? = nil
+        if let getWindow = AXShim.getWindow, getWindow(win, &winId) == .success {
+            idVal = Int(winId)
+        }
+
+        var out: [String: Any] = [
             "app": app.localizedName ?? "",
             "pid": Int(pid),
             "title": title,
             "frame": ["x": Int(pt.x), "y": Int(pt.y), "w": Int(sz.width), "h": Int(sz.height)]
         ]
+        if let id = idVal { out["id"] = id }
+        return out
     }
 
     // Actions all operate on the AX focused window of the frontmost app.

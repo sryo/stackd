@@ -37,6 +37,7 @@ SWIFT_SOURCES=(
   Sources/DataSources/Icons.swift
   Sources/DataSources/AX.swift
   Sources/DataSources/WindowsLifecycle.swift
+  Sources/DataSources/WindowsByID.swift
   Sources/DataSources/Spaces.swift
   Sources/DataSources/PopupMenu.swift
 )

@@ -72,12 +72,36 @@ export const sd = {
   windows:    {
     focused: channel("focusedWindow"),
     all:     channel("windowsAll"),
-    // Actions operate on the AX focused window of the frontmost app.
-    // Per-window-by-id actions will land once we vendor _AXUIElementGetWindow.
-    setFrame(frame)    { return request({ type: "windows.setFrame", x: frame.x, y: frame.y, w: frame.w, h: frame.h }); },
-    minimize(value)    { return request({ type: "windows.minimize",   value: value === undefined ? true : !!value }); },
-    fullscreen(value)  { return request({ type: "windows.fullscreen", value: value === undefined ? true : !!value }); },
-    raise()            { return request({ type: "windows.raise" }); }
+    // Actions with no id operate on the AX focused window of the frontmost app.
+    // Pass an id (CGWindowID from sd.windows.all / sd.windows.focused) to
+    // target a specific window via the _AXUIElementGetWindow SPI.
+    setFrame(arg1, arg2) {
+      if (typeof arg1 === "number") {
+        const f = arg2 || {};
+        return request({ type: "windows.byId.setFrame", id: arg1, x: f.x, y: f.y, w: f.w, h: f.h });
+      }
+      const f = arg1 || {};
+      return request({ type: "windows.setFrame", x: f.x, y: f.y, w: f.w, h: f.h });
+    },
+    minimize(arg1, arg2) {
+      if (typeof arg1 === "number") {
+        return request({ type: "windows.byId.minimize", id: arg1, value: arg2 === undefined ? true : !!arg2 });
+      }
+      return request({ type: "windows.minimize", value: arg1 === undefined ? true : !!arg1 });
+    },
+    fullscreen(arg1, arg2) {
+      if (typeof arg1 === "number") {
+        return request({ type: "windows.byId.fullscreen", id: arg1, value: arg2 === undefined ? true : !!arg2 });
+      }
+      return request({ type: "windows.fullscreen", value: arg1 === undefined ? true : !!arg1 });
+    },
+    raise(id) {
+      if (typeof id === "number") return request({ type: "windows.byId.raise", id });
+      return request({ type: "windows.raise" });
+    },
+    focus(id)  { return request({ type: "windows.byId.focus", id }); },
+    close(id)  { return request({ type: "windows.byId.close", id }); },
+    frame(id)  { return request({ type: "windows.byId.frame", id }); }
   },
   input:      { layout:    channel("inputLayout") },
   net:        {
@@ -198,7 +222,12 @@ export const sd = {
   // Per-screen Spaces info via SkyLight private SPI:
   //   { [screenUUID]: { spaces: [id, ...], active: id|null, isFullscreen: bool } }
   // Fires on NSWorkspaceActiveSpaceDidChangeNotification.
-  spaces: { all: channel("spaces") },
+  spaces: {
+    all: channel("spaces"),
+    // Spaces this window is on, by CGWindowID — Promise<number[]>.
+    // Backed by SLSCopySpacesForWindows.
+    windowSpaces(id) { return request({ type: "spaces.windowSpaces", id }); }
+  },
   menu: {
     // Native NSMenu at the current cursor position. items is an array of
     //   { id, title, checked?, enabled?, separator?, submenu? }
