@@ -104,6 +104,17 @@ final class HotkeyRegistry {
         case "right": return UInt32(kVK_RightArrow)
         case "up":    return UInt32(kVK_UpArrow)
         case "down":  return UInt32(kVK_DownArrow)
+        case "-", "minus":             return UInt32(kVK_ANSI_Minus)
+        case "=", "equal", "equals":   return UInt32(kVK_ANSI_Equal)
+        case ",", "comma":             return UInt32(kVK_ANSI_Comma)
+        case ".", "period":            return UInt32(kVK_ANSI_Period)
+        case "/", "slash":             return UInt32(kVK_ANSI_Slash)
+        case ";", "semicolon":         return UInt32(kVK_ANSI_Semicolon)
+        case "'", "quote":             return UInt32(kVK_ANSI_Quote)
+        case "[", "leftbracket":       return UInt32(kVK_ANSI_LeftBracket)
+        case "]", "rightbracket":      return UInt32(kVK_ANSI_RightBracket)
+        case "\\", "backslash":        return UInt32(kVK_ANSI_Backslash)
+        case "`", "grave":             return UInt32(kVK_ANSI_Grave)
         default: return nil
         }
     }
