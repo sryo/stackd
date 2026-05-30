@@ -17,6 +17,9 @@ final class Bridge: NSObject, WKScriptMessageHandler {
     private var lastAudio: String?
     private var lastDisplay: String?
     private var lastMedia: String?
+    private var lastPasteboard: String?
+    private var settings: StackSettings?
+    private var fsWatches: [Int: FSWatch] = [:]
     private var handlesBangs: Set<String> = []
 
     private static let consoleHookScript: WKUserScript = {
@@ -55,6 +58,7 @@ final class Bridge: NSObject, WKScriptMessageHandler {
     func start(manifest: StackManifest) {
         self.permissions = manifest.permissions
         self.handlesBangs = Set(manifest.handles ?? [])
+        self.settings = StackSettings(stackId: manifest.id)
         if manifest.permissions.contains("battery")    { startBattery() }
         if manifest.permissions.contains("mouse")      { startMouse() }
         if manifest.permissions.contains("appearance") { startAppearance() }
@@ -63,6 +67,7 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         if manifest.permissions.contains("audio")      { startAudio() }
         if manifest.permissions.contains("display")    { startDisplay() }
         if manifest.permissions.contains("media")      { startMedia() }
+        if manifest.permissions.contains("pasteboard") { startPasteboard() }
         if manifest.permissions.contains("app") || manifest.permissions.contains("windows") {
             startWorkspace(includeApp: manifest.permissions.contains("app"),
                            includeWindows: manifest.permissions.contains("windows"))
@@ -132,6 +137,38 @@ final class Bridge: NSObject, WKScriptMessageHandler {
                 handleMenubarRestore(body)
             } else if type == "media.command" {
                 handleMediaCommand(body)
+            } else if type == "settings.get" {
+                handleSettingsGet(body)
+            } else if type == "settings.set" {
+                handleSettingsSet(body)
+            } else if type == "settings.delete" {
+                handleSettingsDelete(body)
+            } else if type == "settings.all" {
+                handleSettingsAll(body)
+            } else if type == "fs.read" {
+                handleFsRead(body)
+            } else if type == "fs.stat" {
+                handleFsStat(body)
+            } else if type == "fs.list" {
+                handleFsList(body)
+            } else if type == "fs.watch.start" {
+                handleFsWatchStart(body)
+            } else if type == "fs.watch.stop" {
+                handleFsWatchStop(body)
+            } else if type == "pasteboard.get" {
+                handlePasteboardGet(body)
+            } else if type == "pasteboard.set" {
+                handlePasteboardSet(body)
+            } else if type == "proc.exec" {
+                handleProcExec(body)
+            } else if type == "events.type" {
+                handleEventsType(body)
+            } else if type == "events.key" {
+                handleEventsKey(body)
+            } else if type == "events.scroll" {
+                handleEventsScroll(body)
+            } else if type == "events.click" {
+                handleEventsClick(body)
             }
         }
     }
@@ -223,6 +260,160 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         respond(requestId: requestId, value: Media.command(name))
     }
 
+    private func handleSettingsGet(_ body: [String: Any]) {
+        let requestId = body["requestId"] as? Int ?? -1
+        guard permissions.contains("settings"), let s = settings else {
+            respond(requestId: requestId, value: nil)
+            return
+        }
+        let key = body["key"] as? String ?? ""
+        respond(requestId: requestId, value: s.get(key))
+    }
+
+    private func handleSettingsSet(_ body: [String: Any]) {
+        let requestId = body["requestId"] as? Int ?? -1
+        guard permissions.contains("settings"), let s = settings else {
+            respond(requestId: requestId, value: false)
+            return
+        }
+        let key = body["key"] as? String ?? ""
+        s.set(key, body["value"])
+        respond(requestId: requestId, value: true)
+    }
+
+    private func handleSettingsDelete(_ body: [String: Any]) {
+        let requestId = body["requestId"] as? Int ?? -1
+        guard permissions.contains("settings"), let s = settings else {
+            respond(requestId: requestId, value: false)
+            return
+        }
+        let key = body["key"] as? String ?? ""
+        s.delete(key)
+        respond(requestId: requestId, value: true)
+    }
+
+    private func handleSettingsAll(_ body: [String: Any]) {
+        let requestId = body["requestId"] as? Int ?? -1
+        guard permissions.contains("settings"), let s = settings else {
+            respond(requestId: requestId, value: [String: Any]())
+            return
+        }
+        respond(requestId: requestId, value: s.all())
+    }
+
+    private func handleFsRead(_ body: [String: Any]) {
+        let requestId = body["requestId"] as? Int ?? -1
+        guard permissions.contains("fs") else { respond(requestId: requestId, value: nil); return }
+        let path = body["path"] as? String ?? ""
+        respond(requestId: requestId, value: FS.read(path: path))
+    }
+
+    private func handleFsStat(_ body: [String: Any]) {
+        let requestId = body["requestId"] as? Int ?? -1
+        guard permissions.contains("fs") else { respond(requestId: requestId, value: nil); return }
+        let path = body["path"] as? String ?? ""
+        respond(requestId: requestId, value: FS.stat(path: path))
+    }
+
+    private func handleFsList(_ body: [String: Any]) {
+        let requestId = body["requestId"] as? Int ?? -1
+        guard permissions.contains("fs") else { respond(requestId: requestId, value: nil); return }
+        let dir = body["dir"] as? String ?? ""
+        let hidden = body["hidden"] as? Bool ?? false
+        respond(requestId: requestId, value: FS.list(dir: dir, includeHidden: hidden))
+    }
+
+    private func handleFsWatchStart(_ body: [String: Any]) {
+        let requestId = body["requestId"] as? Int ?? -1
+        guard permissions.contains("fs") else { respond(requestId: requestId, value: false); return }
+        let path = body["path"] as? String ?? ""
+        let watchId = body["watchId"] as? Int ?? -1
+        let watch = FSWatch(paths: [path]) { [weak self] events in
+            self?.dispatchFsEvents(watchId: watchId, events: events)
+        }
+        guard let w = watch else { respond(requestId: requestId, value: false); return }
+        fsWatches[watchId] = w
+        respond(requestId: requestId, value: true)
+    }
+
+    private func handleFsWatchStop(_ body: [String: Any]) {
+        let requestId = body["requestId"] as? Int ?? -1
+        let watchId = body["watchId"] as? Int ?? -1
+        if let w = fsWatches.removeValue(forKey: watchId) {
+            w.stop()
+            respond(requestId: requestId, value: true)
+        } else {
+            respond(requestId: requestId, value: false)
+        }
+    }
+
+    private func handlePasteboardGet(_ body: [String: Any]) {
+        let requestId = body["requestId"] as? Int ?? -1
+        guard permissions.contains("pasteboard") else { respond(requestId: requestId, value: nil); return }
+        respond(requestId: requestId, value: Pasteboard.getString())
+    }
+
+    private func handlePasteboardSet(_ body: [String: Any]) {
+        let requestId = body["requestId"] as? Int ?? -1
+        guard permissions.contains("pasteboard") else { respond(requestId: requestId, value: false); return }
+        let s = body["value"] as? String ?? ""
+        respond(requestId: requestId, value: Pasteboard.setString(s))
+    }
+
+    private func handleProcExec(_ body: [String: Any]) {
+        let requestId = body["requestId"] as? Int ?? -1
+        guard permissions.contains("proc") else { respond(requestId: requestId, value: nil); return }
+        let cmd = body["cmd"] as? String ?? ""
+        let args = body["args"] as? [String] ?? []
+        let input = body["input"] as? String
+        let timeout = body["timeout"] as? Double
+        Proc.exec(cmd: cmd, args: args, input: input, timeoutSeconds: timeout) { [weak self] result in
+            self?.respond(requestId: requestId, value: result)
+        }
+    }
+
+    private func handleEventsType(_ body: [String: Any]) {
+        let requestId = body["requestId"] as? Int ?? -1
+        guard permissions.contains("events") else { respond(requestId: requestId, value: false); return }
+        EventsSynth.type(body["value"] as? String ?? "")
+        respond(requestId: requestId, value: true)
+    }
+
+    private func handleEventsKey(_ body: [String: Any]) {
+        let requestId = body["requestId"] as? Int ?? -1
+        guard permissions.contains("events") else { respond(requestId: requestId, value: false); return }
+        respond(requestId: requestId, value: EventsSynth.key(body["spec"] as? String ?? ""))
+    }
+
+    private func handleEventsScroll(_ body: [String: Any]) {
+        let requestId = body["requestId"] as? Int ?? -1
+        guard permissions.contains("events") else { respond(requestId: requestId, value: false); return }
+        let dx = Int32(body["dx"] as? Int ?? 0)
+        let dy = Int32(body["dy"] as? Int ?? 0)
+        respond(requestId: requestId, value: EventsSynth.scroll(dx: dx, dy: dy))
+    }
+
+    private func handleEventsClick(_ body: [String: Any]) {
+        let requestId = body["requestId"] as? Int ?? -1
+        guard permissions.contains("events") else { respond(requestId: requestId, value: false); return }
+        let x = body["x"] as? Double ?? 0
+        let y = body["y"] as? Double ?? 0
+        let button = body["button"] as? String ?? "left"
+        respond(requestId: requestId, value: EventsSynth.click(x: x, y: y, button: button))
+    }
+
+    private func dispatchFsEvents(watchId: Int, events: [(path: String, flags: FSEventStreamEventFlags)]) {
+        guard let webView = webView else { return }
+        let payload = events.map { ev -> [String: Any] in
+            ["path": ev.path, "kind": FSWatch.kindFor(flags: ev.flags)]
+        }
+        let json = Bridge.jsonify(payload)
+        let script = "window.__sd_fs_event && window.__sd_fs_event(\(watchId), \(json));"
+        DispatchQueue.main.async {
+            webView.evaluateJavaScript(script, completionHandler: nil)
+        }
+    }
+
     private func log(_ s: String) {
         FileHandle.standardError.write(Data("stackd: \(s)\n".utf8))
     }
@@ -258,6 +449,9 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         }
         if permissions.contains("media"), let json = lastMedia {
             push(channel: "media", json: json)
+        }
+        if permissions.contains("pasteboard"), let json = lastPasteboard {
+            push(channel: "pasteboard", json: json)
         }
     }
 
@@ -374,6 +568,22 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         MediaObserver.shared.subscribe(pushFn)
     }
 
+    private func startPasteboard() {
+        let pushFn: () -> Void = { [weak self] in
+            guard let self = self else { return }
+            // The signal payload is the current string (or null) — that's what
+            // every consumer (CloudPad URL copy, Palette clipboard verbs,
+            // Muse paste-at-caret) actually wants.
+            let s = Pasteboard.getString() ?? ""
+            let json = Bridge.jsonify(["text": s, "changeCount": Pasteboard.changeCount])
+            if json == self.lastPasteboard { return }
+            self.lastPasteboard = json
+            self.push(channel: "pasteboard", json: json)
+        }
+        pushFn()
+        PasteboardObserver.shared.subscribe(pushFn)
+    }
+
     // App activations come from NSWorkspace; focused window inside an app is AX
     // and changes asynchronously, so a slow tick covers within-app focus changes
     // (Cmd-`, opening a doc) until we install an AXObserver per-app.
@@ -456,5 +666,6 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         batteryTimer?.invalidate()
         mouseTimer?.invalidate()
         workspaceTimer?.invalidate()
+        for w in fsWatches.values { w.stop() }
     }
 }

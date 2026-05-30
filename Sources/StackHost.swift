@@ -82,6 +82,7 @@ final class StackHost {
         AudioObserver.shared.unsubscribeAll()
         DisplayObserver.shared.unsubscribeAll()
         MediaObserver.shared.unsubscribeAll()
+        PasteboardObserver.shared.unsubscribeAll()
         MenuBarVisibility.resetForReload()
     }
 

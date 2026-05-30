@@ -28,6 +28,11 @@ SWIFT_SOURCES=(
   Sources/DataSources/Display.swift
   Sources/DataSources/MenuBar.swift
   Sources/DataSources/Media.swift
+  Sources/DataSources/Settings.swift
+  Sources/DataSources/FS.swift
+  Sources/DataSources/Pasteboard.swift
+  Sources/DataSources/Proc.swift
+  Sources/DataSources/EventsSynthesize.swift
 )
 
 C_SOURCES=(
