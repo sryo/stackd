@@ -23,11 +23,29 @@ final class StackSettings {
     }
 
     func set(_ key: String, _ value: Any?) {
-        if let v = value, !(v is NSNull) {
-            suite.set(v, forKey: key)
+        // UserDefaults only stores plist types (String/Number/Bool/Date/Data/
+        // Array/Dict). NSNull anywhere in the tree crashes the write. Sanitize
+        // recursively — strip NSNull from arrays/dicts, drop top-level NSNull.
+        if let v = value, let sanitized = StackSettings.sanitize(v) {
+            suite.set(sanitized, forKey: key)
         } else {
             suite.removeObject(forKey: key)
         }
+    }
+
+    private static func sanitize(_ v: Any) -> Any? {
+        if v is NSNull { return nil }
+        if let arr = v as? [Any] {
+            return arr.compactMap { sanitize($0) }
+        }
+        if let dict = v as? [String: Any] {
+            var out: [String: Any] = [:]
+            for (k, val) in dict {
+                if let san = sanitize(val) { out[k] = san }
+            }
+            return out
+        }
+        return v
     }
 
     func delete(_ key: String) {
