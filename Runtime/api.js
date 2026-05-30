@@ -250,6 +250,11 @@ export const sd = {
     invoke()  { return request({ type: "window.invoke" }); },
     dismiss() { return request({ type: "window.dismiss" }); }
   },
+  // Fire a bang to every stack whose manifest `handles` array contains `name`.
+  // Returns the count of stacks that received it. Same dispatch as
+  // system-fired bangs (sd.window.created, etc.) — JS handlers register via
+  // `window.onBang_<sanitized_name> = (detail) => { ... }`.
+  bang(name, detail) { return request({ type: "bang", name, detail: detail || {} }); },
   // Per-screen Spaces info via SkyLight private SPI:
   //   { [screenUUID]: { spaces: [id, ...], active: id|null, isFullscreen: bool } }
   // Fires on NSWorkspaceActiveSpaceDidChangeNotification.

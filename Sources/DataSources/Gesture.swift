@@ -19,27 +19,48 @@ enum Gesture {
         let touchingSet = nsEvent.touches(matching: .touching, in: nil)
         let fingers = touchingSet.count
 
-        // Phase counts for debugging / TTTaps-style tap-vs-drag classification.
+        // Per-touch detail for TTTaps-class consumers: stable identity, phase,
+        // normalized position (0–1 trackpad-relative). Walk .any to include
+        // .ended / .cancelled touches alongside the live ones.
         let touchesAll = nsEvent.touches(matching: .any, in: nil)
+        var touches: [[String: Any]] = []
         var phases: [String: Int] = [:]
         for t in touchesAll {
-            let name: String
+            let phaseName: String
             switch t.phase {
-            case .began:      name = "began"
-            case .moved:      name = "moved"
-            case .stationary: name = "stationary"
-            case .ended:      name = "ended"
-            case .cancelled:  name = "cancelled"
-            default:          name = "other"
+            case .began:      phaseName = "began"
+            case .moved:      phaseName = "moved"
+            case .stationary: phaseName = "stationary"
+            case .ended:      phaseName = "ended"
+            case .cancelled:  phaseName = "cancelled"
+            default:          phaseName = "other"
             }
-            phases[name, default: 0] += 1
+            phases[phaseName, default: 0] += 1
+            // .identity is an opaque NSCopying; String(describing:) yields a
+            // stable repr that's unique per finger within the gesture lifetime —
+            // same approach Hammerspoon uses for hs.eventtap touch identity.
+            let id = String(describing: t.identity)
+            // .touching covers began/moved/stationary; consumers checking the
+            // count of "live" touches per-event mirror Hammerspoon's
+            // touchCount = #event:getTouches().
+            let touching = (t.phase == .began || t.phase == .moved || t.phase == .stationary)
+            touches.append([
+                "identity":  id,
+                "phase":     phaseName,
+                "touching":  touching,
+                "normalizedPosition": [
+                    "x": Double(t.normalizedPosition.x),
+                    "y": Double(t.normalizedPosition.y)
+                ]
+            ])
         }
 
         return [
             "subtype": subtype,
             "subtypeName": subtypeName(subtype),
             "fingers": fingers,
-            "phases": phases
+            "phases": phases,
+            "touches": touches
         ]
     }
 

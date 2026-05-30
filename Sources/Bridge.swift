@@ -282,7 +282,24 @@ final class Bridge: NSObject, WKScriptMessageHandler {
                 handleWindowDismiss(body)
             } else if type == "menu.popup" {
                 handleMenuPopup(body)
+            } else if type == "bang" {
+                handleBang(body)
             }
+        }
+    }
+
+    /// Stack-to-stack bang dispatch from JS. Fans out via StackHost.bang() to
+    /// every stack whose manifest `handles` array contains `name`. Returns the
+    /// number of stacks that received the bang.
+    private func handleBang(_ body: [String: Any]) {
+        let requestId = body["requestId"] as? Int ?? -1
+        guard let name = body["name"] as? String else {
+            respond(requestId: requestId, value: 0); return
+        }
+        let detail = (body["detail"] as? [String: Any]) ?? [:]
+        DispatchQueue.main.async { [weak self] in
+            let fired = AppDelegate.shared?.host?.bang(name: name, detail: detail) ?? 0
+            self?.respond(requestId: requestId, value: fired)
         }
     }
 
