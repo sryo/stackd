@@ -35,6 +35,7 @@ SWIFT_SOURCES=(
   Sources/DataSources/EventsSynthesize.swift
   Sources/DataSources/Apps.swift
   Sources/DataSources/Icons.swift
+  Sources/DataSources/AX.swift
 )
 
 C_SOURCES=(

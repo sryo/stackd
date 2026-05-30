@@ -176,6 +176,20 @@ export const sd = {
     // Default size 64pt. Cached by the browser.
     app(bundleId, opts) { return request({ type: "icons.app",  bundleId, size: (opts && opts.size) || 64 }); },
     file(path, opts)    { return request({ type: "icons.file", path,     size: (opts && opts.size) || 64 }); }
+  },
+  ax: {
+    // Returns the focused UI element of the frontmost app:
+    // { app, pid, role, roleDescription?, value?, selectedText?,
+    //   selectedRange?: {location, length}, caretBounds?: {x,y,w,h} }
+    // Returns null if no element is focused or AX isn't granted.
+    focused() { return request({ type: "ax.focused" }); }
+  },
+  window: {
+    // Only meaningful for stacks declared with `invocable: true` in their
+    // manifest. Such stacks start hidden; .invoke() shows + takes keyboard
+    // focus; .dismiss() hides + returns focus to the previous app.
+    invoke()  { return request({ type: "window.invoke" }); },
+    dismiss() { return request({ type: "window.dismiss" }); }
   }
 };
 

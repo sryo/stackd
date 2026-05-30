@@ -5,8 +5,16 @@ import WebKit
 /// the stack manifest decides chrome (click-through, anchor, size).
 final class StackWindow: NSPanel, WKNavigationDelegate {
     let webView: WKWebView
+    let invocable: Bool
 
-    init(frame: NSRect, clickThrough: Bool, schemeHandler: StackdSchemeHandler, level: NSWindow.Level = .statusBar) {
+    init(
+        frame: NSRect,
+        clickThrough: Bool,
+        schemeHandler: StackdSchemeHandler,
+        level: NSWindow.Level = .statusBar,
+        invocable: Bool = false
+    ) {
+        self.invocable = invocable
         let config = WKWebViewConfiguration()
         config.setURLSchemeHandler(schemeHandler, forURLScheme: "sd")
         let prefs = WKPreferences()
@@ -39,8 +47,22 @@ final class StackWindow: NSPanel, WKNavigationDelegate {
         webView.navigationDelegate = self
     }
 
-    override var canBecomeKey: Bool { false }
+    override var canBecomeKey: Bool { invocable }
     override var canBecomeMain: Bool { false }
+
+    /// Show + take keyboard focus. Activating an LSUIElement app is the
+    /// only way to actually get key state — without it, NSPanel can't
+    /// become key from a background process.
+    func invoke() {
+        NSApp.activate(ignoringOtherApps: true)
+        makeKeyAndOrderFront(nil)
+    }
+
+    /// Hide. Doesn't deactivate the app — the user's previous frontmost
+    /// app gets focus back automatically.
+    func dismiss() {
+        orderOut(nil)
+    }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         FileHandle.standardError.write(Data("stackd: webview did-finish \(webView.url?.absoluteString ?? "?")\n".utf8))

@@ -16,6 +16,10 @@ final class StackdSchemeHandler: NSObject, WKURLSchemeHandler {
         stacks[stackId] = rootURL
     }
 
+    func unregister(stackId: String) {
+        stacks.removeValue(forKey: stackId)
+    }
+
     func clearRegistrations() {
         stacks.removeAll()
     }

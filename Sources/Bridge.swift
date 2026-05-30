@@ -192,6 +192,12 @@ final class Bridge: NSObject, WKScriptMessageHandler {
                 handleWindowsFullscreen(body)
             } else if type == "windows.raise" {
                 handleWindowsRaise(body)
+            } else if type == "ax.focused" {
+                handleAxFocused(body)
+            } else if type == "window.invoke" {
+                handleWindowInvoke(body)
+            } else if type == "window.dismiss" {
+                handleWindowDismiss(body)
             }
         }
     }
@@ -494,6 +500,36 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         let requestId = body["requestId"] as? Int ?? -1
         guard permissions.contains("windows") else { respond(requestId: requestId, value: false); return }
         respond(requestId: requestId, value: Windows.raiseFocused())
+    }
+
+    private func handleAxFocused(_ body: [String: Any]) {
+        let requestId = body["requestId"] as? Int ?? -1
+        guard permissions.contains("ax") else { respond(requestId: requestId, value: nil); return }
+        respond(requestId: requestId, value: AX.focusedElement())
+    }
+
+    private func handleWindowInvoke(_ body: [String: Any]) {
+        let requestId = body["requestId"] as? Int ?? -1
+        DispatchQueue.main.async { [weak self] in
+            if let win = self?.webView?.window as? StackWindow, win.invocable {
+                win.invoke()
+                self?.respond(requestId: requestId, value: true)
+            } else {
+                self?.respond(requestId: requestId, value: false)
+            }
+        }
+    }
+
+    private func handleWindowDismiss(_ body: [String: Any]) {
+        let requestId = body["requestId"] as? Int ?? -1
+        DispatchQueue.main.async { [weak self] in
+            if let win = self?.webView?.window as? StackWindow, win.invocable {
+                win.dismiss()
+                self?.respond(requestId: requestId, value: true)
+            } else {
+                self?.respond(requestId: requestId, value: false)
+            }
+        }
     }
 
     private func dispatchFsEvents(watchId: Int, events: [(path: String, flags: FSEventStreamEventFlags)]) {

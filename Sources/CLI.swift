@@ -5,6 +5,7 @@ enum CLI {
     stackd <verb> [args]
       list                                      list running stack IDs
       reload                                    tear down & reload all stacks from disk
+      toggle <id>                               enable/disable a single stack
       set <id|/regex/> --css <prop>=<value>     set a CSS custom property on one or many stacks
       bang <name> [KEY=VAL ...]                 fire a bang to stacks that handle it
       help                                      this text
@@ -37,6 +38,9 @@ enum CLI {
         case "reload":
             host.reloadAll()
             return "reloaded \(host.listStacks().count) stack(s)\n"
+        case "toggle":
+            guard let id = rest.first else { return "usage: toggle <stack-id>\n" }
+            return host.toggle(id: id)
         case "set":
             return handleSet(rest, host)
         case "bang":

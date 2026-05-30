@@ -12,6 +12,7 @@ struct StackManifest: Decodable {
     let handles: [String]?          // bangs this stack handles
     let eventtap: [EventTap]?
     let display: String?            // "primary" (default) | "all" | "<index>"
+    let invocable: Bool?            // window starts hidden + can take key on .invoke()
 
     struct Anchor: Decodable { let edge: String; let inset: [Int] }
     struct Size: Decodable { let w: Int?; let h: Int }
@@ -115,6 +116,50 @@ final class StackHost {
         return true
     }
 
+    /// Enable/disable a single stack by id. If currently loaded, unload it
+    /// (without disturbing the rest). If unloaded but a stacks/<id>/ folder
+    /// exists, load it. Returns a human-readable result line for the CLI.
+    func toggle(id: String) -> String {
+        if windows[id] != nil {
+            unloadStack(id: id)
+            return "disabled \(id)\n"
+        }
+        let prefix = id + "@"
+        if let multiKey = windows.keys.first(where: { $0.hasPrefix(prefix) }) {
+            let baseId = String(multiKey.split(separator: "@").first ?? "")
+            unloadAllInstances(baseId: baseId)
+            return "disabled \(id) (was multi-display)\n"
+        }
+        let path = rootPath + "/stacks/\(id)"
+        var isDir: ObjCBool = false
+        if FileManager.default.fileExists(atPath: path, isDirectory: &isDir), isDir.boolValue {
+            loadStack(at: path)
+            return "enabled \(id)\n"
+        }
+        return "error: no stack named '\(id)'\n"
+    }
+
+    private func unloadStack(id: String) {
+        if let win = windows[id] {
+            win.orderOut(nil)
+            win.close()
+            windows.removeValue(forKey: id)
+        }
+        bridges.removeValue(forKey: id)
+        schemeHandler.unregister(stackId: id)
+    }
+
+    private func unloadAllInstances(baseId: String) {
+        let keys = windows.keys.filter { $0 == baseId || $0.hasPrefix(baseId + "@") }
+        for k in keys {
+            windows[k]?.orderOut(nil)
+            windows[k]?.close()
+            windows.removeValue(forKey: k)
+            bridges.removeValue(forKey: k)
+        }
+        schemeHandler.unregister(stackId: baseId)
+    }
+
     @discardableResult
     func bang(name: String, detail: [String: String]) -> Int {
         var fired = 0
@@ -164,13 +209,16 @@ final class StackHost {
         // Default HUDs sit at .statusBar (25), below the macOS menu bar which
         // composites at a higher visual level. region:"menubar" needs to draw
         // OVER the menu bar — bump to .screenSaver (1000), same trick
-        // SketchyBar uses.
+        // SketchyBar uses. Invocable stacks (palettes / choosers) need to
+        // take key, which a click-through HUD can't.
+        let invocable = manifest.invocable ?? false
         let level: NSWindow.Level = manifest.region == "menubar" ? .screenSaver : .statusBar
         let win = StackWindow(
             frame: frame,
-            clickThrough: manifest.clickThrough ?? true,
+            clickThrough: invocable ? false : (manifest.clickThrough ?? true),
             schemeHandler: schemeHandler,
-            level: level
+            level: level,
+            invocable: invocable
         )
         let bridge = Bridge(webView: win.webView)
         bridge.start(manifest: manifest)
@@ -178,7 +226,10 @@ final class StackHost {
 
         let entry = URL(string: "sd://\(manifest.id)/index.html")!
         win.webView.load(URLRequest(url: entry))
-        win.orderFrontRegardless()
+        // Invocable stacks stay hidden until sd.window.invoke() is called.
+        if !invocable {
+            win.orderFrontRegardless()
+        }
         windows[key] = win
     }
 
