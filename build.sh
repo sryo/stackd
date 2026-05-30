@@ -33,6 +33,8 @@ SWIFT_SOURCES=(
   Sources/DataSources/Pasteboard.swift
   Sources/DataSources/Proc.swift
   Sources/DataSources/EventsSynthesize.swift
+  Sources/DataSources/Apps.swift
+  Sources/DataSources/Icons.swift
 )
 
 C_SOURCES=(

@@ -65,7 +65,16 @@ export const sd = {
   mouse:      channel("mouse"),
   appearance: channel("appearance"),
   app:        { frontmost: channel("frontApp") },
-  windows:    { focused:   channel("focusedWindow") },
+  windows:    {
+    focused: channel("focusedWindow"),
+    all:     channel("windowsAll"),
+    // Actions operate on the AX focused window of the frontmost app.
+    // Per-window-by-id actions will land once we vendor _AXUIElementGetWindow.
+    setFrame(frame)    { return request({ type: "windows.setFrame", x: frame.x, y: frame.y, w: frame.w, h: frame.h }); },
+    minimize(value)    { return request({ type: "windows.minimize",   value: value === undefined ? true : !!value }); },
+    fullscreen(value)  { return request({ type: "windows.fullscreen", value: value === undefined ? true : !!value }); },
+    raise()            { return request({ type: "windows.raise" }); }
+  },
   input:      { layout:    channel("inputLayout") },
   net:        {
     wifi: channel("netWifi"),
@@ -152,6 +161,21 @@ export const sd = {
     key(spec)             { return request({ type: "events.key",  spec }); },
     scroll(dx, dy)        { return request({ type: "events.scroll", dx, dy }); },
     click(x, y, button)   { return request({ type: "events.click", x, y, button: button || "left" }); }
+  },
+  apps: {
+    // running: signal<[{pid, bundleId, name, active, hidden, launchedAt?}]>
+    // — fires on launch/quit/hide/unhide/activate.
+    running: channel("apps"),
+    launch(bundleId)          { return request({ type: "apps.launch", bundleId }); },
+    focus(bundleId)           { return request({ type: "apps.focus",  bundleId }); },
+    kill(bundleId, force)     { return request({ type: "apps.kill",   bundleId, force: !!force }); },
+    hide(bundleId)            { return request({ type: "apps.hide",   bundleId }); }
+  },
+  icons: {
+    // Returns a `data:image/png;base64,...` URL you can drop into <img src="">.
+    // Default size 64pt. Cached by the browser.
+    app(bundleId, opts) { return request({ type: "icons.app",  bundleId, size: (opts && opts.size) || 64 }); },
+    file(path, opts)    { return request({ type: "icons.file", path,     size: (opts && opts.size) || 64 }); }
   }
 };
 

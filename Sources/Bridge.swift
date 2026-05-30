@@ -10,6 +10,7 @@ final class Bridge: NSObject, WKScriptMessageHandler {
     private var lastMouse: String?
     private var lastFrontApp: String?
     private var lastFocusedWindow: String?
+    private var lastWindowsAll: String?
     private var lastAppearance: String?
     private var lastInput: String?
     private var lastNetWifi: String?
@@ -18,6 +19,7 @@ final class Bridge: NSObject, WKScriptMessageHandler {
     private var lastDisplay: String?
     private var lastMedia: String?
     private var lastPasteboard: String?
+    private var lastApps: String?
     private var settings: StackSettings?
     private var fsWatches: [Int: FSWatch] = [:]
     private var handlesBangs: Set<String> = []
@@ -68,6 +70,7 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         if manifest.permissions.contains("display")    { startDisplay() }
         if manifest.permissions.contains("media")      { startMedia() }
         if manifest.permissions.contains("pasteboard") { startPasteboard() }
+        if manifest.permissions.contains("apps")       { startApps() }
         if manifest.permissions.contains("app") || manifest.permissions.contains("windows") {
             startWorkspace(includeApp: manifest.permissions.contains("app"),
                            includeWindows: manifest.permissions.contains("windows"))
@@ -169,6 +172,26 @@ final class Bridge: NSObject, WKScriptMessageHandler {
                 handleEventsScroll(body)
             } else if type == "events.click" {
                 handleEventsClick(body)
+            } else if type == "apps.launch" {
+                handleAppsLaunch(body)
+            } else if type == "apps.focus" {
+                handleAppsFocus(body)
+            } else if type == "apps.kill" {
+                handleAppsKill(body)
+            } else if type == "apps.hide" {
+                handleAppsHide(body)
+            } else if type == "icons.app" {
+                handleIconsApp(body)
+            } else if type == "icons.file" {
+                handleIconsFile(body)
+            } else if type == "windows.setFrame" {
+                handleWindowsSetFrame(body)
+            } else if type == "windows.minimize" {
+                handleWindowsMinimize(body)
+            } else if type == "windows.fullscreen" {
+                handleWindowsFullscreen(body)
+            } else if type == "windows.raise" {
+                handleWindowsRaise(body)
             }
         }
     }
@@ -402,6 +425,77 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         respond(requestId: requestId, value: EventsSynth.click(x: x, y: y, button: button))
     }
 
+    private func handleAppsLaunch(_ body: [String: Any]) {
+        let requestId = body["requestId"] as? Int ?? -1
+        guard permissions.contains("apps") else { respond(requestId: requestId, value: false); return }
+        respond(requestId: requestId, value: Apps.launch(bundleId: body["bundleId"] as? String ?? ""))
+    }
+
+    private func handleAppsFocus(_ body: [String: Any]) {
+        let requestId = body["requestId"] as? Int ?? -1
+        guard permissions.contains("apps") else { respond(requestId: requestId, value: false); return }
+        respond(requestId: requestId, value: Apps.focus(bundleId: body["bundleId"] as? String ?? ""))
+    }
+
+    private func handleAppsKill(_ body: [String: Any]) {
+        let requestId = body["requestId"] as? Int ?? -1
+        guard permissions.contains("apps") else { respond(requestId: requestId, value: false); return }
+        let force = body["force"] as? Bool ?? false
+        respond(requestId: requestId, value: Apps.kill(bundleId: body["bundleId"] as? String ?? "", force: force))
+    }
+
+    private func handleAppsHide(_ body: [String: Any]) {
+        let requestId = body["requestId"] as? Int ?? -1
+        guard permissions.contains("apps") else { respond(requestId: requestId, value: false); return }
+        respond(requestId: requestId, value: Apps.hide(bundleId: body["bundleId"] as? String ?? ""))
+    }
+
+    private func handleIconsApp(_ body: [String: Any]) {
+        let requestId = body["requestId"] as? Int ?? -1
+        guard permissions.contains("icons") else { respond(requestId: requestId, value: nil); return }
+        let bundleId = body["bundleId"] as? String ?? ""
+        let size = body["size"] as? Int ?? 64
+        respond(requestId: requestId, value: Icons.forApp(bundleId: bundleId, size: size))
+    }
+
+    private func handleIconsFile(_ body: [String: Any]) {
+        let requestId = body["requestId"] as? Int ?? -1
+        guard permissions.contains("icons") else { respond(requestId: requestId, value: nil); return }
+        let path = body["path"] as? String ?? ""
+        let size = body["size"] as? Int ?? 64
+        respond(requestId: requestId, value: Icons.forFile(path: path, size: size))
+    }
+
+    private func handleWindowsSetFrame(_ body: [String: Any]) {
+        let requestId = body["requestId"] as? Int ?? -1
+        guard permissions.contains("windows") else { respond(requestId: requestId, value: false); return }
+        let x = body["x"] as? Double ?? 0
+        let y = body["y"] as? Double ?? 0
+        let w = body["w"] as? Double ?? 0
+        let h = body["h"] as? Double ?? 0
+        respond(requestId: requestId, value: Windows.setFocusedFrame(x: x, y: y, w: w, h: h))
+    }
+
+    private func handleWindowsMinimize(_ body: [String: Any]) {
+        let requestId = body["requestId"] as? Int ?? -1
+        guard permissions.contains("windows") else { respond(requestId: requestId, value: false); return }
+        let value = body["value"] as? Bool ?? true
+        respond(requestId: requestId, value: Windows.minimizeFocused(value))
+    }
+
+    private func handleWindowsFullscreen(_ body: [String: Any]) {
+        let requestId = body["requestId"] as? Int ?? -1
+        guard permissions.contains("windows") else { respond(requestId: requestId, value: false); return }
+        let value = body["value"] as? Bool ?? true
+        respond(requestId: requestId, value: Windows.fullscreenFocused(value))
+    }
+
+    private func handleWindowsRaise(_ body: [String: Any]) {
+        let requestId = body["requestId"] as? Int ?? -1
+        guard permissions.contains("windows") else { respond(requestId: requestId, value: false); return }
+        respond(requestId: requestId, value: Windows.raiseFocused())
+    }
+
     private func dispatchFsEvents(watchId: Int, events: [(path: String, flags: FSEventStreamEventFlags)]) {
         guard let webView = webView else { return }
         let payload = events.map { ev -> [String: Any] in
@@ -431,6 +525,9 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         if permissions.contains("windows"), let json = lastFocusedWindow {
             push(channel: "focusedWindow", json: json)
         }
+        if permissions.contains("windows"), let json = lastWindowsAll {
+            push(channel: "windowsAll", json: json)
+        }
         if permissions.contains("appearance"), let json = lastAppearance {
             push(channel: "appearance", json: json)
         }
@@ -452,6 +549,9 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         }
         if permissions.contains("pasteboard"), let json = lastPasteboard {
             push(channel: "pasteboard", json: json)
+        }
+        if permissions.contains("apps"), let json = lastApps {
+            push(channel: "apps", json: json)
         }
     }
 
@@ -584,6 +684,18 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         PasteboardObserver.shared.subscribe(pushFn)
     }
 
+    private func startApps() {
+        let pushFn: () -> Void = { [weak self] in
+            guard let self = self else { return }
+            let json = Bridge.jsonify(Apps.running())
+            if json == self.lastApps { return }
+            self.lastApps = json
+            self.push(channel: "apps", json: json)
+        }
+        pushFn()
+        AppsObserver.shared.subscribe(pushFn)
+    }
+
     // App activations come from NSWorkspace; focused window inside an app is AX
     // and changes asynchronously, so a slow tick covers within-app focus changes
     // (Cmd-`, opening a doc) until we install an AXObserver per-app.
@@ -602,6 +714,11 @@ final class Bridge: NSObject, WKScriptMessageHandler {
                 if json != self.lastFocusedWindow {
                     self.lastFocusedWindow = json
                     self.push(channel: "focusedWindow", json: json)
+                }
+                let allJson = Bridge.jsonify(Windows.all())
+                if allJson != self.lastWindowsAll {
+                    self.lastWindowsAll = allJson
+                    self.push(channel: "windowsAll", json: allJson)
                 }
             }
         }
