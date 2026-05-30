@@ -190,7 +190,11 @@ export const sd = {
     // focus; .dismiss() hides + returns focus to the previous app.
     invoke()  { return request({ type: "window.invoke" }); },
     dismiss() { return request({ type: "window.dismiss" }); }
-  }
+  },
+  // Per-screen Spaces info via SkyLight private SPI:
+  //   { [screenUUID]: { spaces: [id, ...], active: id|null, isFullscreen: bool } }
+  // Fires on NSWorkspaceActiveSpaceDidChangeNotification.
+  spaces: { all: channel("spaces") }
 };
 
 // Handshake: tell native we're ready so it can replay buffered state.

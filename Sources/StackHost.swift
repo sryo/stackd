@@ -86,6 +86,7 @@ final class StackHost {
         MediaObserver.shared.unsubscribeAll()
         PasteboardObserver.shared.unsubscribeAll()
         AppsObserver.shared.unsubscribeAll()
+        SpacesObserver.shared.unsubscribeAll()
         MenuBarVisibility.resetForReload()
     }
 

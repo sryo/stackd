@@ -20,6 +20,7 @@ final class Bridge: NSObject, WKScriptMessageHandler {
     private var lastMedia: String?
     private var lastPasteboard: String?
     private var lastApps: String?
+    private var lastSpaces: String?
     private var settings: StackSettings?
     private var fsWatches: [Int: FSWatch] = [:]
     private var handlesBangs: Set<String> = []
@@ -71,6 +72,7 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         if manifest.permissions.contains("media")      { startMedia() }
         if manifest.permissions.contains("pasteboard") { startPasteboard() }
         if manifest.permissions.contains("apps")       { startApps() }
+        if manifest.permissions.contains("spaces")     { startSpaces() }
         if manifest.permissions.contains("app") || manifest.permissions.contains("windows") {
             startWorkspace(includeApp: manifest.permissions.contains("app"),
                            includeWindows: manifest.permissions.contains("windows"))
@@ -587,6 +589,9 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         if permissions.contains("apps"), let json = lastApps {
             push(channel: "apps", json: json)
         }
+        if permissions.contains("spaces"), let json = lastSpaces {
+            push(channel: "spaces", json: json)
+        }
     }
 
     private func startBattery() {
@@ -728,6 +733,18 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         }
         pushFn()
         AppsObserver.shared.subscribe(pushFn)
+    }
+
+    private func startSpaces() {
+        let pushFn: () -> Void = { [weak self] in
+            guard let self = self else { return }
+            let json = Bridge.jsonify(Spaces.all())
+            if json == self.lastSpaces { return }
+            self.lastSpaces = json
+            self.push(channel: "spaces", json: json)
+        }
+        pushFn()
+        SpacesObserver.shared.subscribe(pushFn)
     }
 
     // App activations come from NSWorkspace; focused window inside an app is AX
