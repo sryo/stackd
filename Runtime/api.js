@@ -194,7 +194,13 @@ export const sd = {
   // Per-screen Spaces info via SkyLight private SPI:
   //   { [screenUUID]: { spaces: [id, ...], active: id|null, isFullscreen: bool } }
   // Fires on NSWorkspaceActiveSpaceDidChangeNotification.
-  spaces: { all: channel("spaces") }
+  spaces: { all: channel("spaces") },
+  menu: {
+    // Native NSMenu at the current cursor position. items is an array of
+    //   { id, title, checked?, enabled?, separator?, submenu? }
+    // Resolves with the picked id, or null on cancel.
+    popup(items) { return request({ type: "menu.popup", items: items || [] }); }
+  }
 };
 
 // Handshake: tell native we're ready so it can replay buffered state.

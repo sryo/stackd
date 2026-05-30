@@ -38,6 +38,7 @@ SWIFT_SOURCES=(
   Sources/DataSources/AX.swift
   Sources/DataSources/WindowsLifecycle.swift
   Sources/DataSources/Spaces.swift
+  Sources/DataSources/PopupMenu.swift
 )
 
 C_SOURCES=(

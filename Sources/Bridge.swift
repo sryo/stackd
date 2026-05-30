@@ -198,6 +198,8 @@ final class Bridge: NSObject, WKScriptMessageHandler {
                 handleWindowInvoke(body)
             } else if type == "window.dismiss" {
                 handleWindowDismiss(body)
+            } else if type == "menu.popup" {
+                handleMenuPopup(body)
             }
         }
     }
@@ -517,6 +519,19 @@ final class Bridge: NSObject, WKScriptMessageHandler {
             } else {
                 self?.respond(requestId: requestId, value: false)
             }
+        }
+    }
+
+    private func handleMenuPopup(_ body: [String: Any]) {
+        let requestId = body["requestId"] as? Int ?? -1
+        guard permissions.contains("menu") else {
+            log("menu.popup denied (stack lacks 'menu' permission)")
+            respond(requestId: requestId, value: nil)
+            return
+        }
+        let items = body["items"] as? [[String: Any]] ?? []
+        PopupMenu.present(items: items) { [weak self] picked in
+            self?.respond(requestId: requestId, value: picked as Any? ?? NSNull())
         }
     }
 
