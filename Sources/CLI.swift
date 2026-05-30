@@ -79,7 +79,7 @@ enum CLI {
         guard let name = args.first else {
             return "usage: bang <name> [KEY=VAL ...]\n"
         }
-        var detail: [String: String] = [:]
+        var detail: [String: Any] = [:]
         for kv in args.dropFirst() {
             if let eq = kv.firstIndex(of: "=") {
                 detail[String(kv[..<eq])] = String(kv[kv.index(after: eq)...])

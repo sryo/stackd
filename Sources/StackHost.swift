@@ -161,7 +161,7 @@ final class StackHost {
     }
 
     @discardableResult
-    func bang(name: String, detail: [String: String]) -> Int {
+    func bang(name: String, detail: [String: Any]) -> Int {
         var fired = 0
         for bridge in bridges.values where bridge.handles(bang: name) {
             bridge.fireBang(name: name, detail: detail)
@@ -234,20 +234,24 @@ final class StackHost {
     }
 
     /// Compute the on-screen frame for a stack, honoring `region:` overrides
-    /// (currently only "menubar") and otherwise falling back to anchor/inset.
+    /// (menubar, fullscreen) and otherwise falling back to anchor/inset.
     private func frameFor(manifest: StackManifest, screen: NSScreen) -> NSRect {
         let h = CGFloat(manifest.size.h)
 
         if manifest.region == "menubar" {
             // Full-bleed top bar that covers the system menu bar. screen.frame
-            // includes the menu-bar region; visibleFrame excludes it. The menu
-            // bar's actual height varies (24 on classic Macs, ~39 on notched
-            // MBPs, 57 on "More Space" scaling) — auto-grow to cover it if the
-            // manifest height is smaller.
+            // includes the menu-bar region; visibleFrame excludes it. Auto-grow
+            // to the actual menu bar height (~24 / ~39 notched / 57 "More Space").
             let full = screen.frame
             let menuBarHeight = full.size.height - screen.visibleFrame.size.height
             let height = max(h, menuBarHeight)
             return NSRect(x: full.minX, y: full.maxY - height, width: full.size.width, height: height)
+        }
+
+        if manifest.region == "fullscreen" {
+            // Entire screen, ignoring menu bar / dock. For cursor-overlay
+            // stacks (TimeTrail, BubbleCursor) that need to draw anywhere.
+            return screen.frame
         }
 
         let vf = screen.visibleFrame
@@ -257,11 +261,18 @@ final class StackHost {
         let insetX = CGFloat(anchor.inset.indices.contains(1) ? anchor.inset[1] : 16)
 
         switch anchor.edge {
+        // Corner anchors: size from manifest, offset by inset.
         case "top-right":    return NSRect(x: vf.maxX - w - insetX, y: vf.maxY - h - insetY, width: w, height: h)
         case "top-left":     return NSRect(x: vf.minX + insetX,     y: vf.maxY - h - insetY, width: w, height: h)
         case "bottom-right": return NSRect(x: vf.maxX - w - insetX, y: vf.minY + insetY,     width: w, height: h)
         case "bottom-left":  return NSRect(x: vf.minX + insetX,     y: vf.minY + insetY,     width: w, height: h)
-        default:             return NSRect(x: vf.midX - w/2,        y: vf.midY - h/2,        width: w, height: h)
+        // Edge anchors: stretch across the visible frame, manifest size is
+        // the THICKNESS only (height for top/bottom, width for left/right).
+        case "top":          return NSRect(x: vf.minX,              y: vf.maxY - h,          width: vf.width, height: h)
+        case "bottom":       return NSRect(x: vf.minX,              y: vf.minY,              width: vf.width, height: h)
+        case "left":         return NSRect(x: vf.minX,              y: vf.minY,              width: w,        height: vf.height)
+        case "right":        return NSRect(x: vf.maxX - w,          y: vf.minY,              width: w,        height: vf.height)
+        default:             return NSRect(x: vf.midX - w/2,        y: vf.midY - h/2,        width: w,        height: h)
         }
     }
 

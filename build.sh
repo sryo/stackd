@@ -36,6 +36,7 @@ SWIFT_SOURCES=(
   Sources/DataSources/Apps.swift
   Sources/DataSources/Icons.swift
   Sources/DataSources/AX.swift
+  Sources/DataSources/WindowsLifecycle.swift
 )
 
 C_SOURCES=(

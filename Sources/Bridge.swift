@@ -99,18 +99,16 @@ final class Bridge: NSObject, WKScriptMessageHandler {
 
     func handles(bang: String) -> Bool { handlesBangs.contains(bang) }
 
-    func fireBang(name: String, detail: [String: String]) {
+    /// Detail can hold any JSON-compatible Any (String, Int, Bool, Array, Dict).
+    /// Useful for system-fired bangs (window lifecycle) carrying structured
+    /// data — CLI-fired bangs still pass [String: String] which round-trips fine.
+    func fireBang(name: String, detail: [String: Any]) {
         guard let webView = webView else { return }
         let safe = name.lowercased().map { c -> Character in
             (c.isLetter || c.isNumber) ? c : "_"
         }
         let suffix = String(safe)
-        let pairs = detail.map { (k, v) -> String in
-            let sk = k.replacingOccurrences(of: "\"", with: "\\\"")
-            let sv = v.replacingOccurrences(of: "\"", with: "\\\"")
-            return "\"\(sk)\":\"\(sv)\""
-        }
-        let json = "{" + pairs.joined(separator: ",") + "}"
+        let json = Bridge.jsonify(detail)
         let script = "window.onBang_\(suffix) && window.onBang_\(suffix)(\(json));"
         DispatchQueue.main.async {
             webView.evaluateJavaScript(script, completionHandler: nil)

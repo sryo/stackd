@@ -75,6 +75,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             log("file change → reload")
             host?.reloadAll()
         }
+
+        // Wire window lifecycle → bangs. Polling at 1s; stacks subscribe via
+        // manifest handles: ["sd.window.created" | "destroyed" | "titleChanged"].
+        WindowsLifecycleObserver.shared.onCreate = { [weak host] info in
+            log("window created: \(info.app) — \(info.title) (id=\(info.id))")
+            host?.bang(name: "sd.window.created", detail: WindowsLifecycleObserver.detail(info))
+        }
+        WindowsLifecycleObserver.shared.onDestroy = { [weak host] info in
+            log("window destroyed: \(info.app) — \(info.title) (id=\(info.id))")
+            host?.bang(name: "sd.window.destroyed", detail: WindowsLifecycleObserver.detail(info))
+        }
+        WindowsLifecycleObserver.shared.onTitleChange = { [weak host] info, oldTitle in
+            log("window title changed: \(info.app) — '\(oldTitle)' → '\(info.title)'")
+            var d = WindowsLifecycleObserver.detail(info)
+            d["oldTitle"] = oldTitle
+            host?.bang(name: "sd.window.titleChanged", detail: d)
+        }
+        WindowsLifecycleObserver.shared.start()
     }
 
     func applicationWillTerminate(_ note: Notification) {
