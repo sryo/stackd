@@ -27,7 +27,7 @@ SWIFT_SOURCES=(
   Sources/DataSources/Appearance.swift
   Sources/DataSources/Input.swift
   Sources/DataSources/Defaults.swift
-  Sources/DataSources/NetSource.swift
+  Sources/DataSources/Network.swift
   Sources/DataSources/Audio.swift
   Sources/DataSources/Display.swift
   Sources/DataSources/MenuBar.swift
