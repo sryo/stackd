@@ -462,7 +462,6 @@ final class FrontmostWindowObserver: RefCountedObserver {
     static let shared = FrontmostWindowObserver()
     private override init() { super.init() }
 
-    private var current: AXAppObserver?
     private var currentTokens: [Token] = []
     private var workspaceToken: NSObjectProtocol?
 
@@ -491,35 +490,30 @@ final class FrontmostWindowObserver: RefCountedObserver {
                 NSWorkspace.shared.notificationCenter.removeObserver(t)
                 self.workspaceToken = nil
             }
-            // Explicitly cancel the per-notification Tokens so each
-            // AXObserverRemoveNotification fires while `current` is still
-            // alive — matching the Token contract instead of relying on
-            // deinit timing.
+            // Cancel the pool subscriptions so the AXObserverPool tears down
+            // its per-pid AXAppObserver when this was the last subscriber —
+            // matching the Token contract instead of waiting on deinit.
             for t in self.currentTokens { t.cancel() }
             self.currentTokens.removeAll()
-            self.current = nil
         }
     }
 
     private func installFor(pid: pid_t) {
-        // Cancel the previous app's Tokens before letting `current` drop —
-        // that pairs each AXObserverAddNotification with an explicit
-        // AXObserverRemoveNotification (instead of waiting for deinit).
+        // Drop the previous app's pool subscriptions before subscribing to the
+        // new pid so AXObserverPool can retire the old AXAppObserver if no
+        // other consumers are using it.
         for t in currentTokens { t.cancel() }
         currentTokens.removeAll()
-        current = nil
 
-        guard let obs = AXAppObserver(pid: pid) else { return }
         let handler: (String) -> Void = { [weak self] _ in self?.fire() }
         for notif in [
             kAXFocusedWindowChangedNotification,
             kAXMainWindowChangedNotification,
             kAXTitleChangedNotification
         ] {
-            if let t = obs.add(notification: notif as String, callback: handler) {
+            if let t = AXObserverPool.observe(pid: pid, notification: notif as String, callback: handler) {
                 currentTokens.append(t)
             }
         }
-        current = obs
     }
 }

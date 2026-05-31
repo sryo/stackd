@@ -464,3 +464,88 @@ final class AXAppObserver {
         )
     }
 }
+
+// MARK: - AXObserverPool: per-pid AXObserver pooling
+
+/// Process-wide AXObserver pool. Keeps one AXAppObserver per pid; multiple
+/// consumers observing the same (pid, notification) share the underlying
+/// AXObserverAddNotification registration via refcounting inside AXAppObserver.
+/// Prevents per-process Mach port exhaustion at >50 concurrent observations
+/// (each fresh AXObserverRef allocates a Mach port pair; the per-process port
+/// table caps around ~3000 and AXObserverCreate starts returning .failure
+/// once the cap is hit).
+///
+/// Thread convention: AX traffic is main-only. Pool dict mutations are guarded
+/// by NSLock so observer install/teardown can race safely against the Bridge's
+/// stack-scope drain, but the AXAppObserver instances themselves (and any AX
+/// API calls) must stay on the main thread.
+enum AXObserverPool {
+    private static var pool: [pid_t: AXAppObserver] = [:]
+    private static var subCounts: [pid_t: Int] = [:]
+    private static let lock = NSLock()
+
+    /// Subscribe to a notification on a pid. Returns a Token whose cancel
+    /// decrements the per-(pid, notification) refcount inside the shared
+    /// AXAppObserver AND the per-pid subscriber count in the pool. When the
+    /// pid's count hits 0, the AXAppObserver is dropped from the pool — its
+    /// deinit then retires the underlying AXObserverRef (freeing the Mach
+    /// port pair).
+    static func observe(
+        pid: pid_t,
+        notification: String,
+        callback: @escaping (String) -> Void
+    ) -> Token? {
+        lock.lock()
+        let observer: AXAppObserver
+        if let existing = pool[pid] {
+            observer = existing
+        } else {
+            guard let fresh = AXAppObserver(pid: pid) else {
+                lock.unlock()
+                return nil
+            }
+            pool[pid] = fresh
+            observer = fresh
+        }
+        guard let innerToken = observer.add(notification: notification, callback: callback) else {
+            // First-add failed; if we just created the observer and it has no
+            // subscriptions, drop it so a future call retries from scratch.
+            if subCounts[pid] == nil {
+                pool.removeValue(forKey: pid)
+            }
+            lock.unlock()
+            return nil
+        }
+        subCounts[pid] = (subCounts[pid] ?? 0) + 1
+        let dbgCount = pool.count
+        lock.unlock()
+        FileHandle.standardError.write(Data("AXObserverPool: +sub pid=\(pid) notif=\(notification) pool=\(dbgCount)\n".utf8))
+
+        var cancelled = false
+        return Token {
+            // Token cancel is idempotent — adoption into a StackScope plus
+            // an explicit cancel elsewhere shouldn't double-decrement.
+            lock.lock()
+            if cancelled { lock.unlock(); return }
+            cancelled = true
+            innerToken.cancel()
+            let n = (subCounts[pid] ?? 1) - 1
+            if n <= 0 {
+                subCounts.removeValue(forKey: pid)
+                pool.removeValue(forKey: pid)
+            } else {
+                subCounts[pid] = n
+            }
+            let dbgCount = pool.count
+            lock.unlock()
+            FileHandle.standardError.write(Data("AXObserverPool: -sub pid=\(pid) notif=\(notification) pool=\(dbgCount)\n".utf8))
+        }
+    }
+
+    /// Diagnostic — number of live AXObserverRefs the pool is currently
+    /// holding. Used by tests/smoke checks to confirm teardown.
+    static func liveObserverCount() -> Int {
+        lock.lock(); defer { lock.unlock() }
+        return pool.count
+    }
+}
