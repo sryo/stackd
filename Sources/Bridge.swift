@@ -425,6 +425,22 @@ final class Bridge: NSObject, WKScriptMessageHandler {
             Sound.beep(); return true
         },
 
+        // NaturalLanguage — language ID, tokenization, lemmas, sentence
+        // similarity. similarity() returns 0 if the embedding model for the
+        // detected language isn't downloaded (English ships by default).
+        .sync("nlp.language", permission: "nlp") { body in
+            NLP.language(text: body["text"] as? String ?? "") as Any? ?? NSNull()
+        },
+        .sync("nlp.tokens", permission: "nlp") { body in
+            NLP.tokens(text: body["text"] as? String ?? "", unit: body["unit"] as? String ?? "word")
+        },
+        .sync("nlp.lemmas", permission: "nlp") { body in
+            NLP.lemmas(text: body["text"] as? String ?? "")
+        },
+        .sync("nlp.similarity", permission: "nlp") { body in
+            NLP.similarity(body["a"] as? String ?? "", body["b"] as? String ?? "")
+        },
+
         // Process exec — async; respond from the completion callback.
         .custom("proc.exec", permission: "proc") { bridge, body, requestId in
             Proc.exec(

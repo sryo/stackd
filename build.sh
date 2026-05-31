@@ -55,6 +55,7 @@ SWIFT_SOURCES=(
   Sources/DataSources/AX.swift
   Sources/DataSources/Spaces.swift
   Sources/DataSources/Caffeinate.swift
+  Sources/DataSources/NLP.swift
   Sources/DataSources/Notify.swift
   Sources/DataSources/USB.swift
 )
@@ -75,6 +76,7 @@ swiftc -O \
   -framework CoreLocation \
   -framework AVFoundation \
   -framework OSAKit \
+  -framework NaturalLanguage \
   -target arm64-apple-macos13.0
 
 # Stage Runtime next to the binary so URLSchemeHandler can find it via

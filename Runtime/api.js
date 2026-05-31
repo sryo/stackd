@@ -433,6 +433,21 @@ export const sd = {
     info() { return request({ type: "host.info" }); },
     load:  channel("hostLoad")
   },
+  // Apple's NaturalLanguage framework — language ID, tokenization, lemmas,
+  // sentence similarity (via NLEmbedding cosine). All synchronous. Useful for
+  // Palette command ranking, smart-paste rewrites, "did you mean X" hints.
+  //   await sd.nlp.language("Hola mundo")            // → "es"
+  //   await sd.nlp.tokens("The quick brown fox")     // → ["The","quick",...]
+  //   await sd.nlp.lemmas("running dogs")            // → [{token,lemma,range},...]
+  //   await sd.nlp.similarity("open", "launch")      // → 0.72
+  // similarity() returns 0 when the embedding model for the detected language
+  // isn't on-device (English ships by default; others download on demand).
+  nlp: {
+    language(text)     { return request({ type: "nlp.language",   text: String(text ?? "") }); },
+    tokens(text, unit) { return request({ type: "nlp.tokens",     text: String(text ?? ""), unit }); },
+    lemmas(text)       { return request({ type: "nlp.lemmas",     text: String(text ?? "") }); },
+    similarity(a, b)   { return request({ type: "nlp.similarity", a: String(a ?? ""), b: String(b ?? "") }); }
+  },
   // Current location signal: { lat, lon, accuracy, altitude?, heading?, speed?, timestamp }.
   // macOS asks for Location authorization the first time a stack with the
   // "location" permission loads. Returns null until granted + first fix.

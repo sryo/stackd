@@ -1,0 +1,34 @@
+<!doctype html>
+<html><head><meta charset="utf-8"></head><body>
+<script type="module">
+  import { sd } from "sd://runtime/api.js";
+
+  (async () => {
+    const langEn = await sd.nlp.language("Hello world");
+    console.log("language(en):", langEn);
+
+    const langEs = await sd.nlp.language("Hola mundo");
+    console.log("language(es):", langEs);
+
+    const toks = await sd.nlp.tokens("The quick brown fox");
+    console.log("tokens:", toks, "count:", toks.length);
+
+    const sents = await sd.nlp.tokens("First sentence. Second sentence.", "sentence");
+    console.log("sentences:", sents);
+
+    const lems = await sd.nlp.lemmas("running dogs jumped");
+    console.log("lemmas:", JSON.stringify(lems));
+
+    const simHigh = await sd.nlp.similarity("open", "launch");
+    console.log("similarity(open, launch):", simHigh);
+
+    const simLow = await sd.nlp.similarity("open", "octopus");
+    console.log("similarity(open, octopus):", simLow);
+
+    const simSame = await sd.nlp.similarity("hello", "hello");
+    console.log("similarity(hello, hello):", simSame);
+
+    console.log("nlp-test done");
+  })();
+</script>
+</body></html>
