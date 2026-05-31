@@ -28,6 +28,7 @@ final class Bridge: NSObject, WKScriptMessageHandler {
     private var lastCamera: String?
     private var lastHostLoad: String?
     private var lastTouchDevice: String?
+    private var lastDisplayLink: String?
     private var settings: StackSettings?
     private var fsWatches: [Int: FSWatch] = [:]
     private var handlesBangs: Set<String> = []
@@ -142,6 +143,7 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         if manifest.permissions.contains("camera")     { startCamera() }
         if manifest.permissions.contains("host")       { startHost() }
         if manifest.permissions.contains("touchdevice") { startTouchDevice() }
+        if manifest.permissions.contains("displayLink") { startDisplayLink() }
         if manifest.permissions.contains("app") || manifest.permissions.contains("windows") {
             startWorkspace(includeApp: manifest.permissions.contains("app"),
                            includeWindows: manifest.permissions.contains("windows"))
@@ -816,6 +818,9 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         if permissions.contains("touchdevice"), let json = lastTouchDevice {
             push(channel: "touchdevice", json: json)
         }
+        if permissions.contains("displayLink"), let json = lastDisplayLink {
+            push(channel: "displayLink", json: json)
+        }
     }
 
     private func startBattery() {
@@ -1028,6 +1033,19 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         }
         pushFn()
         scope.adopt(CaffeinateObserver.shared.subscribe(pushFn))
+    }
+
+    private func startDisplayLink() {
+        let pushFn: () -> Void = { [weak self] in
+            guard let self = self else { return }
+            guard let snap = DisplayLink.snapshot() else { return }
+            let json = Bridge.jsonify(snap)
+            if json == self.lastDisplayLink { return }
+            self.lastDisplayLink = json
+            self.push(channel: "displayLink", json: json)
+        }
+        pushFn()
+        scope.adopt(DisplayLinkObserver.shared.subscribe(pushFn))
     }
 
     private func startSensors() {

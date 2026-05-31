@@ -1,0 +1,8 @@
+{
+  "id": "displaylink-test",
+  "name": "CVDisplayLink vsync tick",
+  "anchor": { "edge": "top-right", "inset": [16, 16] },
+  "size": { "w": 240, "h": 80 },
+  "clickThrough": true,
+  "permissions": ["displayLink"]
+}

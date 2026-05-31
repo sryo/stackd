@@ -420,6 +420,12 @@ export const sd = {
   // Use for "don't accumulate time while screen is off" (AppTimeout),
   // "stop drawing while asleep" (TimeTrail), etc.
   caffeinate: channel("caffeinate"),
+  // Vsync-locked frame tick. Refresh rate matches the display (60 Hz on
+  // standard, 120 Hz on ProMotion). Cheaper + smoother than rAF inside a
+  // heavy WebView, and aligned to the compositor's flip cadence — required
+  // by sd.overlay's CG context flushes.
+  //   sd.displayLink.subscribe(({ timestamp, frame, refreshRate }) => { ... })
+  displayLink: channel("displayLink"),
   // System info (one-shot) + load signal (polled 2s):
   //   await sd.host.info()  → { hostname, os: {name,version,build}, locale,
   //                              arch, cpuCount, ramMB }

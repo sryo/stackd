@@ -57,6 +57,7 @@ SWIFT_SOURCES=(
   Sources/DataSources/AX.swift
   Sources/DataSources/Spaces.swift
   Sources/DataSources/Caffeinate.swift
+  Sources/DataSources/DisplayLink.swift
   Sources/DataSources/NLP.swift
   Sources/DataSources/Notify.swift
   Sources/DataSources/TouchDevice.swift
@@ -76,6 +77,7 @@ swiftc -O \
   -framework AVFoundation \
   -framework Carbon \
   -framework CoreLocation \
+  -framework CoreVideo \
   -framework IOKit \
   -framework MultitouchSupport \
   -framework NaturalLanguage \
