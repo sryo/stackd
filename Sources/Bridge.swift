@@ -289,42 +289,44 @@ final class Bridge: NSObject, WKScriptMessageHandler {
                           key:      body["key"]      as? String ?? "")
         },
 
-        // Audio
-        .sync("audio.setVolume", permission: "audio") { body in
+        // Audio — Bool side-effect ops, deny → false.
+        .sync("audio.setVolume", permission: "audio", denyValue: false) { body in
             Audio.setVolume(Float((body["value"] as? Double) ?? 0))
         },
-        .sync("audio.setMuted", permission: "audio") { body in
+        .sync("audio.setMuted", permission: "audio", denyValue: false) { body in
             Audio.setMuted((body["value"] as? Bool) ?? false)
         },
 
         // Display
-        .sync("display.setBrightness", permission: "display") { body in
+        .sync("display.setBrightness", permission: "display", denyValue: false) { body in
             Display.setBrightness(
                 displayID: CGDirectDisplayID((body["displayID"] as? Int) ?? 0),
                 Float((body["value"] as? Double) ?? 0))
         },
 
         // Menubar suppression — refcounted via per-Bridge stack of tokens.
-        .syncBridge("menubar.suppress", permission: "menubar") { bridge, _ in
+        .syncBridge("menubar.suppress", permission: "menubar", denyValue: false) { bridge, _ in
             guard let token = MenuBarVisibility.suppress() else { return false }
             bridge.menubarSuppressions.append(token)
             return true
         },
-        .syncBridge("menubar.restore", permission: "menubar") { bridge, _ in
+        .syncBridge("menubar.restore", permission: "menubar", denyValue: false) { bridge, _ in
             guard let t = bridge.menubarSuppressions.popLast() else { return false }
             t.cancel(); return true
         },
 
         // Media
-        .sync("media.command", permission: "media") { body in
+        .sync("media.command", permission: "media", denyValue: false) { body in
             Media.command(body["name"] as? String ?? "")
         },
 
-        // Per-stack settings (k/v scoped to this stack's id)
+        // Per-stack settings (k/v scoped to this stack's id). Write-style ops
+        // (set/delete) deny → false; get → null; all → empty dict (matches
+        // pre-refactor handler returns).
         .syncBridge("settings.get",    permission: "settings") { b, body in b.settings?.get(body["key"] as? String ?? "") as Any? },
-        .syncBridge("settings.set",    permission: "settings") { b, body in b.settings?.set(body["key"] as? String ?? "", body["value"]); return true },
-        .syncBridge("settings.delete", permission: "settings") { b, body in b.settings?.delete(body["key"] as? String ?? ""); return true },
-        .syncBridge("settings.all",    permission: "settings") { b, _    in b.settings?.all() ?? [:] },
+        .syncBridge("settings.set",    permission: "settings", denyValue: false) { b, body in b.settings?.set(body["key"] as? String ?? "", body["value"]); return true },
+        .syncBridge("settings.delete", permission: "settings", denyValue: false) { b, body in b.settings?.delete(body["key"] as? String ?? ""); return true },
+        .syncBridge("settings.all",    permission: "settings", denyValue: [String: Any]()) { b, _ in b.settings?.all() ?? [:] },
 
         // Filesystem
         .sync("fs.read", permission: "fs") { body in FS.read(path: body["path"] as? String ?? "") },
@@ -332,7 +334,7 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         .sync("fs.list", permission: "fs") { body in
             FS.list(dir: body["dir"] as? String ?? "", includeHidden: body["hidden"] as? Bool ?? false)
         },
-        .custom("fs.watch.start", permission: "fs") { bridge, body, requestId in
+        .custom("fs.watch.start", permission: "fs", denyValue: false) { bridge, body, requestId in
             let path = body["path"] as? String ?? ""
             let watchId = body["watchId"] as? Int ?? -1
             let watch = FSWatch(paths: [path]) { [weak bridge] events in
@@ -342,7 +344,7 @@ final class Bridge: NSObject, WKScriptMessageHandler {
             bridge.fsWatches[watchId] = w
             bridge.respond(requestId: requestId, value: true)
         },
-        .custom("fs.watch.stop") { bridge, body, requestId in
+        .custom("fs.watch.stop", permission: "fs", denyValue: false) { bridge, body, requestId in
             let watchId = body["watchId"] as? Int ?? -1
             if let w = bridge.fsWatches.removeValue(forKey: watchId) {
                 w.stop(); bridge.respond(requestId: requestId, value: true)
@@ -353,8 +355,19 @@ final class Bridge: NSObject, WKScriptMessageHandler {
 
         // Pasteboard
         .sync("pasteboard.get", permission: "pasteboard") { _ in Pasteboard.getString() },
-        .sync("pasteboard.set", permission: "pasteboard") { body in
+        .sync("pasteboard.set", permission: "pasteboard", denyValue: false) { body in
             Pasteboard.setString(body["value"] as? String ?? "")
+        },
+
+        // Native banner notifications via osascript display notification.
+        // Fire-and-forget — see Notify.swift for the bundle-id rationale.
+        .sync("notify.show", permission: "notify", denyValue: false) { body in
+            Notify.show(
+                title:    body["title"]    as? String ?? "",
+                body:     body["body"]     as? String ?? "",
+                subtitle: body["subtitle"] as? String,
+                sound:    body["sound"]    as? String
+            )
         },
 
         // Process exec — async; respond from the completion callback.
@@ -369,30 +382,30 @@ final class Bridge: NSObject, WKScriptMessageHandler {
             }
         },
 
-        // Event synthesis
-        .sync("events.type", permission: "events") { body in
+        // Event synthesis — Bool side-effect ops, deny → false.
+        .sync("events.type", permission: "events", denyValue: false) { body in
             EventsSynth.type(body["value"] as? String ?? ""); return true
         },
-        .sync("events.key", permission: "events") { body in
+        .sync("events.key", permission: "events", denyValue: false) { body in
             EventsSynth.key(body["spec"] as? String ?? "")
         },
-        .sync("events.scroll", permission: "events") { body in
+        .sync("events.scroll", permission: "events", denyValue: false) { body in
             EventsSynth.scroll(
                 dx: Int32(body["dx"] as? Int ?? 0),
                 dy: Int32(body["dy"] as? Int ?? 0))
         },
-        .sync("events.click", permission: "events") { body in
+        .sync("events.click", permission: "events", denyValue: false) { body in
             EventsSynth.click(
                 x: body["x"] as? Double ?? 0,
                 y: body["y"] as? Double ?? 0,
                 button: body["button"] as? String ?? "left")
         },
 
-        // Apps
-        .sync("apps.launch", permission: "apps") { body in Apps.launch(bundleId: body["bundleId"] as? String ?? "") },
-        .sync("apps.focus",  permission: "apps") { body in Apps.focus( bundleId: body["bundleId"] as? String ?? "") },
-        .sync("apps.kill",   permission: "apps") { body in Apps.kill(  bundleId: body["bundleId"] as? String ?? "", force: body["force"] as? Bool ?? false) },
-        .sync("apps.hide",   permission: "apps") { body in Apps.hide(  bundleId: body["bundleId"] as? String ?? "") },
+        // Apps — Bool side-effect ops, deny → false.
+        .sync("apps.launch", permission: "apps", denyValue: false) { body in Apps.launch(bundleId: body["bundleId"] as? String ?? "") },
+        .sync("apps.focus",  permission: "apps", denyValue: false) { body in Apps.focus( bundleId: body["bundleId"] as? String ?? "") },
+        .sync("apps.kill",   permission: "apps", denyValue: false) { body in Apps.kill(  bundleId: body["bundleId"] as? String ?? "", force: body["force"] as? Bool ?? false) },
+        .sync("apps.hide",   permission: "apps", denyValue: false) { body in Apps.hide(  bundleId: body["bundleId"] as? String ?? "") },
 
         // Icons
         .sync("icons.app",  permission: "icons") { body in
@@ -402,28 +415,30 @@ final class Bridge: NSObject, WKScriptMessageHandler {
             Icons.forFile(path: body["path"] as? String ?? "", size: body["size"] as? Int ?? 64)
         },
 
-        // Windows — focused-window helpers operate on the AX focused window of frontmost app
-        .sync("windows.setFrame",   permission: "windows") { body in
+        // Windows — focused-window helpers operate on the AX focused window
+        // of frontmost app. All Bool-returning except byId.frame (returns
+        // dict or nil).
+        .sync("windows.setFrame",   permission: "windows", denyValue: false) { body in
             Windows.setFocusedFrame(
                 x: body["x"] as? Double ?? 0, y: body["y"] as? Double ?? 0,
                 w: body["w"] as? Double ?? 0, h: body["h"] as? Double ?? 0)
         },
-        .sync("windows.minimize",   permission: "windows") { body in Windows.minimizeFocused(body["value"] as? Bool ?? true) },
-        .sync("windows.fullscreen", permission: "windows") { body in Windows.fullscreenFocused(body["value"] as? Bool ?? true) },
-        .sync("windows.raise",      permission: "windows") { _    in Windows.raiseFocused() },
+        .sync("windows.minimize",   permission: "windows", denyValue: false) { body in Windows.minimizeFocused(body["value"] as? Bool ?? true) },
+        .sync("windows.fullscreen", permission: "windows", denyValue: false) { body in Windows.fullscreenFocused(body["value"] as? Bool ?? true) },
+        .sync("windows.raise",      permission: "windows", denyValue: false) { _    in Windows.raiseFocused() },
 
         // Windows-by-id
-        .sync("windows.byId.setFrame",   permission: "windows") { body in
+        .sync("windows.byId.setFrame",   permission: "windows", denyValue: false) { body in
             WindowsByID.setFrame(
                 windowID: CGWindowID((body["id"] as? Int) ?? 0),
                 x: body["x"] as? Double ?? 0, y: body["y"] as? Double ?? 0,
                 w: body["w"] as? Double ?? 0, h: body["h"] as? Double ?? 0)
         },
-        .sync("windows.byId.minimize",   permission: "windows") { body in WindowsByID.minimize(  windowID: CGWindowID((body["id"] as? Int) ?? 0), body["value"] as? Bool ?? true) },
-        .sync("windows.byId.fullscreen", permission: "windows") { body in WindowsByID.fullscreen(windowID: CGWindowID((body["id"] as? Int) ?? 0), body["value"] as? Bool ?? true) },
-        .sync("windows.byId.raise",      permission: "windows") { body in WindowsByID.raise(     windowID: CGWindowID((body["id"] as? Int) ?? 0)) },
-        .sync("windows.byId.focus",      permission: "windows") { body in WindowsByID.focus(     windowID: CGWindowID((body["id"] as? Int) ?? 0)) },
-        .sync("windows.byId.close",      permission: "windows") { body in WindowsByID.close(     windowID: CGWindowID((body["id"] as? Int) ?? 0)) },
+        .sync("windows.byId.minimize",   permission: "windows", denyValue: false) { body in WindowsByID.minimize(  windowID: CGWindowID((body["id"] as? Int) ?? 0), body["value"] as? Bool ?? true) },
+        .sync("windows.byId.fullscreen", permission: "windows", denyValue: false) { body in WindowsByID.fullscreen(windowID: CGWindowID((body["id"] as? Int) ?? 0), body["value"] as? Bool ?? true) },
+        .sync("windows.byId.raise",      permission: "windows", denyValue: false) { body in WindowsByID.raise(     windowID: CGWindowID((body["id"] as? Int) ?? 0)) },
+        .sync("windows.byId.focus",      permission: "windows", denyValue: false) { body in WindowsByID.focus(     windowID: CGWindowID((body["id"] as? Int) ?? 0)) },
+        .sync("windows.byId.close",      permission: "windows", denyValue: false) { body in WindowsByID.close(     windowID: CGWindowID((body["id"] as? Int) ?? 0)) },
         .sync("windows.byId.frame",      permission: "windows") { body in
             guard let r = WindowsByID.frame(windowID: CGWindowID((body["id"] as? Int) ?? 0)) else { return nil }
             return [
@@ -432,8 +447,8 @@ final class Bridge: NSObject, WKScriptMessageHandler {
             ] as [String: Any]
         },
 
-        // Spaces
-        .sync("spaces.windowSpaces", permission: "spaces") { body in
+        // Spaces — returns array; pre-refactor returned `[]` on deny.
+        .sync("spaces.windowSpaces", permission: "spaces", denyValue: [NSNumber]()) { body in
             Spaces.windowSpaces(windowID: UInt32((body["id"] as? Int) ?? 0)).map { NSNumber(value: $0) }
         },
 
@@ -450,8 +465,8 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         .ax("ax.parameterizedAttribute")  { b, body in AX.parameterizedAttribute(handle: (body["handle"] as? Int) ?? -1, name: body["name"] as? String ?? "", param: body["param"], store: b.axHandles) },
         .ax("ax.actionNames")             { b, body in AX.actionNames(handle: (body["handle"] as? Int) ?? -1, store: b.axHandles) },
         .ax("ax.isAttributeSettable")     { b, body in AX.isAttributeSettable(handle: (body["handle"] as? Int) ?? -1, name: body["name"] as? String ?? "", store: b.axHandles) },
-        .ax("ax.setAttribute")            { b, body in AX.setAttribute(handle: (body["handle"] as? Int) ?? -1, name: body["name"] as? String ?? "", value: body["value"], store: b.axHandles) },
-        .ax("ax.performAction")           { b, body in AX.performAction(handle: (body["handle"] as? Int) ?? -1, action: body["action"] as? String ?? "", store: b.axHandles) },
+        .ax("ax.setAttribute", denyValue: false) { b, body in AX.setAttribute(handle: (body["handle"] as? Int) ?? -1, name: body["name"] as? String ?? "", value: body["value"], store: b.axHandles) },
+        .ax("ax.performAction", denyValue: false) { b, body in AX.performAction(handle: (body["handle"] as? Int) ?? -1, action: body["action"] as? String ?? "", store: b.axHandles) },
         .ax("ax.children")                { b, body in AX.children(handle: (body["handle"] as? Int) ?? -1, store: b.axHandles) },
         .ax("ax.parent")                  { b, body in AX.parent(handle: (body["handle"] as? Int) ?? -1, store: b.axHandles) },
         .ax("ax.role")                    { b, body in AX.role(handle: (body["handle"] as? Int) ?? -1, store: b.axHandles) },
@@ -461,7 +476,7 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         .ax("ax.releaseAll", permission: nil) { b, _    in b.axHandles.releaseAll(); return true },
 
         // Invocable-window control — async (must hop to main for AppKit).
-        .custom("window.invoke") { bridge, _, requestId in
+        .custom("window.invoke", denyValue: false) { bridge, _, requestId in
             DispatchQueue.main.async { [weak bridge] in
                 if let win = bridge?.webView?.window as? StackWindow, win.invocable {
                     win.invoke()
@@ -471,7 +486,7 @@ final class Bridge: NSObject, WKScriptMessageHandler {
                 }
             }
         },
-        .custom("window.dismiss") { bridge, _, requestId in
+        .custom("window.dismiss", denyValue: false) { bridge, _, requestId in
             DispatchQueue.main.async { [weak bridge] in
                 if let win = bridge?.webView?.window as? StackWindow, win.invocable {
                     win.dismiss()
@@ -512,28 +527,28 @@ final class Bridge: NSObject, WKScriptMessageHandler {
                 bridge.respond(requestId: requestId, value: id)
             }
         },
-        .syncBridge("menubar.item.setTitle", permission: "menubar.item") { b, body in
+        .syncBridge("menubar.item.setTitle", permission: "menubar.item", denyValue: false) { b, body in
             guard let id = body["id"] as? Int, let h = b.statusItems[id] else { return false }
             h.setTitle(body["title"] as? String)
             return true
         },
-        .syncBridge("menubar.item.setIcon", permission: "menubar.item") { b, body in
+        .syncBridge("menubar.item.setIcon", permission: "menubar.item", denyValue: false) { b, body in
             guard let id = body["id"] as? Int, let h = b.statusItems[id] else { return false }
             let iconDict = body["icon"] as? [String: Any]
             h.setIcon(iconDict.map(Bridge.parseIconSpec))
             return true
         },
-        .syncBridge("menubar.item.setMenu", permission: "menubar.item") { b, body in
+        .syncBridge("menubar.item.setMenu", permission: "menubar.item", denyValue: false) { b, body in
             guard let id = body["id"] as? Int, let h = b.statusItems[id] else { return false }
             h.setMenu(body["items"] as? [[String: Any]])
             return true
         },
-        .syncBridge("menubar.item.setTooltip", permission: "menubar.item") { b, body in
+        .syncBridge("menubar.item.setTooltip", permission: "menubar.item", denyValue: false) { b, body in
             guard let id = body["id"] as? Int, let h = b.statusItems[id] else { return false }
             h.setTooltip(body["tooltip"] as? String)
             return true
         },
-        .syncBridge("menubar.item.remove", permission: "menubar.item") { b, body in
+        .syncBridge("menubar.item.remove", permission: "menubar.item", denyValue: false) { b, body in
             guard let id = body["id"] as? Int, let h = b.statusItems.removeValue(forKey: id) else { return false }
             h.remove()
             return true
@@ -543,7 +558,9 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         // Static manifest hotkeys cover the common case; this lets palettes /
         // modal stacks register transient chords on demand (Palette verb mode,
         // ChoiceBox, ForceKeys). Returns the id on success, null on parse error.
-        .custom("hotkey.bind") { bridge, body, requestId in
+        // Gated on "hotkey" permission so dynamic registration is auditable
+        // (manifest hotkeys are already inspectable in stack.json).
+        .custom("hotkey.bind", permission: "hotkey") { bridge, body, requestId in
             guard let spec = body["spec"] as? String else {
                 bridge.respond(requestId: requestId, value: NSNull()); return
             }
@@ -565,7 +582,7 @@ final class Bridge: NSObject, WKScriptMessageHandler {
             bridge.hotkeyTokens[id] = token
             bridge.respond(requestId: requestId, value: id)
         },
-        .syncBridge("hotkey.unbind") { b, body in
+        .syncBridge("hotkey.unbind", permission: "hotkey", denyValue: false) { b, body in
             guard let id = body["id"] as? Int,
                   let token = b.hotkeyTokens.removeValue(forKey: id) else { return false }
             token.cancel()

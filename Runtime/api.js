@@ -335,6 +335,21 @@ export const sd = {
   // Per-screen Spaces info via SkyLight private SPI:
   //   { [screenUUID]: { spaces: [id, ...], active: id|null, isFullscreen: bool } }
   // Fires on NSWorkspaceActiveSpaceDidChangeNotification.
+  // Banner notifications via macOS Notification Center. Fire-and-forget.
+  // Attributed to "Script Editor" (osascript) until stackd ships as a
+  // bundled .app — click handling deferred until then.
+  //   await sd.notify.show({ title: "AppTimeout", body: "Slack closes in 1 min" });
+  notify: {
+    show(spec) {
+      return request({
+        type: "notify.show",
+        title: (spec && spec.title) || "",
+        body: (spec && spec.body) || "",
+        subtitle: spec && spec.subtitle,
+        sound: spec && spec.sound
+      });
+    }
+  },
   // System sleep / screen-lock signal: { sleeping, locked }.
   // Sleeping flips true between willSleep and didWake; locked flips true
   // between com.apple.screenIs{Locked,Unlocked} distributed notifications.
@@ -369,12 +384,16 @@ export const sd = {
 // `signal` can be a single sd.* channel/signal OR an array of them; the
 // formatter is called with each .peek() value spread as args.
 function applyToTarget(target, value) {
-  if (target instanceof Element) { target.textContent = value; return; }
+  if (target instanceof Element) {
+    // textContent coerces null/undefined to "null"/"undefined" strings — guard explicitly.
+    target.textContent = value == null ? "" : value;
+    return;
+  }
   if (Array.isArray(target)) {
     const [el, kind] = target;
-    if (!(el instanceof Element)) return;
-    if (kind === "html")              el.innerHTML = value;
-    else if (kind === "value")        el.value = value;
+    if (!(el instanceof Element) || typeof kind !== "string") return;
+    if (kind === "html")              el.innerHTML = value == null ? "" : String(value);
+    else if (kind === "value")        el.value     = value == null ? "" : value;
     else if (kind.startsWith("data-"))  el.dataset[kind.slice(5)] = value == null ? "" : String(value);
     else if (kind.startsWith("attr."))  { value == null ? el.removeAttribute(kind.slice(5)) : el.setAttribute(kind.slice(5), String(value)); }
     else if (kind.startsWith("style.")) el.style.setProperty(kind.slice(6), value == null ? "" : String(value));
@@ -382,17 +401,47 @@ function applyToTarget(target, value) {
   }
 }
 
+// All live sd.bind subscriptions, released en masse on `stackd:unload`. Caps
+// the worst case of `sd.tpl` leaking subscriptions (detached DOM nodes whose
+// bindings stay subscribed) at stack lifetime. Within a stack, callers that
+// churn dynamic UI should hold the unsub from sd.bind and call it themselves.
+const __sdBindUnsubs = new Set();
+window.addEventListener("stackd:unload", () => {
+  for (const u of __sdBindUnsubs) { try { u(); } catch (e) {} }
+  __sdBindUnsubs.clear();
+});
+
 function sdBind(target, source, fmt) {
   const sources = Array.isArray(source) ? source : [source];
+  // Type guard: the most common misuse is passing the wrong object (e.g. the
+  // namespace `sd.windows` instead of `sd.windows.focused`, or a MenubarItem
+  // proxy from sd.menubar.addItem). Catch it loudly instead of throwing
+  // deep inside .peek().
+  for (const s of sources) {
+    if (!s || typeof s.peek !== "function" || typeof s.subscribe !== "function") {
+      throw new TypeError(
+        "sd.bind: source is not a signal (missing .peek/.subscribe). " +
+        "Use a channel like sd.battery or sd.windows.focused, not a namespace or proxy."
+      );
+    }
+  }
   const format  = fmt || ((v) => v);
   const apply = () => applyToTarget(target, format(...sources.map(s => s.peek())));
   const unsubs = sources.map(s => s.subscribe(apply));
-  return () => { for (const u of unsubs) u(); };
+  const dispose = () => {
+    for (const u of unsubs) u();
+    __sdBindUnsubs.delete(dispose);
+  };
+  __sdBindUnsubs.add(dispose);
+  return dispose;
 }
 
-// `sd.tpl` — tagged-template helper. Returns a freshly-built Element from an
-// HTML string with `${signal}` interpolations auto-bound, and `${value}`
-// non-signal interpolations rendered as text. ~30 LOC, no diffing.
+// `sd.tpl` — tagged-template helper. Returns an Element (single root) or a
+// DocumentFragment (multiple top-level nodes) with `${signal}` interpolations
+// auto-bound and `${value}` non-signal interpolations rendered as text.
+// Query against the fragment (not its firstElementChild) so a top-level
+// `${signal}` interpolation — where the placeholder span IS the root — still
+// binds. querySelectorAll on an Element skips itself.
 let __sdTplCounter = 0;
 function sdTpl(strings, ...exprs) {
   const slotAttr = `data-sd-slot-${__sdTplCounter++}`;
@@ -400,15 +449,23 @@ function sdTpl(strings, ...exprs) {
   const html = strings.reduce((acc, s, i) => acc + s + (placeholders[i] || ""), "");
   const tmpl = document.createElement("template");
   tmpl.innerHTML = html.trim();
-  const root = tmpl.content.firstElementChild;
-  if (!root) return document.createDocumentFragment();
-  root.querySelectorAll(`[${slotAttr}]`).forEach(slot => {
+  tmpl.content.querySelectorAll(`[${slotAttr}]`).forEach(slot => {
     const idx = +slot.getAttribute(slotAttr);
     const expr = exprs[idx];
-    if (expr && typeof expr.subscribe === "function") sdBind(slot, expr);
-    else slot.textContent = expr == null ? "" : String(expr);
+    if (expr && typeof expr.subscribe === "function" && typeof expr.peek === "function") {
+      sdBind(slot, expr);
+    } else {
+      slot.textContent = expr == null ? "" : String(expr);
+    }
   });
-  return root;
+  // If the template produces exactly one Element with no surrounding text
+  // nodes, return that Element (common case). Otherwise return the fragment
+  // so callers can `.append(...)` multi-root templates.
+  const frag = tmpl.content;
+  if (frag.childNodes.length === 1 && frag.firstChild instanceof Element) {
+    return frag.firstElementChild;
+  }
+  return frag;
 }
 
 sd.bind = sdBind;

@@ -46,6 +46,7 @@ SWIFT_SOURCES=(
   Sources/DataSources/Spaces.swift
   Sources/DataSources/PopupMenu.swift
   Sources/DataSources/Caffeinate.swift
+  Sources/DataSources/Notify.swift
 )
 
 C_SOURCES=(
