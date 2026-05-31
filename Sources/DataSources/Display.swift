@@ -69,27 +69,27 @@ enum DisplayServicesShim {
     }()
 }
 
-final class DisplayObserver {
+final class DisplayObserver: RefCountedObserver {
     static let shared = DisplayObserver()
-    private var subs: [() -> Void] = []
-    private var pollTimer: Timer?
+    private override init() { super.init() }
 
-    private init() {
-        NotificationCenter.default.addObserver(
+    override func install() -> Token {
+        let nc = NotificationCenter.default
+        let screenToken = nc.addObserver(
             forName: NSApplication.didChangeScreenParametersNotification,
             object: nil, queue: .main
         ) { [weak self] _ in self?.fire() }
 
-        // Brightness has no notification; poll every 2s for the change-detection guard
-        // in Bridge to swallow.
+        // Brightness has no notification; poll every 2s while at least one
+        // stack subscribes. Bridge's lastDisplay JSON dedup absorbs no-ops.
         let timer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
             self?.fire()
         }
         RunLoop.main.add(timer, forMode: .common)
-        pollTimer = timer
-    }
 
-    func subscribe(_ cb: @escaping () -> Void) { subs.append(cb) }
-    func unsubscribeAll() { subs.removeAll() }
-    private func fire() { for cb in subs { cb() } }
+        return Token {
+            nc.removeObserver(screenToken)
+            timer.invalidate()
+        }
+    }
 }

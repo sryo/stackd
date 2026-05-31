@@ -100,47 +100,85 @@ enum Audio {
     )
 }
 
-final class AudioObserver {
+final class AudioObserver: RefCountedObserver {
     static let shared = AudioObserver()
-    private var subs: [() -> Void] = []
+    private override init() { super.init() }
+
+    // CoreAudio listener blocks. Stored so install() can return a Token that
+    // removes the exact blocks we installed (not by reference; we hold them).
+    private var deviceChangeBlock: AudioObjectPropertyListenerBlock?
+    private var volumeBlock:       AudioObjectPropertyListenerBlock?
+    private var muteBlock:         AudioObjectPropertyListenerBlock?
     private var boundDevice: AudioDeviceID?
 
-    private init() {
-        installDeviceChangeListener()
-        rebind()
+    private func notify() {
+        DispatchQueue.main.async { [weak self] in self?.fire() }
     }
 
-    func subscribe(_ cb: @escaping () -> Void) { subs.append(cb) }
-    func unsubscribeAll() { subs.removeAll() }
-
-    private func fire() {
-        DispatchQueue.main.async {
-            for cb in self.subs { cb() }
+    override func install() -> Token {
+        // Default-output-device change → re-bind volume / mute listeners onto
+        // the new device and notify subscribers.
+        let dev: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+            self?.rebind()
+            self?.notify()
         }
-    }
-
-    private func installDeviceChangeListener() {
-        var addr = AudioObjectPropertyAddress(
+        deviceChangeBlock = dev
+        var devAddr = AudioObjectPropertyAddress(
             mSelector: kAudioHardwarePropertyDefaultOutputDevice,
             mScope:    kAudioObjectPropertyScopeGlobal,
             mElement:  kAudioObjectPropertyElementMain
         )
-        let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
-            self?.rebind()
-            self?.fire()
-        }
         AudioObjectAddPropertyListenerBlock(
-            AudioObjectID(kAudioObjectSystemObject), &addr,
-            DispatchQueue.global(qos: .utility), block)
+            AudioObjectID(kAudioObjectSystemObject), &devAddr,
+            DispatchQueue.global(qos: .utility), dev)
+
+        rebind()
+
+        return Token { [weak self] in
+            guard let self = self else { return }
+            var devAddr = AudioObjectPropertyAddress(
+                mSelector: kAudioHardwarePropertyDefaultOutputDevice,
+                mScope:    kAudioObjectPropertyScopeGlobal,
+                mElement:  kAudioObjectPropertyElementMain
+            )
+            if let blk = self.deviceChangeBlock {
+                AudioObjectRemovePropertyListenerBlock(
+                    AudioObjectID(kAudioObjectSystemObject), &devAddr,
+                    DispatchQueue.global(qos: .utility), blk)
+            }
+            self.unbindDevice()
+            self.deviceChangeBlock = nil
+        }
     }
 
     private func rebind() {
+        // Drop volume/mute listeners on the previous device first.
+        unbindDevice()
         guard let id = Audio.defaultOutputDevice() else { return }
         boundDevice = id
-        let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in self?.fire() }
-        var volAddr = Audio.mainVolumeAddress
+
+        let vol: AudioObjectPropertyListenerBlock = { [weak self] _, _ in self?.notify() }
+        let mute: AudioObjectPropertyListenerBlock = { [weak self] _, _ in self?.notify() }
+        volumeBlock = vol
+        muteBlock   = mute
+        var volAddr  = Audio.mainVolumeAddress
         var muteAddr = Audio.muteAddress
-        AudioObjectAddPropertyListenerBlock(id, &volAddr,  DispatchQueue.global(qos: .utility), block)
-        AudioObjectAddPropertyListenerBlock(id, &muteAddr, DispatchQueue.global(qos: .utility), block)
+        AudioObjectAddPropertyListenerBlock(id, &volAddr,  DispatchQueue.global(qos: .utility), vol)
+        AudioObjectAddPropertyListenerBlock(id, &muteAddr, DispatchQueue.global(qos: .utility), mute)
+    }
+
+    private func unbindDevice() {
+        guard let id = boundDevice else { return }
+        var volAddr  = Audio.mainVolumeAddress
+        var muteAddr = Audio.muteAddress
+        if let blk = volumeBlock {
+            AudioObjectRemovePropertyListenerBlock(id, &volAddr,  DispatchQueue.global(qos: .utility), blk)
+        }
+        if let blk = muteBlock {
+            AudioObjectRemovePropertyListenerBlock(id, &muteAddr, DispatchQueue.global(qos: .utility), blk)
+        }
+        boundDevice = nil
+        volumeBlock = nil
+        muteBlock   = nil
     }
 }

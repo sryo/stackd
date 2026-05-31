@@ -22,22 +22,25 @@ enum MenuBarVisibility {
     private static let lock = NSLock()
     private static var suppressorCount = 0
 
-    @discardableResult
-    static func suppress() -> Bool {
-        guard let fn = SkyLight.setMenuBarVisibility else { return false }
-        lock.lock(); defer { lock.unlock() }
+    /// Each suppress() returns a Token whose cancel decrements the refcount.
+    /// Stacks adopt the Token into their scope so unload always pairs with
+    /// suppression — no more leaks if a stack dies between suppress/restore.
+    /// Returns nil if SkyLight failed to load.
+    static func suppress() -> Token? {
+        guard let fn = SkyLight.setMenuBarVisibility else { return nil }
+        lock.lock()
         suppressorCount += 1
         if suppressorCount == 1 { fn(false) }
-        return true
-    }
-
-    @discardableResult
-    static func restore() -> Bool {
-        guard let fn = SkyLight.setMenuBarVisibility else { return false }
-        lock.lock(); defer { lock.unlock() }
-        suppressorCount = max(0, suppressorCount - 1)
-        if suppressorCount == 0 { fn(true) }
-        return true
+        lock.unlock()
+        var released = false
+        return Token {
+            lock.lock(); defer { lock.unlock() }
+            // Guard against double-cancel (adopt + explicit cancel).
+            guard !released else { return }
+            released = true
+            suppressorCount = max(0, suppressorCount - 1)
+            if suppressorCount == 0 { fn(true) }
+        }
     }
 
     /// Called on daemon shutdown / reload so we never leak the menu bar hidden.

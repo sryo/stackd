@@ -69,11 +69,11 @@ enum Apps {
     }
 }
 
-final class AppsObserver {
+final class AppsObserver: RefCountedObserver {
     static let shared = AppsObserver()
-    private var subs: [() -> Void] = []
+    private override init() { super.init() }
 
-    private init() {
+    override func install() -> Token {
         let nc = NSWorkspace.shared.notificationCenter
         let names: [NSNotification.Name] = [
             NSWorkspace.didLaunchApplicationNotification,
@@ -82,14 +82,13 @@ final class AppsObserver {
             NSWorkspace.didUnhideApplicationNotification,
             NSWorkspace.didActivateApplicationNotification
         ]
-        for name in names {
+        let tokens = names.map { name in
             nc.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
                 self?.fire()
             }
         }
+        return Token {
+            for t in tokens { nc.removeObserver(t) }
+        }
     }
-
-    func subscribe(_ cb: @escaping () -> Void) { subs.append(cb) }
-    func unsubscribeAll() { subs.removeAll() }
-    private func fire() { for cb in subs { cb() } }
 }

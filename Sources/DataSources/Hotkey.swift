@@ -5,23 +5,16 @@ final class HotkeyRegistry {
     static let shared = HotkeyRegistry()
 
     private var handlers: [UInt32: () -> Void] = [:]
+    private var refs: [UInt32: EventHotKeyRef] = [:]
     private var nextId: UInt32 = 1
-    private var refs: [EventHotKeyRef] = []
     private var eventHandler: EventHandlerRef?
 
     private init() { installEventHandler() }
 
-    func unbindAll() {
-        for ref in refs {
-            UnregisterEventHotKey(ref)
-        }
-        refs.removeAll()
-        handlers.removeAll()
-        nextId = 1
-    }
-
-    // Parse "ctrl+alt+cmd+b" → (keyCode, modifierFlags).
-    func bind(spec: String, callback: @escaping () -> Void) -> UInt32? {
+    // Parse "ctrl+alt+cmd+b" → (keyCode, modifierFlags). Returns a Token whose
+    // cancel unregisters the Carbon hotkey and removes the handler entry.
+    // Caller should adopt the Token into their StackScope; dropping it leaks.
+    func bind(spec: String, callback: @escaping () -> Void) -> Token? {
         let parts = spec.lowercased().split(separator: "+").map { $0.trimmingCharacters(in: .whitespaces) }
         var mods: UInt32 = 0
         var keyToken: String?
@@ -52,9 +45,16 @@ final class HotkeyRegistry {
             handlers.removeValue(forKey: id)
             return nil
         }
-        refs.append(ref)
+        refs[id] = ref
         FileHandle.standardError.write(Data("stackd: hotkey bound \(spec) id=\(id)\n".utf8))
-        return id
+        return Token { [weak self] in self?.unbind(id: id) }
+    }
+
+    private func unbind(id: UInt32) {
+        if let ref = refs.removeValue(forKey: id) {
+            UnregisterEventHotKey(ref)
+        }
+        handlers.removeValue(forKey: id)
     }
 
     private func installEventHandler() {

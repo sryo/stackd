@@ -10,15 +10,19 @@ SWIFT_SOURCES=(
   Sources/StackWindow.swift
   Sources/StackHost.swift
   Sources/URLSchemeHandler.swift
+  Sources/StackScope.swift
   Sources/Bridge.swift
   Sources/IPC.swift
   Sources/CLI.swift
+  Sources/StackTemplates.swift
   Sources/FileWatcher.swift
+  Sources/DataSources/RefCountedObserver.swift
   Sources/DataSources/Battery.swift
   Sources/DataSources/Mouse.swift
   Sources/DataSources/Hotkey.swift
   Sources/DataSources/EventTap.swift
   Sources/DataSources/Workspace.swift
+  Sources/DataSources/AXObserver.swift
   Sources/DataSources/Gesture.swift
   Sources/DataSources/Appearance.swift
   Sources/DataSources/Input.swift
@@ -27,6 +31,7 @@ SWIFT_SOURCES=(
   Sources/DataSources/Audio.swift
   Sources/DataSources/Display.swift
   Sources/DataSources/MenuBar.swift
+  Sources/DataSources/StatusItem.swift
   Sources/DataSources/Media.swift
   Sources/DataSources/Settings.swift
   Sources/DataSources/FS.swift

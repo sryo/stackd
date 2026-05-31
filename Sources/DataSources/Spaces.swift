@@ -103,30 +103,25 @@ enum Spaces {
     }
 }
 
-final class SpacesObserver {
+final class SpacesObserver: RefCountedObserver {
     static let shared = SpacesObserver()
-    private var subs: [() -> Void] = []
-    private var observing = false
+    private override init() { super.init() }
 
-    private init() {
-        NSWorkspace.shared.notificationCenter.addObserver(
-            self,
-            selector: #selector(spaceChanged),
-            name: NSWorkspace.activeSpaceDidChangeNotification,
-            object: nil
-        )
+    override func install() -> Token {
+        let workspaceCenter = NSWorkspace.shared.notificationCenter
+        let appCenter = NotificationCenter.default
+        let t1 = workspaceCenter.addObserver(
+            forName: NSWorkspace.activeSpaceDidChangeNotification,
+            object: nil, queue: .main
+        ) { [weak self] _ in self?.fire() }
         // Screen reconfig can add/remove displays, which changes the keys.
-        NotificationCenter.default.addObserver(
-            self,
-            selector: #selector(spaceChanged),
-            name: NSApplication.didChangeScreenParametersNotification,
-            object: nil
-        )
+        let t2 = appCenter.addObserver(
+            forName: NSApplication.didChangeScreenParametersNotification,
+            object: nil, queue: .main
+        ) { [weak self] _ in self?.fire() }
+        return Token {
+            workspaceCenter.removeObserver(t1)
+            appCenter.removeObserver(t2)
+        }
     }
-
-    @objc private func spaceChanged() { fire() }
-
-    func subscribe(_ cb: @escaping () -> Void) { subs.append(cb) }
-    func unsubscribeAll() { subs.removeAll() }
-    private func fire() { for cb in subs { cb() } }
 }

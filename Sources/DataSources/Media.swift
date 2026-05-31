@@ -72,28 +72,29 @@ enum Media {
     }
 }
 
-final class MediaObserver {
+final class MediaObserver: RefCountedObserver {
     static let shared = MediaObserver()
-    private var subs: [() -> Void] = []
-    private var registered = false
+    private override init() { super.init() }
 
-    private init() {
-        guard let register = MediaRemote.registerForNotifications else { return }
+    override func install() -> Token {
+        guard let register = MediaRemote.registerForNotifications else {
+            return Token { }
+        }
         register(.main)
-        registered = true
-        for name in [
+        let nc = NotificationCenter.default
+        let tokens = [
             "kMRMediaRemoteNowPlayingInfoDidChangeNotification",
             "kMRMediaRemoteNowPlayingApplicationDidChangeNotification",
             "kMRMediaRemoteNowPlayingPlaybackQueueChangedNotification"
-        ] {
-            NotificationCenter.default.addObserver(
-                forName: NSNotification.Name(name),
-                object: nil, queue: .main
-            ) { [weak self] _ in self?.fire() }
+        ].map { name in
+            nc.addObserver(forName: NSNotification.Name(name), object: nil, queue: .main) { [weak self] _ in
+                self?.fire()
+            }
+        }
+        return Token {
+            for t in tokens { nc.removeObserver(t) }
+            // No symmetric MRMediaRemoteUnregister — registering is one-way per
+            // process. Slightly leaky but the framework's design forces it.
         }
     }
-
-    func subscribe(_ cb: @escaping () -> Void) { subs.append(cb) }
-    func unsubscribeAll() { subs.removeAll() }
-    private func fire() { for cb in subs { cb() } }
 }

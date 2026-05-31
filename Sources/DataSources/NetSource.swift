@@ -39,23 +39,16 @@ enum NetWiFi {
 /// One shared NWPathMonitor that fires both LAN and WiFi subscribers.
 /// Polled callback (not raw NWPath) because most state we care about
 /// (SSID, IP address) needs a separate read, not the path object itself.
-final class NetworkObserver {
+final class NetworkObserver: RefCountedObserver {
     static let shared = NetworkObserver()
-    private var subs: [() -> Void] = []
-    private var monitor: NWPathMonitor?
+    private override init() { super.init() }
 
-    private init() {
+    override func install() -> Token {
         let mon = NWPathMonitor()
         mon.pathUpdateHandler = { [weak self] _ in
-            DispatchQueue.main.async {
-                guard let self = self else { return }
-                for cb in self.subs { cb() }
-            }
+            DispatchQueue.main.async { self?.fire() }
         }
         mon.start(queue: DispatchQueue.global(qos: .utility))
-        monitor = mon
+        return Token { mon.cancel() }
     }
-
-    func subscribe(_ cb: @escaping () -> Void) { subs.append(cb) }
-    func unsubscribeAll() { subs.removeAll() }
 }

@@ -68,25 +68,12 @@ final class StackHost {
     }
 
     func unloadAll() {
-        for win in windows.values {
-            win.orderOut(nil)
-            win.close()
-        }
-        windows.removeAll()
-        bridges.removeAll()
+        // Each Bridge owns a StackScope; draining it releases all native
+        // resources (observer subscriptions, hotkeys, eventtaps, menubar
+        // suppressions, future AX observers). Belt-and-suspenders menubar
+        // reset covers the rare case where every stack crashed mid-suppress.
+        for id in Array(bridges.keys) { unloadStack(id: id) }
         schemeHandler.clearRegistrations()
-        HotkeyRegistry.shared.unbindAll()
-        EventTapRegistry.shared.unregisterAll()
-        WorkspaceObserver.shared.unsubscribeAll()
-        AppearanceObserver.shared.unsubscribeAll()
-        InputObserver.shared.unsubscribeAll()
-        NetworkObserver.shared.unsubscribeAll()
-        AudioObserver.shared.unsubscribeAll()
-        DisplayObserver.shared.unsubscribeAll()
-        MediaObserver.shared.unsubscribeAll()
-        PasteboardObserver.shared.unsubscribeAll()
-        AppsObserver.shared.unsubscribeAll()
-        SpacesObserver.shared.unsubscribeAll()
         MenuBarVisibility.resetForReload()
     }
 
@@ -143,10 +130,22 @@ final class StackHost {
 
     private func unloadStack(id: String) {
         if let win = windows[id] {
+            // Tell JS to clean up DOM state before the WebView is torn down.
+            // sd.bind doesn't strictly need this (subscriptions die with the
+            // WebView), but stacks can listen for `stackd:unload` to save
+            // state, log, or release things outside the page lifecycle.
+            win.webView.evaluateJavaScript(
+                "window.dispatchEvent(new Event('stackd:unload'))",
+                completionHandler: nil
+            )
             win.orderOut(nil)
             win.close()
             windows.removeValue(forKey: id)
         }
+        // Drain native resources (observer subs, hotkeys, eventtaps, menubar
+        // suppressions) BEFORE dropping the Bridge — the Token cancel closures
+        // reference back into shared registries, not into Bridge itself.
+        bridges[id]?.scope.drain()
         bridges.removeValue(forKey: id)
         schemeHandler.unregister(stackId: id)
     }
@@ -154,9 +153,14 @@ final class StackHost {
     private func unloadAllInstances(baseId: String) {
         let keys = windows.keys.filter { $0 == baseId || $0.hasPrefix(baseId + "@") }
         for k in keys {
+            windows[k]?.webView.evaluateJavaScript(
+                "window.dispatchEvent(new Event('stackd:unload'))",
+                completionHandler: nil
+            )
             windows[k]?.orderOut(nil)
             windows[k]?.close()
             windows.removeValue(forKey: k)
+            bridges[k]?.scope.drain()
             bridges.removeValue(forKey: k)
         }
         schemeHandler.unregister(stackId: baseId)

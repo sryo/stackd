@@ -17,19 +17,18 @@ enum Input {
     }
 }
 
-final class InputObserver {
+final class InputObserver: RefCountedObserver {
     static let shared = InputObserver()
-    private var subs: [() -> Void] = []
+    private override init() { super.init() }
 
-    private init() {
+    override func install() -> Token {
         // TIS notifications are CFNotifications via the local distributed center.
-        DistributedNotificationCenter.default().addObserver(
+        let token = DistributedNotificationCenter.default().addObserver(
             forName: NSNotification.Name(kTISNotifySelectedKeyboardInputSourceChanged as String),
             object: nil, queue: .main
         ) { [weak self] _ in self?.fire() }
+        return Token {
+            DistributedNotificationCenter.default().removeObserver(token)
+        }
     }
-
-    func subscribe(_ cb: @escaping () -> Void) { subs.append(cb) }
-    func unsubscribeAll() { subs.removeAll() }
-    private func fire() { for cb in subs { cb() } }
 }

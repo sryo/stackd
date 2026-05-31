@@ -23,31 +23,35 @@ enum Appearance {
 ///   - AppleInterfaceThemeChangedNotification (distributed) — dark/light flip
 ///   - NSWorkspace.accessibilityDisplayOptionsDidChangeNotification — reduce motion
 ///   - 2s poll — accent color (no notification exists for NSColor.controlAccentColor)
-final class AppearanceObserver {
+final class AppearanceObserver: RefCountedObserver {
     static let shared = AppearanceObserver()
+    private override init() { super.init() }
 
-    private var subs: [() -> Void] = []
-    private var pollTimer: Timer?
+    override func install() -> Token {
+        let dnc = DistributedNotificationCenter.default()
+        let wnc = NSWorkspace.shared.notificationCenter
 
-    private init() {
-        DistributedNotificationCenter.default().addObserver(
+        let themeToken = dnc.addObserver(
             forName: NSNotification.Name("AppleInterfaceThemeChangedNotification"),
             object: nil, queue: .main
         ) { [weak self] _ in self?.fire() }
 
-        NSWorkspace.shared.notificationCenter.addObserver(
+        let a11yToken = wnc.addObserver(
             forName: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification,
             object: nil, queue: .main
         ) { [weak self] _ in self?.fire() }
 
+        // Accent color has no system notification; poll while observer is
+        // active. The whole timer stops once the last subscriber leaves.
         let timer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
             self?.fire()
         }
         RunLoop.main.add(timer, forMode: .common)
-        pollTimer = timer
-    }
 
-    func subscribe(_ cb: @escaping () -> Void) { subs.append(cb) }
-    func unsubscribeAll() { subs.removeAll() }
-    private func fire() { for cb in subs { cb() } }
+        return Token {
+            dnc.removeObserver(themeToken)
+            wnc.removeObserver(a11yToken)
+            timer.invalidate()
+        }
+    }
 }

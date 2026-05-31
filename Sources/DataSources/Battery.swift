@@ -1,6 +1,33 @@
 import Foundation
 import IOKit.ps
 
+/// Fires whenever IOKit reports a power-source change — plug/unplug, capacity
+/// step, source list change. Replaces the 30s `batteryTimer` poll in Bridge.
+/// Lazy: the IOKit runloop source is only installed while at least one stack
+/// subscribes; teardown after a 5s debounce when the last unsubscribes.
+final class BatteryObserver: RefCountedObserver {
+    static let shared = BatteryObserver()
+    private override init() { super.init() }
+
+    override func install() -> Token {
+        let ctx = Unmanaged.passUnretained(self).toOpaque()
+        let callback: IOPowerSourceCallbackType = { ptr in
+            guard let ptr = ptr else { return }
+            let me = Unmanaged<BatteryObserver>.fromOpaque(ptr).takeUnretainedValue()
+            me.fire()
+        }
+        guard let src = IOPSNotificationCreateRunLoopSource(callback, ctx)?.takeRetainedValue() else {
+            // Symbol unavailable / IOKit power services denied — observer
+            // stays inactive; pull-based readers (Battery.percent) still work.
+            return Token { }
+        }
+        CFRunLoopAddSource(CFRunLoopGetMain(), src, .commonModes)
+        return Token {
+            CFRunLoopRemoveSource(CFRunLoopGetMain(), src, .commonModes)
+        }
+    }
+}
+
 enum Battery {
     private static func sources() -> (snapshot: CFTypeRef, list: [CFTypeRef])? {
         guard let snap = IOPSCopyPowerSourcesInfo()?.takeRetainedValue() else { return nil }

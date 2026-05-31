@@ -4,7 +4,8 @@ import CoreGraphics
 final class EventTapRegistry {
     static let shared = EventTapRegistry()
 
-    private var handlers: [CGEventType: [(CGEvent) -> Void]] = [:]
+    private var handlers: [CGEventType: [Int: (CGEvent) -> Void]] = [:]
+    private var nextHandlerId: Int = 1
     private var tap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
     private var promptShown = false
@@ -79,21 +80,26 @@ final class EventTapRegistry {
         return true
     }
 
-    @discardableResult
-    func register(eventType: CGEventType, handler: @escaping (CGEvent) -> Void) -> Bool {
-        guard ensureTap() else { return false }
-        handlers[eventType, default: []].append(handler)
-        return true
+    // Returns nil if Accessibility is denied (no tap installed). Caller adopts
+    // the Token into their StackScope; cancel removes just this handler. The
+    // CGEventTap itself stays installed once created — cheaper than tearing
+    // down + reinstalling on every stack reload.
+    func register(eventType: CGEventType, handler: @escaping (CGEvent) -> Void) -> Token? {
+        guard ensureTap() else { return nil }
+        let id = nextHandlerId
+        nextHandlerId += 1
+        handlers[eventType, default: [:]][id] = handler
+        return Token { [weak self] in
+            self?.handlers[eventType]?.removeValue(forKey: id)
+            if self?.handlers[eventType]?.isEmpty == true {
+                self?.handlers.removeValue(forKey: eventType)
+            }
+        }
     }
 
     private func dispatch(type: CGEventType, event: CGEvent) {
         // Run loop source is on main; we're already main here.
-        for cb in handlers[type] ?? [] { cb(event) }
-    }
-
-    func unregisterAll() {
-        handlers.removeAll()
-        // Keep the tap installed — cheaper than reinstalling. Manifest reload re-registers.
+        for cb in handlers[type]?.values ?? [:].values { cb(event) }
     }
 
     // MARK: - String ↔ CGEventType

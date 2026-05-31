@@ -6,28 +6,19 @@ import ApplicationServices
 // focus changes a future iteration installs an AXObserver per-app on
 // kAXFocusedWindowChangedNotification. v0 just slow-ticks instead.
 
-final class WorkspaceObserver {
+final class WorkspaceObserver: RefCountedObserver {
     static let shared = WorkspaceObserver()
+    private override init() { super.init() }
 
-    private var subs: [() -> Void] = []
-    private var token: NSObjectProtocol?
-
-    private init() {
-        token = NSWorkspace.shared.notificationCenter.addObserver(
+    override func install() -> Token {
+        let token = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didActivateApplicationNotification,
             object: nil,
             queue: .main
-        ) { [weak self] _ in
-            for cb in self?.subs ?? [] { cb() }
+        ) { [weak self] _ in self?.fire() }
+        return Token {
+            NSWorkspace.shared.notificationCenter.removeObserver(token)
         }
-    }
-
-    func subscribe(_ callback: @escaping () -> Void) {
-        subs.append(callback)
-    }
-
-    func unsubscribeAll() {
-        subs.removeAll()
     }
 }
 
