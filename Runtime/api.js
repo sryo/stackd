@@ -252,6 +252,11 @@ export const sd = {
     // running: signal<[{pid, bundleId, name, active, hidden, launchedAt?}]>
     // — fires on launch/quit/hide/unhide/activate.
     running: channel("apps"),
+    // Transition deltas: { added: [...], removed: [...], changed: [...] }.
+    // Fires only when something actually changed (not the initial full list
+    // — for that, subscribe to .running). Consumers that only care about
+    // launches/quits don't have to diff the full list themselves.
+    changed: channel("appsChanged"),
     launch(bundleId)          { return request({ type: "apps.launch", bundleId }); },
     focus(bundleId)           { return request({ type: "apps.focus",  bundleId }); },
     kill(bundleId, force)     { return request({ type: "apps.kill",   bundleId, force: !!force }); },
