@@ -20,7 +20,7 @@ final class WorkspaceObserver: RefCountedObserver {
     }
 }
 
-enum Workspace {
+enum App {
     static func frontmostApp() -> [String: Any]? {
         guard let app = NSWorkspace.shared.frontmostApplication else { return nil }
         return [

@@ -24,7 +24,7 @@ SWIFT_SOURCES=(
   Sources/DataSources/Hotkey.swift
   Sources/DataSources/Events.swift
 
-  Sources/DataSources/Workspace.swift
+  Sources/DataSources/App.swift
   Sources/DataSources/Windows.swift
 
   Sources/DataSources/Gesture.swift

@@ -1059,7 +1059,7 @@ final class Bridge: NSObject, WKScriptMessageHandler {
     private func startWorkspace(includeApp: Bool, includeWindows: Bool) {
         let pushFn: () -> Void = { [weak self] in
             guard let self = self else { return }
-            if includeApp, let app = Workspace.frontmostApp() {
+            if includeApp, let app = App.frontmostApp() {
                 let json = Bridge.jsonify(app)
                 if json != self.lastFrontApp {
                     self.lastFrontApp = json
