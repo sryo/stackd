@@ -22,6 +22,7 @@ final class Bridge: NSObject, WKScriptMessageHandler {
     private var lastAppsByBundle: [String: [String: Any]] = [:]
     private var lastSpaces: String?
     private var lastCaffeinate: String?
+    private var lastSensors: String?
     private var lastLocation: String?
     private var lastUSB: String?
     private var lastCamera: String?
@@ -134,6 +135,7 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         if manifest.permissions.contains("apps")       { startApps() }
         if manifest.permissions.contains("spaces")     { startSpaces() }
         if manifest.permissions.contains("caffeinate") { startCaffeinate() }
+        if manifest.permissions.contains("sensors")    { startSensors() }
         if manifest.permissions.contains("location")   { startLocation() }
         if manifest.permissions.contains("usb")        { startUSB() }
         if manifest.permissions.contains("camera")     { startCamera() }
@@ -794,6 +796,9 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         if permissions.contains("caffeinate"), let json = lastCaffeinate {
             push(channel: "caffeinate", json: json)
         }
+        if permissions.contains("sensors"), let json = lastSensors {
+            push(channel: "sensors", json: json)
+        }
         if permissions.contains("location"), let json = lastLocation {
             push(channel: "location", json: json)
         }
@@ -1018,6 +1023,18 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         }
         pushFn()
         scope.adopt(CaffeinateObserver.shared.subscribe(pushFn))
+    }
+
+    private func startSensors() {
+        let pushFn: () -> Void = { [weak self] in
+            guard let self = self else { return }
+            let json = Bridge.jsonify(Sensors.snapshot())
+            if json == self.lastSensors { return }
+            self.lastSensors = json
+            self.push(channel: "sensors", json: json)
+        }
+        pushFn()
+        scope.adopt(SensorsObserver.shared.subscribe(pushFn))
     }
 
     private func startLocation() {

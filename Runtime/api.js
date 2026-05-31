@@ -433,6 +433,11 @@ export const sd = {
     info() { return request({ type: "host.info" }); },
     load:  channel("hostLoad")
   },
+  // Mac internal sensors via IOHIDEventSystem (Apple silicon: per-die temps,
+  // per-rail voltage/current, fan RPM). Polled at 2s. Intel SMC sensors deferred.
+  //   sd.sensors → { temperatures: [{name,value,unit}, ...], voltages: [...],
+  //                  currents: [...], fans: [{name, rpm}, ...] }
+  sensors: channel("sensors"),
   // Apple's NaturalLanguage framework — language ID, tokenization, lemmas,
   // sentence similarity (via NLEmbedding cosine). All synchronous. Useful for
   // Palette command ranking, smart-paste rewrites, "did you mean X" hints.

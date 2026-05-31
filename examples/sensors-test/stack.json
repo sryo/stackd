@@ -1,0 +1,8 @@
+{
+  "id": "sensors-test",
+  "name": "IOHIDEventSystem sensors",
+  "anchor": { "edge": "top-right", "inset": [16, 16] },
+  "size": { "w": 280, "h": 180 },
+  "clickThrough": true,
+  "permissions": ["sensors"]
+}
