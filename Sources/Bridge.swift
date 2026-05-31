@@ -23,6 +23,7 @@ final class Bridge: NSObject, WKScriptMessageHandler {
     private var lastSpaces: String?
     private var lastCaffeinate: String?
     private var lastLocation: String?
+    private var lastUSB: String?
     private var settings: StackSettings?
     private var fsWatches: [Int: FSWatch] = [:]
     private var handlesBangs: Set<String> = []
@@ -129,6 +130,7 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         if manifest.permissions.contains("spaces")     { startSpaces() }
         if manifest.permissions.contains("caffeinate") { startCaffeinate() }
         if manifest.permissions.contains("location")   { startLocation() }
+        if manifest.permissions.contains("usb")        { startUSB() }
         if manifest.permissions.contains("app") || manifest.permissions.contains("windows") {
             startWorkspace(includeApp: manifest.permissions.contains("app"),
                            includeWindows: manifest.permissions.contains("windows"))
@@ -705,6 +707,9 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         if permissions.contains("location"), let json = lastLocation {
             push(channel: "location", json: json)
         }
+        if permissions.contains("usb"), let json = lastUSB {
+            push(channel: "usb", json: json)
+        }
     }
 
     private func startBattery() {
@@ -931,6 +936,18 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         }
         pushFn()
         scope.adopt(LocationObserver.shared.subscribe(pushFn))
+    }
+
+    private func startUSB() {
+        let pushFn: () -> Void = { [weak self] in
+            guard let self = self else { return }
+            let json = Bridge.jsonify(USB.snapshot())
+            if json == self.lastUSB { return }
+            self.lastUSB = json
+            self.push(channel: "usb", json: json)
+        }
+        pushFn()
+        scope.adopt(USBObserver.shared.subscribe(pushFn))
     }
 
     // App activations come from NSWorkspace; within-app focus / title changes

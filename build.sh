@@ -47,6 +47,7 @@ SWIFT_SOURCES=(
   Sources/DataSources/Spaces.swift
   Sources/DataSources/Caffeinate.swift
   Sources/DataSources/Notify.swift
+  Sources/DataSources/USB.swift
 )
 
 C_SOURCES=(

@@ -197,7 +197,7 @@ enum StackDoctor {
                 "battery", "mouse", "appearance", "input", "net", "audio", "display",
                 "media", "settings", "fs", "pasteboard", "proc", "events", "apps",
                 "icons", "ax", "windows", "spaces", "menubar", "menubar.item", "menu",
-                "app", "defaults", "caffeinate", "notify", "location"
+                "app", "defaults", "caffeinate", "notify", "location", "usb"
             ]
             for p in perms where !known.contains(p) {
                 print("⚠️  \(dirName): unknown permission '\(p)' — typo? Known: \(known.sorted().joined(separator: ", "))")

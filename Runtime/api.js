@@ -372,6 +372,9 @@ export const sd = {
   // macOS asks for Location authorization the first time a stack with the
   // "location" permission loads. Returns null until granted + first fix.
   location: channel("location"),
+  // Attached USB devices: [{ vendorID, productID, vendorName?, productName?,
+  //   serialNumber?, locationID }, ...]. Fires on attach/detach via IOKit.
+  usb: channel("usb"),
   spaces: {
     all: channel("spaces"),
     // Spaces this window is on, by CGWindowID — Promise<number[]>.

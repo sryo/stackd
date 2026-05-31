@@ -1,0 +1,50 @@
+<!doctype html>
+<html><head><meta charset="utf-8">
+<style>
+  body {
+    margin: 0; padding: 10px 12px;
+    font: 12px -apple-system, system-ui, sans-serif;
+    color: #fff;
+    background: rgba(20, 20, 22, 0.78);
+    border-radius: 10px;
+    -webkit-backdrop-filter: blur(20px);
+  }
+  h1 { font-size: 11px; margin: 0 0 8px; opacity: 0.55; text-transform: uppercase; letter-spacing: 0.08em; }
+  ul { list-style: none; margin: 0; padding: 0; }
+  li { padding: 3px 0; opacity: 0.9; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .meta { opacity: 0.5; font-size: 10px; margin-left: 6px; }
+  .empty { opacity: 0.4; font-style: italic; }
+</style>
+</head><body>
+<h1>USB devices</h1>
+<ul id="list"><li class="empty">waiting…</li></ul>
+<script type="module">
+  import { sd } from "sd://runtime/api.js";
+
+  const list = document.getElementById("list");
+
+  function icon(name) {
+    const n = (name || "").toLowerCase();
+    if (n.includes("keyboard")) return "⌨️";
+    if (n.includes("mouse") || n.includes("trackpad")) return "🖱";
+    if (n.includes("camera") || n.includes("cam")) return "📷";
+    if (n.includes("audio") || n.includes("headphone") || n.includes("airpods")) return "🎧";
+    if (n.includes("phone") || n.includes("iphone")) return "📱";
+    if (n.includes("hub")) return "🔌";
+    if (n.includes("disk") || n.includes("storage") || n.includes("drive")) return "💾";
+    return "🔧";
+  }
+
+  sd.bind([list, "html"], sd.usb, devices => {
+    console.log("usb update:", devices && devices.length, devices);
+    if (!devices || devices.length === 0) {
+      return '<li class="empty">no devices</li>';
+    }
+    return devices.map(d => {
+      const label = d.productName || `device 0x${d.productID.toString(16)}`;
+      const vendor = d.vendorName ? ` (${d.vendorName})` : "";
+      return `<li>${icon(d.productName)} ${label}<span class="meta">${vendor}</span></li>`;
+    }).join("");
+  });
+</script>
+</body></html>
