@@ -29,6 +29,8 @@ SWIFT_SOURCES=(
 
   Sources/DataSources/Gesture.swift
   Sources/DataSources/Appearance.swift
+  Sources/DataSources/AppleScript.swift
+  Sources/DataSources/Host.swift
   Sources/DataSources/Input.swift
   Sources/DataSources/Location.swift
   Sources/DataSources/Defaults.swift
@@ -67,6 +69,7 @@ swiftc -O \
   -framework Carbon \
   -framework CoreLocation \
   -framework AVFoundation \
+  -framework OSAKit \
   -target arm64-apple-macos13.0
 
 # Stage Runtime next to the binary so URLSchemeHandler can find it via

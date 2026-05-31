@@ -1,0 +1,42 @@
+<!doctype html>
+<html><head><meta charset="utf-8">
+<style>
+  body {
+    margin: 0; padding: 10px 12px;
+    font: 12px -apple-system, system-ui, sans-serif;
+    color: #fff;
+    background: rgba(20, 20, 22, 0.78);
+    border-radius: 10px;
+    -webkit-backdrop-filter: blur(20px);
+  }
+  h1 { font-size: 11px; margin: 0 0 6px; opacity: 0.55; text-transform: uppercase; letter-spacing: 0.08em; }
+  #info { font-size: 11px; opacity: 0.7; margin-bottom: 6px; line-height: 1.4; }
+  #load { font-size: 14px; font-weight: 600; }
+  .meta { font-size: 10px; opacity: 0.55; margin-top: 4px; }
+</style>
+</head><body>
+<h1>host</h1>
+<div id="info">loading…</div>
+<div id="load">CPU — • idle —</div>
+<div class="meta" id="mem"></div>
+<script type="module">
+  import { sd } from "sd://runtime/api.js";
+
+  const info = await sd.host.info();
+  console.log("sd.host.info:", info);
+  document.getElementById("info").textContent =
+    `${info.hostname} · macOS ${info.os.version} (${info.os.build}) · ${info.arch} · ${info.cpuCount} cores · ${info.ramMB} MB · ${info.locale}`;
+
+  sd.bind([document.getElementById("load"), "textContent"], sd.host.load, l => {
+    if (!l) return "CPU — • idle —";
+    const pct = Math.round(l.cpu.total * 100);
+    const idle = l.idleSeconds.toFixed(1);
+    return `CPU ${pct}% • idle ${idle}s`;
+  });
+
+  sd.bind([document.getElementById("mem"), "textContent"], sd.host.load, l => {
+    if (!l || !l.memoryMB) return "";
+    return `mem ${l.memoryMB.used} MB used · ${l.memoryMB.free} MB free · ${l.memoryMB.wired} MB wired`;
+  });
+</script>
+</body></html>

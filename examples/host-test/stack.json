@@ -1,0 +1,8 @@
+{
+  "id": "host-test",
+  "name": "Host info + load",
+  "anchor": { "edge": "top-right", "inset": [16, 16] },
+  "size": { "w": 260, "h": 110 },
+  "clickThrough": true,
+  "permissions": ["host"]
+}

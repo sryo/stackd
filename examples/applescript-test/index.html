@@ -1,0 +1,56 @@
+<!doctype html>
+<html><head><meta charset="utf-8">
+<style>
+  body { font: 12px -apple-system, sans-serif; color: #ddd; background: rgba(0,0,0,0.6);
+         margin: 0; padding: 10px; border-radius: 8px; }
+  h1   { font-size: 12px; margin: 0 0 6px; opacity: 0.7; }
+  .log { font-family: ui-monospace, Menlo, monospace; font-size: 10px;
+         max-height: 180px; overflow: auto; }
+  .row { white-space: pre-wrap; margin-bottom: 4px; }
+  .ok  { color: #6f6; }
+  .err { color: #f88; }
+  .t   { opacity: 0.5; }
+</style>
+</head><body>
+<h1>applescript — three sanity scripts</h1>
+<div class="log" id="log"></div>
+<script type="module">
+  import { sd } from "sd://runtime/api.js";
+
+  const logEl = document.getElementById("log");
+  const append = (cls, text) => {
+    const row = document.createElement("div");
+    row.className = "row " + cls;
+    const ts = new Date().toLocaleTimeString();
+    row.textContent = `[${ts}] ${text}`;
+    logEl.appendChild(row);
+  };
+
+  async function runCase(label, source, opts) {
+    const r = await sd.applescript.run(source, opts);
+    if (r && r.ok) {
+      append("ok",  `${label} -> "${r.result}"`);
+      console.log(label, "->", r.result);
+    } else {
+      append("err", `${label} ERR: ${r && r.error}`);
+      console.error(label, r);
+    }
+  }
+
+  // 1. Pure AppleScript arithmetic — expect "2".
+  await runCase("1+1 (applescript)", `return 1 + 1`);
+
+  // 2. Apple Events into Finder — expect a folder name (e.g. "Desktop").
+  await runCase(
+    "finder front window name",
+    `tell application "Finder" to return name of front window`
+  );
+
+  // 3. JXA — expect "3.141592653589793".
+  await runCase(
+    "Math.PI (javascript)",
+    `Math.PI`,
+    { language: "javascript" }
+  );
+</script>
+</body></html>

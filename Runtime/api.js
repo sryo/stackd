@@ -253,6 +253,23 @@ export const sd = {
       });
     }
   },
+  // AppleScript / JXA runner — faster than spawning /usr/bin/osascript for
+  // every call (NSAppleScript runs in-process). Use for: scripting other apps
+  // via Apple Events, querying System Events for window/UI info, anything
+  // `tell application X to ...` shaped.
+  //   const r = await sd.applescript.run(`return 1 + 1`);
+  //   const r = await sd.applescript.run(`return Math.PI`, { language: "javascript" });
+  // Returns: { ok: boolean, result: string, error?: string }.
+  applescript: {
+    run(source, opts) {
+      return request({
+        type: "applescript.run",
+        source: String(source ?? ""),
+        language: (opts && opts.language) || "applescript",
+        timeout: (opts && opts.timeout) || 10
+      });
+    }
+  },
   events: {
     // Synthesize input. Note: scroll/click also fire your own eventtap
     // handlers if you have any registered. Use with care.
@@ -394,6 +411,19 @@ export const sd = {
   // Use for "don't accumulate time while screen is off" (AppTimeout),
   // "stop drawing while asleep" (TimeTrail), etc.
   caffeinate: channel("caffeinate"),
+  // System info (one-shot) + load signal (polled 2s):
+  //   await sd.host.info()  → { hostname, os: {name,version,build}, locale,
+  //                              arch, cpuCount, ramMB }
+  //   sd.host.load          → { cpu: {user,system,idle,total},  // 0-1 fractions
+  //                              idleSeconds,                    // since last HID
+  //                              memoryMB: {used,free,wired} }
+  // First load tick fires ~2s after subscribe (CPU fractions need a prior
+  // sample to diff against). idleSeconds resets to ~0 the instant the user
+  // moves the mouse or types.
+  host: {
+    info() { return request({ type: "host.info" }); },
+    load:  channel("hostLoad")
+  },
   // Current location signal: { lat, lon, accuracy, altitude?, heading?, speed?, timestamp }.
   // macOS asks for Location authorization the first time a stack with the
   // "location" permission loads. Returns null until granted + first fix.

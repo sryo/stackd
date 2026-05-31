@@ -7,7 +7,7 @@ enum NetLAN {
     static func current() -> [String: Any] {
         return [
             "ipv4":     primaryIPv4()        as Any? ?? NSNull(),
-            "hostname": Host.current().localizedName ?? ""
+            "hostname": Foundation.Host.current().localizedName ?? ""
         ]
     }
 

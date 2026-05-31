@@ -1,0 +1,7 @@
+{
+  "id": "applescript-test",
+  "name": "AppleScript / JXA runner demo",
+  "anchor": { "edge": "top-right", "inset": [16, 16] },
+  "size": { "w": 360, "h": 220 },
+  "permissions": ["applescript"]
+}

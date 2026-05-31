@@ -25,6 +25,7 @@ final class Bridge: NSObject, WKScriptMessageHandler {
     private var lastLocation: String?
     private var lastUSB: String?
     private var lastCamera: String?
+    private var lastHostLoad: String?
     private var settings: StackSettings?
     private var fsWatches: [Int: FSWatch] = [:]
     private var handlesBangs: Set<String> = []
@@ -136,6 +137,7 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         if manifest.permissions.contains("location")   { startLocation() }
         if manifest.permissions.contains("usb")        { startUSB() }
         if manifest.permissions.contains("camera")     { startCamera() }
+        if manifest.permissions.contains("host")       { startHost() }
         if manifest.permissions.contains("app") || manifest.permissions.contains("windows") {
             startWorkspace(includeApp: manifest.permissions.contains("app"),
                            includeWindows: manifest.permissions.contains("windows"))
@@ -314,6 +316,11 @@ final class Bridge: NSObject, WKScriptMessageHandler {
                           key:      body["key"]      as? String ?? "")
         },
 
+        // Host — one-shot system info (hostname / OS / locale / arch / cpu / ram).
+        // The 2s CPU+idle+memory signal is the sd.host.load channel pushed
+        // by startHost() above.
+        .sync("host.info", permission: "host") { _ in Host.info() },
+
         // Audio — Bool side-effect ops, deny → false.
         .sync("audio.setVolume", permission: "audio", denyValue: false) { body in
             Audio.setVolume(Float((body["value"] as? Double) ?? 0))
@@ -415,6 +422,18 @@ final class Bridge: NSObject, WKScriptMessageHandler {
                 input:   body["input"] as? String,
                 timeoutSeconds: body["timeout"] as? Double
             ) { [weak bridge] result in
+                bridge?.respond(requestId: requestId, value: result)
+            }
+        },
+
+        // AppleScript / JXA — async hop to main. OSAKit is Apple Event-based
+        // and depends on the main runloop for inter-process AEs (tell app "X").
+        .custom("applescript.run", permission: "applescript") { bridge, body, requestId in
+            let src     = body["source"]   as? String ?? ""
+            let lang    = body["language"] as? String ?? "applescript"
+            let timeout = body["timeout"]  as? Double ?? 10
+            DispatchQueue.main.async { [weak bridge] in
+                let result = AppleScript.run(source: src, language: lang, timeoutSeconds: timeout)
                 bridge?.respond(requestId: requestId, value: result)
             }
         },
@@ -753,6 +772,9 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         if permissions.contains("camera"), let json = lastCamera {
             push(channel: "camera", json: json)
         }
+        if permissions.contains("host"), let json = lastHostLoad {
+            push(channel: "hostLoad", json: json)
+        }
     }
 
     private func startBattery() {
@@ -1003,6 +1025,21 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         }
         pushFn()
         scope.adopt(CameraObserver.shared.subscribe(pushFn))
+    }
+
+    private func startHost() {
+        let pushFn: () -> Void = { [weak self] in
+            guard let self = self else { return }
+            // First tick returns nil — CPU fractions need a prior sample to
+            // diff against. Skip the push; the next 2s tick has the value.
+            guard let snap = Host.loadSnapshot() else { return }
+            let json = Bridge.jsonify(snap)
+            if json == self.lastHostLoad { return }
+            self.lastHostLoad = json
+            self.push(channel: "hostLoad", json: json)
+        }
+        pushFn()
+        scope.adopt(HostObserver.shared.subscribe(pushFn))
     }
 
     // App activations come from NSWorkspace; within-app focus / title changes
