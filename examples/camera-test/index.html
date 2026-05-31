@@ -1,0 +1,42 @@
+<!doctype html>
+<html><head><meta charset="utf-8">
+<style>
+  body {
+    margin: 0; padding: 10px 12px;
+    font: 12px -apple-system, system-ui, sans-serif;
+    color: #fff;
+    background: rgba(20, 20, 22, 0.78);
+    border-radius: 10px;
+    -webkit-backdrop-filter: blur(20px);
+  }
+  h1 { font-size: 11px; margin: 0 0 8px; opacity: 0.55; text-transform: uppercase; letter-spacing: 0.08em; }
+  ul { list-style: none; margin: 0; padding: 0; }
+  li { padding: 3px 0; opacity: 0.9; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  li.live { color: #ff5a5f; opacity: 1; font-weight: 600; }
+  .meta { opacity: 0.5; font-size: 10px; margin-left: 6px; }
+  .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 6px; vertical-align: middle; background: #555; }
+  li.live .dot { background: #ff3b30; box-shadow: 0 0 6px #ff3b30; }
+  .empty { opacity: 0.4; font-style: italic; }
+</style>
+</head><body>
+<h1>Cameras</h1>
+<ul id="list"><li class="empty">waiting…</li></ul>
+<script type="module">
+  import { sd } from "sd://runtime/api.js";
+
+  const list = document.getElementById("list");
+
+  sd.bind([list, "html"], sd.camera, devices => {
+    console.log("camera update:", devices && devices.length, devices);
+    if (!devices || devices.length === 0) {
+      return '<li class="empty">no cameras</li>';
+    }
+    return devices.map(d => {
+      const cls = d.isInUse ? "live" : "";
+      const pos = d.position && d.position !== "unspecified" ? ` (${d.position})` : "";
+      const mfr = d.manufacturer ? ` · ${d.manufacturer}` : "";
+      return `<li class="${cls}"><span class="dot"></span>${d.name}${pos}<span class="meta">${mfr}</span></li>`;
+    }).join("");
+  });
+</script>
+</body></html>

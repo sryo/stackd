@@ -24,6 +24,7 @@ final class Bridge: NSObject, WKScriptMessageHandler {
     private var lastCaffeinate: String?
     private var lastLocation: String?
     private var lastUSB: String?
+    private var lastCamera: String?
     private var settings: StackSettings?
     private var fsWatches: [Int: FSWatch] = [:]
     private var handlesBangs: Set<String> = []
@@ -134,6 +135,7 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         if manifest.permissions.contains("caffeinate") { startCaffeinate() }
         if manifest.permissions.contains("location")   { startLocation() }
         if manifest.permissions.contains("usb")        { startUSB() }
+        if manifest.permissions.contains("camera")     { startCamera() }
         if manifest.permissions.contains("app") || manifest.permissions.contains("windows") {
             startWorkspace(includeApp: manifest.permissions.contains("app"),
                            includeWindows: manifest.permissions.contains("windows"))
@@ -748,6 +750,9 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         if permissions.contains("usb"), let json = lastUSB {
             push(channel: "usb", json: json)
         }
+        if permissions.contains("camera"), let json = lastCamera {
+            push(channel: "camera", json: json)
+        }
     }
 
     private func startBattery() {
@@ -986,6 +991,18 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         }
         pushFn()
         scope.adopt(USBObserver.shared.subscribe(pushFn))
+    }
+
+    private func startCamera() {
+        let pushFn: () -> Void = { [weak self] in
+            guard let self = self else { return }
+            let json = Bridge.jsonify(Camera.snapshot())
+            if json == self.lastCamera { return }
+            self.lastCamera = json
+            self.push(channel: "camera", json: json)
+        }
+        pushFn()
+        scope.adopt(CameraObserver.shared.subscribe(pushFn))
     }
 
     // App activations come from NSWorkspace; within-app focus / title changes

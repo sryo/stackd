@@ -401,6 +401,12 @@ export const sd = {
   // Attached USB devices: [{ vendorID, productID, vendorName?, productName?,
   //   serialNumber?, locationID }, ...]. Fires on attach/detach via IOKit.
   usb: channel("usb"),
+  // Video capture devices: [{ id, name, position, isInUse, manufacturer? }, ...].
+  // Fires on connect / disconnect via AVFoundation, and on per-device
+  // isInUseByAnotherApplication KVO. Use for "camera in use" indicators
+  // (the red Continuity Camera dot equivalent). Enumeration is metadata-only
+  // and does NOT trigger the TCC camera prompt — stackd never opens a stream.
+  camera: channel("camera"),
   spaces: {
     all: channel("spaces"),
     // Spaces this window is on, by CGWindowID — Promise<number[]>.

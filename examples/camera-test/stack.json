@@ -1,0 +1,8 @@
+{
+  "id": "camera-test",
+  "name": "Camera device list",
+  "anchor": { "edge": "top-right", "inset": [16, 16] },
+  "size": { "w": 280, "h": 220 },
+  "clickThrough": true,
+  "permissions": ["camera"]
+}

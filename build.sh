@@ -19,6 +19,7 @@ SWIFT_SOURCES=(
   Sources/StackTemplates.swift
   Sources/FileWatcher.swift
   Sources/DataSources/Battery.swift
+  Sources/DataSources/Camera.swift
   Sources/DataSources/Mouse.swift
   Sources/DataSources/Hotkey.swift
   Sources/DataSources/Events.swift
@@ -65,6 +66,7 @@ swiftc -O \
   -framework IOKit \
   -framework Carbon \
   -framework CoreLocation \
+  -framework AVFoundation \
   -target arm64-apple-macos13.0
 
 # Stage Runtime next to the binary so URLSchemeHandler can find it via
