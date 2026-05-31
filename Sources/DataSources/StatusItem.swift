@@ -43,14 +43,22 @@ final class StatusItemHandle {
         applyTitle(spec.title)
         applyTooltip(spec.tooltip)
         applyMenu(spec.menu)
-        // No menu? Wire button click → onClick. NSStatusItem.button is the
-        // canonical AppKit recipe (since 10.10); item.view is legacy.
-        if spec.menu == nil, let button = item.button {
-            let target = ActionTarget { [weak self] in self?.onClick?() }
-            button.target = target
-            button.action = #selector(ActionTarget.fire)
-            self.actionTarget = target
+        // If no menu was set, wire click → onClick. If a menu WAS set, the
+        // wiring happens lazily on setMenu(nil) — see installActionTargetIfNeeded.
+        if spec.menu == nil {
+            installActionTargetIfNeeded()
         }
+    }
+
+    /// NSStatusItem.button click handler. Idempotent — only installs once.
+    /// Called both at init (no-menu mode) and from applyMenu(nil) when a
+    /// menu-mode item drops back to click mode.
+    private func installActionTargetIfNeeded() {
+        guard actionTarget == nil, let button = item.button else { return }
+        let target = ActionTarget { [weak self] in self?.onClick?() }
+        button.target = target
+        button.action = #selector(ActionTarget.fire)
+        self.actionTarget = target
     }
 
     func setTitle(_ s: String?)        { applyTitle(s) }
@@ -92,7 +100,12 @@ final class StatusItemHandle {
 
     private func applyMenu(_ items: [[String: Any]]?) {
         guard let items = items else {
+            // Drop menu mode → restore click mode. Without this lazy install,
+            // a status item created with a menu would become dead on click
+            // when setMenu(null) was called (button.target was never set).
             item.menu = nil
+            menuDelegate = nil
+            installActionTargetIfNeeded()
             return
         }
         let menu = NSMenu()
@@ -103,8 +116,7 @@ final class StatusItemHandle {
         }
         item.menu = menu
         // Setting item.menu disconnects the button-click path; AppKit drives
-        // menu open on click automatically. The actionTarget stays referenced
-        // (for re-add via setMenu(nil) later) but is harmless when unused.
+        // menu open on click automatically.
         self.menuDelegate = delegate
     }
 

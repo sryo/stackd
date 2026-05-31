@@ -9,7 +9,7 @@ final class BatteryObserver: RefCountedObserver {
     static let shared = BatteryObserver()
     private override init() { super.init() }
 
-    override func install() -> Token {
+    override func install() -> Token? {
         let ctx = Unmanaged.passUnretained(self).toOpaque()
         let callback: IOPowerSourceCallbackType = { ptr in
             guard let ptr = ptr else { return }
@@ -17,9 +17,11 @@ final class BatteryObserver: RefCountedObserver {
             me.fire()
         }
         guard let src = IOPSNotificationCreateRunLoopSource(callback, ctx)?.takeRetainedValue() else {
-            // Symbol unavailable / IOKit power services denied — observer
-            // stays inactive; pull-based readers (Battery.percent) still work.
-            return Token { }
+            // IOKit power services unavailable / denied. Return nil so the
+            // base class retries on the next subscribe — pull-based readers
+            // (Battery.percent) still work in the meantime.
+            FileHandle.standardError.write(Data("stackd: BatteryObserver — IOPS source creation failed\n".utf8))
+            return nil
         }
         CFRunLoopAddSource(CFRunLoopGetMain(), src, .commonModes)
         return Token {

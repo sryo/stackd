@@ -76,11 +76,18 @@ final class MediaObserver: RefCountedObserver {
     static let shared = MediaObserver()
     private override init() { super.init() }
 
-    override func install() -> Token {
-        guard let register = MediaRemote.registerForNotifications else {
-            return Token { }
-        }
-        register(.main)
+    /// MRMediaRemoteRegisterForNowPlayingNotifications is fire-and-forget —
+    /// there is no symmetric unregister. To avoid double-registering across
+    /// install/teardown cycles (which the framework reacts to by either
+    /// duplicating notifications or silently rejecting), gate it to exactly
+    /// once per process via a static-let-once initializer.
+    private static let registerOnce: Void = {
+        MediaRemote.registerForNotifications?(.main)
+    }()
+
+    override func install() -> Token? {
+        guard MediaRemote.registerForNotifications != nil else { return nil }
+        _ = MediaObserver.registerOnce
         let nc = NotificationCenter.default
         let tokens = [
             "kMRMediaRemoteNowPlayingInfoDidChangeNotification",
@@ -93,8 +100,6 @@ final class MediaObserver: RefCountedObserver {
         }
         return Token {
             for t in tokens { nc.removeObserver(t) }
-            // No symmetric MRMediaRemoteUnregister — registering is one-way per
-            // process. Slightly leaky but the framework's design forces it.
         }
     }
 }

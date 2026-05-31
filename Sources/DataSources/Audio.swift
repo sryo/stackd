@@ -104,36 +104,51 @@ final class AudioObserver: RefCountedObserver {
     static let shared = AudioObserver()
     private override init() { super.init() }
 
-    // CoreAudio listener blocks. Stored so install() can return a Token that
-    // removes the exact blocks we installed (not by reference; we hold them).
+    // CoreAudio listener blocks live as class properties so the SAME Swift→
+    // ObjC bridged block reference is passed to both Add and Remove. The
+    // listener API compares by block identity; reading a property returns
+    // the same heap-block pointer the first reference produced. The lock
+    // serializes mutation of these refs and the underlying CoreAudio
+    // registrations — the device-change listener fires on a background
+    // utility queue while Token.cancel typically runs on main, so without
+    // synchronization rebind() and unbindDevice() can race on a hot AirPods
+    // swap during stack unload.
     private var deviceChangeBlock: AudioObjectPropertyListenerBlock?
     private var volumeBlock:       AudioObjectPropertyListenerBlock?
     private var muteBlock:         AudioObjectPropertyListenerBlock?
     private var boundDevice: AudioDeviceID?
+    private let lock = NSLock()
+    private let listenerQueue = DispatchQueue.global(qos: .utility)
 
     private func notify() {
         DispatchQueue.main.async { [weak self] in self?.fire() }
     }
 
-    override func install() -> Token {
+    override func install() -> Token? {
         // Default-output-device change → re-bind volume / mute listeners onto
         // the new device and notify subscribers.
         let dev: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
             self?.rebind()
             self?.notify()
         }
-        deviceChangeBlock = dev
         var devAddr = AudioObjectPropertyAddress(
             mSelector: kAudioHardwarePropertyDefaultOutputDevice,
             mScope:    kAudioObjectPropertyScopeGlobal,
             mElement:  kAudioObjectPropertyElementMain
         )
+        lock.lock()
+        deviceChangeBlock = dev
         AudioObjectAddPropertyListenerBlock(
             AudioObjectID(kAudioObjectSystemObject), &devAddr,
-            DispatchQueue.global(qos: .utility), dev)
+            listenerQueue, dev)
+        lock.unlock()
 
         rebind()
 
+        // Capture the exact `dev` reference in the Token's closure so the
+        // pointer passed to AudioObjectRemovePropertyListenerBlock is the same
+        // one CoreAudio retained at Add time — surviving any later mutation
+        // of self.deviceChangeBlock.
         return Token { [weak self] in
             guard let self = self else { return }
             var devAddr = AudioObjectPropertyAddress(
@@ -141,13 +156,13 @@ final class AudioObserver: RefCountedObserver {
                 mScope:    kAudioObjectPropertyScopeGlobal,
                 mElement:  kAudioObjectPropertyElementMain
             )
-            if let blk = self.deviceChangeBlock {
-                AudioObjectRemovePropertyListenerBlock(
-                    AudioObjectID(kAudioObjectSystemObject), &devAddr,
-                    DispatchQueue.global(qos: .utility), blk)
-            }
-            self.unbindDevice()
+            self.lock.lock()
+            AudioObjectRemovePropertyListenerBlock(
+                AudioObjectID(kAudioObjectSystemObject), &devAddr,
+                self.listenerQueue, dev)
             self.deviceChangeBlock = nil
+            self.lock.unlock()
+            self.unbindDevice()
         }
     }
 
@@ -155,30 +170,33 @@ final class AudioObserver: RefCountedObserver {
         // Drop volume/mute listeners on the previous device first.
         unbindDevice()
         guard let id = Audio.defaultOutputDevice() else { return }
-        boundDevice = id
 
         let vol: AudioObjectPropertyListenerBlock = { [weak self] _, _ in self?.notify() }
         let mute: AudioObjectPropertyListenerBlock = { [weak self] _, _ in self?.notify() }
-        volumeBlock = vol
-        muteBlock   = mute
         var volAddr  = Audio.mainVolumeAddress
         var muteAddr = Audio.muteAddress
-        AudioObjectAddPropertyListenerBlock(id, &volAddr,  DispatchQueue.global(qos: .utility), vol)
-        AudioObjectAddPropertyListenerBlock(id, &muteAddr, DispatchQueue.global(qos: .utility), mute)
+        lock.lock()
+        boundDevice = id
+        volumeBlock = vol
+        muteBlock   = mute
+        AudioObjectAddPropertyListenerBlock(id, &volAddr,  listenerQueue, vol)
+        AudioObjectAddPropertyListenerBlock(id, &muteAddr, listenerQueue, mute)
+        lock.unlock()
     }
 
     private func unbindDevice() {
-        guard let id = boundDevice else { return }
-        var volAddr  = Audio.mainVolumeAddress
-        var muteAddr = Audio.muteAddress
-        if let blk = volumeBlock {
-            AudioObjectRemovePropertyListenerBlock(id, &volAddr,  DispatchQueue.global(qos: .utility), blk)
-        }
-        if let blk = muteBlock {
-            AudioObjectRemovePropertyListenerBlock(id, &muteAddr, DispatchQueue.global(qos: .utility), blk)
-        }
+        lock.lock()
+        let id = boundDevice
+        let vol = volumeBlock
+        let mute = muteBlock
         boundDevice = nil
         volumeBlock = nil
-        muteBlock   = nil
+        muteBlock = nil
+        lock.unlock()
+        guard let id = id else { return }
+        var volAddr  = Audio.mainVolumeAddress
+        var muteAddr = Audio.muteAddress
+        if let vol  = vol  { AudioObjectRemovePropertyListenerBlock(id, &volAddr,  listenerQueue, vol)  }
+        if let mute = mute { AudioObjectRemovePropertyListenerBlock(id, &muteAddr, listenerQueue, mute) }
     }
 }

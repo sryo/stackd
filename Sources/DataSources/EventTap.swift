@@ -99,7 +99,12 @@ final class EventTapRegistry {
 
     private func dispatch(type: CGEventType, event: CGEvent) {
         // Run loop source is on main; we're already main here.
-        for cb in handlers[type]?.values ?? [:].values { cb(event) }
+        // Snapshot first: a handler that synchronously unregisters its own
+        // Token (or triggers a stack unload whose scope drain cancels another
+        // handler for the same eventType) would mutate handlers[type] mid-
+        // iteration — undefined behavior in Swift.
+        guard let snap = handlers[type] else { return }
+        for cb in Array(snap.values) { cb(event) }
     }
 
     // MARK: - String ↔ CGEventType

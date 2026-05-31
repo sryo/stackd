@@ -32,14 +32,24 @@ class RefCountedObserver {
     /// Override to install native plumbing. Return a Token whose cancel
     /// closure tears down everything `install()` set up. Called when subscriber
     /// count goes 0 → 1; not called again until after a full teardown.
-    func install() -> Token {
+    ///
+    /// Return nil to indicate a transient failure (e.g. Accessibility denied,
+    /// CoreAudio device unavailable). The base class does NOT cache the
+    /// result, so the next subscribe will retry install — important for the
+    /// "user grants permission while a stack is already subscribed" path.
+    func install() -> Token? {
         fatalError("RefCountedObserver subclass must override install()")
     }
 
     /// Subclasses call this from their native callback to notify every subscriber.
     /// Safe to call before any subscribers exist (no-op).
+    ///
+    /// Snapshots `subs.values` into an Array before iterating so a callback
+    /// that synchronously unsubscribes (or unloads a stack, which drains a
+    /// scope whose Tokens remove from this dict) doesn't mutate the
+    /// Dictionary mid-iteration — that would be undefined behavior in Swift.
     func fire() {
-        for cb in subs.values { cb() }
+        for cb in Array(subs.values) { cb() }
     }
 
     /// Whether the observer is currently active (has a live native listener).
@@ -51,6 +61,10 @@ class RefCountedObserver {
         teardownWork?.cancel()
         teardownWork = nil
 
+        // Retry install on every subscribe while we don't have a live token.
+        // If install returns nil (transient failure), nativeToken stays nil
+        // and the NEXT subscribe gets another shot — e.g. a stack stays
+        // subscribed while the user grants Accessibility in System Settings.
         if nativeToken == nil { nativeToken = install() }
 
         let id = nextId

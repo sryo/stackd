@@ -95,7 +95,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             d["oldTitle"] = oldTitle
             host?.bang(name: "sd.window.titleChanged", detail: d)
         }
-        WindowsLifecycleObserver.shared.start()
+        // Lazy: the 1Hz CGWindowList poll only runs while at least one stack
+        // declares a sd.window.* handle (subscribe + scope.adopt happens in
+        // StackHost.spawnInstance). With no listeners, daemon idle cost is 0.
     }
 
     func applicationWillTerminate(_ note: Notification) {

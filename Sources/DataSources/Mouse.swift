@@ -12,13 +12,15 @@ final class MouseObserver: RefCountedObserver {
     static let shared = MouseObserver()
     private override init() { super.init() }
 
-    override func install() -> Token {
+    override func install() -> Token? {
+        // Returns nil when EventTapRegistry can't install (Accessibility
+        // denied). The base class will retry on the next subscribe — so a
+        // stack that's already subscribed when the user grants Accessibility
+        // wakes up the moment the next signal subscribe arrives (or just
+        // toggles itself off+on).
         return EventTapRegistry.shared.register(eventType: .mouseMoved) { [weak self] _ in
             self?.fire()
-        } ?? Token { }
-        // ?? Token { } : AX denied → register returned nil → observer stays
-        // dormant. Subscribers still get the immediate primer fire from the
-        // base class but no subsequent mouse events.
+        }
     }
 }
 

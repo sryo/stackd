@@ -7,6 +7,10 @@ import CoreGraphics
 // and any "recents" tracker. Architecturally identical fan-out to the
 // AXObserver version — only the source of truth differs.
 //
+// Lazy: the 1Hz Timer only runs while at least one stack has subscribed
+// (via subscribe(), typically because its manifest declares a sd.window.*
+// handler). With no subscribers the daemon pays zero CPU here.
+//
 // AXObserver upgrade path is well-known if latency becomes an issue:
 //   - per-pid AXObserver on kAXWindowCreatedNotification + per-window
 //     observer on kAXUIElementDestroyedNotification & kAXTitleChangedNotification
@@ -28,10 +32,30 @@ final class WindowsLifecycleObserver {
 
     private var snapshot: [Int: Snap] = [:]
     private var timer: Timer?
+    // Subscriber-count gate. Token cancel decrements; 1→0 stops the timer.
+    // AppDelegate sets the callbacks once at startup; subscribers are added
+    // by StackHost when a stack's manifest declares `handles: ["sd.window.*"]`.
+    private var subCount: Int = 0
 
     private init() {}
 
-    func start() {
+    /// Each subscribe() increments the live-subscriber count; the returned
+    /// Token decrements on cancel. Adopting into a Bridge.scope means stack
+    /// unload automatically releases it. The 1Hz Timer only runs while
+    /// subCount > 0.
+    func subscribe() -> Token {
+        subCount += 1
+        if subCount == 1 { start() }
+        var released = false
+        return Token { [weak self] in
+            guard let self = self, !released else { return }
+            released = true
+            self.subCount = max(0, self.subCount - 1)
+            if self.subCount == 0 { self.stop() }
+        }
+    }
+
+    private func start() {
         guard timer == nil else { return }
         snapshot = current()        // seed without firing on first tick
         let t = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
@@ -41,9 +65,10 @@ final class WindowsLifecycleObserver {
         timer = t
     }
 
-    func stop() {
+    private func stop() {
         timer?.invalidate()
         timer = nil
+        snapshot.removeAll()
     }
 
     private func tick() {
