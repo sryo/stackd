@@ -45,6 +45,7 @@ SWIFT_SOURCES=(
   Sources/DataSources/WindowsByID.swift
   Sources/DataSources/Spaces.swift
   Sources/DataSources/PopupMenu.swift
+  Sources/DataSources/Caffeinate.swift
 )
 
 C_SOURCES=(

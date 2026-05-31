@@ -335,6 +335,12 @@ export const sd = {
   // Per-screen Spaces info via SkyLight private SPI:
   //   { [screenUUID]: { spaces: [id, ...], active: id|null, isFullscreen: bool } }
   // Fires on NSWorkspaceActiveSpaceDidChangeNotification.
+  // System sleep / screen-lock signal: { sleeping, locked }.
+  // Sleeping flips true between willSleep and didWake; locked flips true
+  // between com.apple.screenIs{Locked,Unlocked} distributed notifications.
+  // Use for "don't accumulate time while screen is off" (AppTimeout),
+  // "stop drawing while asleep" (TimeTrail), etc.
+  caffeinate: channel("caffeinate"),
   spaces: {
     all: channel("spaces"),
     // Spaces this window is on, by CGWindowID — Promise<number[]>.

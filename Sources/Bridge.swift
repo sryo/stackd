@@ -18,6 +18,7 @@ final class Bridge: NSObject, WKScriptMessageHandler {
     private var lastPasteboard: String?
     private var lastApps: String?
     private var lastSpaces: String?
+    private var lastCaffeinate: String?
     private var settings: StackSettings?
     private var fsWatches: [Int: FSWatch] = [:]
     private var handlesBangs: Set<String> = []
@@ -116,6 +117,7 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         if manifest.permissions.contains("pasteboard") { startPasteboard() }
         if manifest.permissions.contains("apps")       { startApps() }
         if manifest.permissions.contains("spaces")     { startSpaces() }
+        if manifest.permissions.contains("caffeinate") { startCaffeinate() }
         if manifest.permissions.contains("app") || manifest.permissions.contains("windows") {
             startWorkspace(includeApp: manifest.permissions.contains("app"),
                            includeWindows: manifest.permissions.contains("windows"))
@@ -204,7 +206,10 @@ final class Bridge: NSObject, WKScriptMessageHandler {
             // Single-line guidance: the manifest is right there in the stack
             // folder; this tells the author exactly what to add.
             log("\(type) denied — add \"\(perm)\" to permissions in stack.json")
-            respond(requestId: requestId, value: NSNull())
+            // Per-primitive denial value (false for void/Bool-returning, NSNull
+            // for nullable readers). Matches the pre-refactor handler-per-type
+            // shape so existing stacks see the same shape they always did.
+            respond(requestId: requestId, value: primitive.denyValue)
             return
         }
         primitive.handler(self, body, requestId)
@@ -230,29 +235,34 @@ final class Bridge: NSObject, WKScriptMessageHandler {
     struct Primitive {
         let type: String
         let permission: String?
+        /// Value sent to JS when this primitive is denied for lack of permission.
+        /// Defaults to NSNull (matches pure readers). Boolean side-effect entries
+        /// like audio.setVolume use `false` so existing stacks that wrote
+        /// `if (await sd.audio.setVolume(v) === false)` keep working.
+        let denyValue: Any
         let handler: (Bridge, [String: Any], Int) -> Void
 
         /// Sync — closure returns a JSON-able value (or nil); auto-respond.
-        static func sync(_ type: String, permission: String? = nil,
+        static func sync(_ type: String, permission: String? = nil, denyValue: Any = NSNull(),
                          _ handler: @escaping ([String: Any]) -> Any?) -> Primitive {
-            Primitive(type: type, permission: permission) { bridge, body, requestId in
+            Primitive(type: type, permission: permission, denyValue: denyValue) { bridge, body, requestId in
                 bridge.respond(requestId: requestId, value: handler(body))
             }
         }
 
         /// Sync that needs Bridge (for settings, fsWatches, menubarSuppressions).
-        static func syncBridge(_ type: String, permission: String? = nil,
+        static func syncBridge(_ type: String, permission: String? = nil, denyValue: Any = NSNull(),
                                _ handler: @escaping (Bridge, [String: Any]) -> Any?) -> Primitive {
-            Primitive(type: type, permission: permission) { bridge, body, requestId in
+            Primitive(type: type, permission: permission, denyValue: denyValue) { bridge, body, requestId in
                 bridge.respond(requestId: requestId, value: handler(bridge, body))
             }
         }
 
         /// AX traffic must hop to main: AXUIElement APIs claim thread safety
         /// but real apps deadlock under cross-thread calls.
-        static func ax(_ type: String, permission: String? = "ax",
+        static func ax(_ type: String, permission: String? = "ax", denyValue: Any = NSNull(),
                        _ handler: @escaping (Bridge, [String: Any]) -> Any?) -> Primitive {
-            Primitive(type: type, permission: permission) { bridge, body, requestId in
+            Primitive(type: type, permission: permission, denyValue: denyValue) { bridge, body, requestId in
                 DispatchQueue.main.async { [weak bridge] in
                     guard let bridge = bridge else { return }
                     bridge.respond(requestId: requestId, value: handler(bridge, body))
@@ -263,9 +273,9 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         /// Raw access for async / unusual entries: proc.exec, fs.watch.start,
         /// menu.popup, window.invoke/dismiss, bang. The handler is responsible
         /// for calling respond() (possibly later, possibly never).
-        static func custom(_ type: String, permission: String? = nil,
+        static func custom(_ type: String, permission: String? = nil, denyValue: Any = NSNull(),
                            _ handler: @escaping (Bridge, [String: Any], Int) -> Void) -> Primitive {
-            Primitive(type: type, permission: permission, handler: handler)
+            Primitive(type: type, permission: permission, denyValue: denyValue, handler: handler)
         }
     }
 
@@ -649,6 +659,9 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         if permissions.contains("spaces"), let json = lastSpaces {
             push(channel: "spaces", json: json)
         }
+        if permissions.contains("caffeinate"), let json = lastCaffeinate {
+            push(channel: "caffeinate", json: json)
+        }
     }
 
     private func startBattery() {
@@ -798,6 +811,18 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         }
         pushFn()
         scope.adopt(SpacesObserver.shared.subscribe(pushFn))
+    }
+
+    private func startCaffeinate() {
+        let pushFn: () -> Void = { [weak self] in
+            guard let self = self else { return }
+            let json = Bridge.jsonify(Caffeinate.snapshot())
+            if json == self.lastCaffeinate { return }
+            self.lastCaffeinate = json
+            self.push(channel: "caffeinate", json: json)
+        }
+        pushFn()
+        scope.adopt(CaffeinateObserver.shared.subscribe(pushFn))
     }
 
     // App activations come from NSWorkspace; within-app focus / title changes
