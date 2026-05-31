@@ -1,0 +1,8 @@
+{
+  "id": "menubar-item",
+  "name": "Menubar item demo",
+  "anchor": { "edge": "top-left", "inset": [16, 16] },
+  "size": { "w": 1, "h": 1 },
+  "clickThrough": true,
+  "permissions": ["menubar.item", "battery"]
+}

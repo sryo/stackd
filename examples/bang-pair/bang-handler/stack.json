@@ -1,0 +1,8 @@
+{
+  "id": "bang-handler",
+  "name": "Bang handler",
+  "anchor": { "edge": "bottom-left", "inset": [56, 16] },
+  "size":   { "w": 200, "h": 32 },
+  "handles": ["demo.greeting"],
+  "permissions": []
+}

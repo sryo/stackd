@@ -1,0 +1,29 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <style>
+    body { font-family: -apple-system; color: #f5f5f7; background: transparent; margin: 0; }
+    .card { padding: 10px 14px; background: rgba(28,28,30,0.85); backdrop-filter: blur(20px); border-radius: 10px; }
+    .title { font-size: 11px; opacity: 0.7; }
+    .msg { font-size: 15px; margin-top: 4px; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="title">Downloads</div>
+    <div class="msg" id="msg">watching…</div>
+  </div>
+  <script type="module">
+    import { sd } from "sd://runtime/api.js";
+
+    // sd.fs.watch(path, fn) returns a watchId. `fn` fires with an array of
+    // { kind: "created"|"modified"|"removed"|"renamed", path } events
+    // (coalesced by FSEvents at ~100ms).
+    await sd.fs.watch("~/Downloads", (ev) => {
+      const name = ev.path.split("/").pop();
+      msg.textContent = `${ev.kind}: ${name}`;
+    });
+  </script>
+</body>
+</html>

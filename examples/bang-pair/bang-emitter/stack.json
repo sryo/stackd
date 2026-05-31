@@ -1,0 +1,7 @@
+{
+  "id": "bang-emitter",
+  "name": "Bang emitter",
+  "anchor": { "edge": "bottom-left", "inset": [16, 16] },
+  "size":   { "w": 200, "h": 32 },
+  "permissions": []
+}

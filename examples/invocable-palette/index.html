@@ -1,0 +1,39 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <style>
+    body { font-family: -apple-system; color: #f5f5f7; background: transparent; margin: 0; }
+    .panel { padding: 16px 20px; background: rgba(28,28,30,0.95); backdrop-filter: blur(30px); border-radius: 12px; box-shadow: 0 10px 40px rgba(0,0,0,0.4); }
+    .label { font-size: 11px; opacity: 0.6; text-transform: uppercase; letter-spacing: 0.05em; }
+    .selected { font-size: 14px; font-family: ui-monospace, "SF Mono", Menlo, monospace; margin-top: 6px; }
+    kbd { background: rgba(255,255,255,0.1); padding: 1px 6px; border-radius: 3px; font-size: 11px; }
+  </style>
+</head>
+<body>
+  <div class="panel">
+    <div class="label">focused AX element <kbd>Esc</kbd> to dismiss</div>
+    <div class="selected" id="sel">press ctrl+cmd+space to invoke</div>
+  </div>
+  <script type="module">
+    import { sd } from "sd://runtime/api.js";
+
+    // invocable: true stacks start hidden. sd.window.invoke() reveals them
+    // and takes keyboard focus; sd.window.dismiss() hides and restores focus.
+    window.onHotkey_show = async () => {
+      await sd.window.invoke();
+      // Now ask AX what the previously-focused element is. We do this AFTER
+      // invoke so the user sees the snapshot of where their cursor was when
+      // they summoned the palette.
+      const el = await sd.ax.focused();
+      sel.textContent = el
+        ? `${el.app} · ${el.role}${el.selectedText ? ` · "${el.selectedText.slice(0, 40)}"` : ""}`
+        : "(nothing focused)";
+    };
+
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") sd.window.dismiss();
+    });
+  </script>
+</body>
+</html>

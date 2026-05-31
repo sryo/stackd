@@ -1,0 +1,11 @@
+{
+  "id": "invocable-palette",
+  "name": "Invocable palette",
+  "anchor": { "edge": "top", "inset": [200, 0] },
+  "size": { "w": 480, "h": 80 },
+  "invocable": true,
+  "permissions": ["ax"],
+  "hotkeys": [
+    { "key": "ctrl+cmd+space", "callback": "show" }
+  ]
+}

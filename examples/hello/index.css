@@ -1,0 +1,12 @@
+:root { --sd-accent: #0a84ff; }
+html, body { margin: 0; padding: 0; background: transparent; }
+body { font-family: -apple-system, "SF Pro Text", system-ui, sans-serif; color: #f5f5f7; }
+body[data-theme="light"] { color: #1d1d1f; }
+.card {
+  padding: 10px 14px;
+  background: color-mix(in oklab, var(--sd-accent) 18%, transparent);
+  backdrop-filter: blur(20px);
+  border-radius: 10px;
+}
+.title { font-size: 11px; opacity: 0.7; text-transform: uppercase; letter-spacing: 0.05em; }
+.value { font-size: 22px; font-weight: 600; margin-top: 2px; }

@@ -1,0 +1,7 @@
+{
+  "id": "hello",
+  "name": "Hello",
+  "anchor": { "edge": "top-right", "inset": [16, 16] },
+  "size":   { "w": 200, "h": 64 },
+  "permissions": ["battery", "appearance"]
+}

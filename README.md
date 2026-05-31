@@ -35,14 +35,22 @@ On first launch stackd asks for **Accessibility** (for hotkeys, event taps, wind
 
 The user folder `~/stackd/` is created automatically. Drop your stacks under `~/stackd/stacks/<name>/`.
 
-## A stack in five lines
+## Your first stack
+
+```
+stackd new hello
+```
+
+Scaffolds `~/stackd/stacks/hello/` with three files (`stack.json`, `index.html`, `index.css`) — a transparent panel in your top-right showing the current battery percent and theme. FSEvents picks it up within ~300ms; no build step. Edit `index.html`, save, watch it change.
+
+Every stack is the same three files. `stack.json` says where it lives on screen and what system data it's allowed to read (`permissions`). `index.html` is the markup, loaded into a transparent WKWebView. The `sd.*` namespace inside is the bridge to the daemon — `sd.battery`, `sd.windows.focused`, `sd.appearance` are *signals* you subscribe to with `sd.bind(...)`:
 
 ```html
 <!doctype html><meta charset="utf-8">
 <div id="t"></div>
 <script type="module">
   import { sd } from "sd://runtime/api.js";
-  sd.mouse.subscribe(m => t.textContent = `${m.x}, ${m.y}`);
+  sd.bind(t, sd.mouse, m => m ? `${m.x}, ${m.y}` : "…");
 </script>
 ```
 
@@ -53,7 +61,9 @@ The user folder `~/stackd/` is created automatically. Drop your stacks under `~/
   "permissions": ["mouse"] }
 ```
 
-Drop these as `index.html` and `stack.json` into `~/stackd/stacks/cursor/`. The daemon notices via FSEvents, loads the stack within ~300ms, and a transparent HUD appears in your top-right corner reading the live cursor position. Edit the file, save, see the change.
+When you're ready for something more, copy one of the [`examples/`](examples) folders into `~/stackd/stacks/`. `examples/menubar-item` shows `sd.menubar.addItem` for NSStatusItem widgets. `examples/invocable-palette` shows hotkey-summoned overlays + AX reads. `examples/fs-watcher` shows the filesystem API. `examples/bang-pair` shows two stacks talking via bangs.
+
+`stackd doctor` checks every manifest in `~/stackd/stacks/` for missing fields, typo permissions, and a few other footguns.
 
 ## Concepts
 
@@ -90,6 +100,7 @@ sd.events.synthesize    type / key / scroll / click (CGEvent post)
 sd.settings             per-stack k/v              (UserDefaults suites)
 sd.window.invoke/dismiss invocable stacks (palettes)
 sd.menubar.suppress     hide/restore system menu bar
+sd.menubar.addItem      add an NSStatusItem to the menu bar
 ```
 
 Window lifecycle (sd.window.created / destroyed / titleChanged) fires as bangs — declare in `stack.json`:
@@ -109,6 +120,9 @@ stackd reload                                     tear down + re-discover from d
 stackd toggle <id>                                enable / disable a single stack
 stackd set <id|/regex/> --css <prop>=<value>      live theme override
 stackd bang <name> [KEY=VAL ...]                  fire a bang to subscribed stacks
+stackd new <name> [--template <hello|menubar|hud>]
+                                                  scaffold a new stack
+stackd doctor                                     validate every manifest
 stackd help
 ```
 

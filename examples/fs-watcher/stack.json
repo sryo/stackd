@@ -1,0 +1,7 @@
+{
+  "id": "fs-watcher",
+  "name": "Downloads folder watcher",
+  "anchor": { "edge": "top-right", "inset": [88, 16] },
+  "size":   { "w": 240, "h": 64 },
+  "permissions": ["fs"]
+}
