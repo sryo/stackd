@@ -518,6 +518,10 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         .sync("spaces.windowSpaces", permission: "spaces", denyValue: [NSNumber]()) { body in
             Spaces.windowSpaces(windowID: UInt32((body["id"] as? Int) ?? 0)).map { NSNumber(value: $0) }
         },
+        .sync("spaces.minimizedWindows", permission: "spaces", denyValue: [NSNumber]()) { body in
+            let id = UInt64((body["spaceID"] as? Int) ?? 0)
+            return Spaces.minimizedWindows(spaceID: id).map { NSNumber(value: $0) }
+        },
 
         // Accessibility — all .ax variants hop to main and have access to axHandles via bridge
         .ax("ax.focused") { _, _ in AX.focusedElement() },

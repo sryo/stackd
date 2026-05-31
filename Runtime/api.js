@@ -450,7 +450,9 @@ export const sd = {
     all: channel("spaces"),
     // Spaces this window is on, by CGWindowID — Promise<number[]>.
     // Backed by SLSCopySpacesForWindows.
-    windowSpaces(id) { return request({ type: "spaces.windowSpaces", id }); }
+    windowSpaces(id) { return request({ type: "spaces.windowSpaces", id }); },
+    // CGWindowIDs of minimized windows on a space — Promise<number[]>.
+    minimizedWindows(spaceID) { return request({ type: "spaces.minimizedWindows", spaceID }); }
   },
   menu: {
     // Native NSMenu at the current cursor position. items is an array of

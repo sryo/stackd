@@ -12,11 +12,18 @@ private enum SkyLightSpaces {
     typealias GetActiveSpaceFn       = @convention(c) (Int32) -> UInt64
     typealias CopySpacesForWindowsFn = @convention(c) (Int32, UInt32, CFArray) -> Unmanaged<CFArray>?
 
+    // SLSRegisterConnectionNotifyProc(cid, callback, eventType, context). Used
+    // for kCGSEvent space-life notifs that NSWorkspace doesn't surface. Yabai's
+    // src/yabai.c is the reference for the exact signature.
+    typealias CGSConnectionCallback = @convention(c) (UInt32, UnsafeMutableRawPointer?, Int, UnsafeMutableRawPointer?, Int32) -> Void
+    typealias RegisterNotifyProcFn  = @convention(c) (Int32, CGSConnectionCallback, UInt32, UnsafeMutableRawPointer?) -> Int32
+
     static let mainConnection:       MainConnectionFn?       = SkyLight.sym("SLSMainConnectionID")
     static let copyManagedSpaces:    CopyManagedSpacesFn?    = SkyLight.sym("SLSCopyManagedDisplaySpaces")
     static let spaceGetType:         SpaceGetTypeFn?         = SkyLight.sym("SLSSpaceGetType")
     static let getActiveSpace:       GetActiveSpaceFn?       = SkyLight.sym("SLSGetActiveSpace")
     static let copySpacesForWindows: CopySpacesForWindowsFn? = SkyLight.sym("SLSCopySpacesForWindows")
+    static let registerNotifyProc:   RegisterNotifyProcFn?   = SkyLight.sym("SLSRegisterConnectionNotifyProc")
 
     static let cid: Int32 = mainConnection?() ?? 0
 }
@@ -87,11 +94,70 @@ enum Spaces {
         let nums = (cfRef as? [NSNumber]) ?? []
         return nums.map { $0.uint64Value }
     }
+
+    /// CGWindowIDs of all currently MINIMIZED windows on `spaceID`. Used by
+    /// WindowScape's "where did I minimize this?" recall, and by future
+    /// snapshot/restore code.
+    ///
+    /// Path chosen: CGWindowList(.optionAll) → filter `kCGWindowIsOnscreen == 0`
+    /// → cross-reference each candidate with `windowSpaces(windowID:)`.
+    /// SLSCopyWindowsWithOptionsAndTags is the more direct SLS route (yabai
+    /// uses it with options=0x7 for "include minimized") but its set_tags /
+    /// clear_tags out-parameter pair is easy to get wrong from Swift and the
+    /// minimized bit isn't directly selectable — you'd still need a second
+    /// pass against options=0x2 to subtract on-screen windows. The CG +
+    /// windowSpaces route stays on public API for the heavy lift and only
+    /// uses SLS for the per-window space lookup we already vend.
+    static func minimizedWindows(spaceID: UInt64) -> [UInt32] {
+        guard let raw = CGWindowListCopyWindowInfo(
+            [.optionAll, .excludeDesktopElements],
+            kCGNullWindowID
+        ) else { return [] }
+        let list = raw as! [[String: Any]]
+        var out: [UInt32] = []
+        for info in list {
+            guard let layer = info[kCGWindowLayer as String] as? Int, layer == 0,
+                  let num = info[kCGWindowNumber as String] as? Int else { continue }
+            let onscreen = (info[kCGWindowIsOnscreen as String] as? Int) ?? 0
+            if onscreen != 0 { continue }
+            let wid = UInt32(num)
+            if windowSpaces(windowID: wid).contains(spaceID) {
+                out.append(wid)
+            }
+        }
+        return out
+    }
+}
+
+// CGS event types observed below. Yabai's src/yabai.c is the reference for
+// which IDs are live on shipping macOS:
+//   1327 — space created
+//   1328 — space destroyed
+//   1204 — Mission Control entered (proxy for the user-driven space re-order
+//          interaction that NSWorkspace's activeSpaceDidChange doesn't fire on
+//          when no active-space change happens)
+//
+// SkyLight exposes no public "remove notify" entry point, so once registered
+// the callback lives for the process. We guard registration with a static
+// flag and route into the singleton; Token cancel only tears down the
+// NSWorkspace / NSApplication observers (the CGS callback no-ops once
+// SpacesObserver has no subscribers because fire() iterates an empty subs
+// dict).
+private let kCGSEventSpaceCreated:        UInt32 = 1327
+private let kCGSEventSpaceDestroyed:      UInt32 = 1328
+private let kCGSEventMissionControlEnter: UInt32 = 1204
+
+private let spacesCGSCallback: SkyLightSpaces.CGSConnectionCallback = { _, _, _, _, _ in
+    DispatchQueue.main.async {
+        SpacesObserver.shared.fire()
+    }
 }
 
 final class SpacesObserver: RefCountedObserver {
     static let shared = SpacesObserver()
     private override init() { super.init() }
+
+    private static var cgsRegistered = false
 
     override func install() -> Token {
         let workspaceCenter = NSWorkspace.shared.notificationCenter
@@ -105,6 +171,16 @@ final class SpacesObserver: RefCountedObserver {
             forName: NSApplication.didChangeScreenParametersNotification,
             object: nil, queue: .main
         ) { [weak self] _ in self?.fire() }
+
+        if !SpacesObserver.cgsRegistered,
+           let reg = SkyLightSpaces.registerNotifyProc {
+            let cid = SkyLightSpaces.cid
+            _ = reg(cid, spacesCGSCallback, kCGSEventSpaceCreated,        nil)
+            _ = reg(cid, spacesCGSCallback, kCGSEventSpaceDestroyed,      nil)
+            _ = reg(cid, spacesCGSCallback, kCGSEventMissionControlEnter, nil)
+            SpacesObserver.cgsRegistered = true
+        }
+
         return Token {
             workspaceCenter.removeObserver(t1)
             appCenter.removeObserver(t2)
