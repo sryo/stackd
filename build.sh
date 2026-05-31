@@ -21,7 +21,8 @@ SWIFT_SOURCES=(
   Sources/DataSources/Battery.swift
   Sources/DataSources/Mouse.swift
   Sources/DataSources/Hotkey.swift
-  Sources/DataSources/EventTap.swift
+  Sources/DataSources/Events.swift
+
   Sources/DataSources/Workspace.swift
   Sources/DataSources/AXObserver.swift
   Sources/DataSources/Gesture.swift
@@ -38,7 +39,6 @@ SWIFT_SOURCES=(
   Sources/DataSources/FS.swift
   Sources/DataSources/Pasteboard.swift
   Sources/DataSources/Proc.swift
-  Sources/DataSources/EventsSynthesize.swift
   Sources/DataSources/Apps.swift
   Sources/DataSources/Icons.swift
   Sources/DataSources/AX.swift
