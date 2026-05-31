@@ -24,16 +24,17 @@ SWIFT_SOURCES=(
   Sources/DataSources/Events.swift
 
   Sources/DataSources/Workspace.swift
-  Sources/DataSources/AXObserver.swift
+  Sources/DataSources/Windows.swift
+
   Sources/DataSources/Gesture.swift
   Sources/DataSources/Appearance.swift
   Sources/DataSources/Input.swift
   Sources/DataSources/Defaults.swift
+  Sources/DataSources/Menubar.swift
+
   Sources/DataSources/Network.swift
   Sources/DataSources/Audio.swift
   Sources/DataSources/Display.swift
-  Sources/DataSources/MenuBar.swift
-  Sources/DataSources/StatusItem.swift
   Sources/DataSources/Media.swift
   Sources/DataSources/Settings.swift
   Sources/DataSources/FS.swift
@@ -42,10 +43,7 @@ SWIFT_SOURCES=(
   Sources/DataSources/Apps.swift
   Sources/DataSources/Icons.swift
   Sources/DataSources/AX.swift
-  Sources/DataSources/WindowsLifecycle.swift
-  Sources/DataSources/WindowsByID.swift
   Sources/DataSources/Spaces.swift
-  Sources/DataSources/PopupMenu.swift
   Sources/DataSources/Caffeinate.swift
   Sources/DataSources/Notify.swift
 )
