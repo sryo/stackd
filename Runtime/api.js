@@ -384,8 +384,20 @@ export const sd = {
   },
   // Fire a bang to every stack whose manifest `handles` array contains `name`.
   // Returns the count of stacks that received it. Same dispatch as
-  // system-fired bangs (sd.window.created, etc.) — JS handlers register via
+  // system-fired bangs — JS handlers register via
   // `window.onBang_<sanitized_name> = (detail) => { ... }`.
+  //
+  // System-fired window bangs (see Sources/DataSources/WindowEvents.swift +
+  // Sources/DataSources/Windows.swift):
+  //   sd.window.created        { id, pid, app, title, frame } — CGS + 1Hz poll
+  //   sd.window.destroyed      { id }                         — CGS + 1Hz poll
+  //   sd.window.titleChanged   { id, app, title, oldTitle, frame, pid } — 1Hz poll
+  //   sd.window.moved          { id, frame }                  — CGS (high rate during drag)
+  //   sd.window.resized        { id, frame }                  — CGS (high rate during resize)
+  //   sd.window.minimized      { id }                         — CGS
+  //   sd.window.deminimized    { id }                         — CGS
+  //   sd.window.reordered      { id }                         — CGS (z-order change)
+  //   sd.window.focusedByMouse { }                            — CGS (frontmost-app change)
   bang(name, detail) { return request({ type: "bang", name, detail: detail || {} }); },
   // Per-screen Spaces info via SkyLight private SPI:
   //   { [screenUUID]: { spaces: [id, ...], active: id|null, isFullscreen: bool } }

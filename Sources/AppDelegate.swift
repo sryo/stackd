@@ -98,6 +98,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Lazy: the 1Hz CGWindowList poll only runs while at least one stack
         // declares a sd.window.* handle (subscribe + scope.adopt happens in
         // StackHost.spawnInstance). With no listeners, daemon idle cost is 0.
+
+        // CGS connection-notify window events: faster + earlier than the 1Hz
+        // poll above, and they cover events the poll can't see (moved, resized,
+        // minimized, deminimized, reordered, focusedByMouse). SkyLight has no
+        // removeNotifyProc, so this is install-once for the process lifetime;
+        // the host.bang fan-out inside the callback is a no-op when no stack
+        // handles the bang. See Sources/DataSources/WindowEvents.swift for
+        // event IDs and payload decoding.
+        WindowEvents.install()
     }
 
     func applicationWillTerminate(_ note: Notification) {

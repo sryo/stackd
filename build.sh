@@ -28,6 +28,7 @@ SWIFT_SOURCES=(
 
   Sources/DataSources/App.swift
   Sources/DataSources/Windows.swift
+  Sources/DataSources/WindowEvents.swift
 
   Sources/DataSources/Gesture.swift
   Sources/DataSources/Appearance.swift
