@@ -10,7 +10,7 @@
   .t   { opacity: 0.5; }
 </style>
 </head><body>
-<h1>distributednotifications — lock/unlock to see events</h1>
+<h1>broadcasts — lock/unlock to see events</h1>
 <div class="log" id="log"></div>
 <script type="module">
   import { sd } from "sd://runtime/api.js";
@@ -25,11 +25,11 @@
   };
 
   // Lock-screen DN. Trigger via Cmd+Ctrl+Q.
-  await sd.distributednotifications.observe("com.apple.screenIsLocked", (p) => {
+  await sd.broadcasts.observe("com.apple.screenIsLocked", (p) => {
     append(`<b>locked</b> ${JSON.stringify(p)}`);
     console.log("locked", p);
   });
-  await sd.distributednotifications.observe("com.apple.screenIsUnlocked", (p) => {
+  await sd.broadcasts.observe("com.apple.screenIsUnlocked", (p) => {
     append(`<b>unlocked</b> ${JSON.stringify(p)}`);
     console.log("unlocked", p);
   });
@@ -40,7 +40,7 @@
   // through a small swift/osascript shim. As a quick smoke test:
   //   osascript -e 'use framework "Foundation"' \
   //             -e 'current application''s NSDistributedNotificationCenter''s defaultCenter''s postNotificationName:"sd.test.ping" object:"hello"'
-  await sd.distributednotifications.observe("sd.test.ping", (p) => {
+  await sd.broadcasts.observe("sd.test.ping", (p) => {
     append(`<b>ping</b> ${JSON.stringify(p)}`);
     console.log("ping", p);
   });

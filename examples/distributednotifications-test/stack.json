@@ -1,7 +1,0 @@
-{
-  "id": "distributednotifications-test",
-  "name": "DistributedNotifications observer demo",
-  "anchor": { "edge": "top-right", "inset": [16, 16] },
-  "size": { "w": 320, "h": 200 },
-  "permissions": ["distributednotifications"]
-}

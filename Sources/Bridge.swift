@@ -43,8 +43,8 @@ final class Bridge: NSObject, WKScriptMessageHandler {
     fileprivate var hotkeyTokens: [Int: Token] = [:]
     fileprivate var nextHotkeyId: Int = 1
     // JS-bound DN observers: id → Token. Scope drains them on unload.
-    fileprivate var dnTokens: [Int: Token] = [:]
-    fileprivate var nextDnId: Int = 1
+    fileprivate var broadcastTokens: [Int: Token] = [:]
+    fileprivate var nextBroadcastId: Int = 1
     /// Per-stack native-resource scope. Every observer subscription, hotkey
     /// bind, eventtap register, menubar suppression goes in here. StackHost
     /// calls drain() on unload to release them all in reverse order.
@@ -188,8 +188,8 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         // this stack registered with DistributedNotificationCenter on unload.
         scope.adopt(Token { [weak self] in
             guard let self = self else { return }
-            for (_, t) in self.dnTokens { t.cancel() }
-            self.dnTokens.removeAll()
+            for (_, t) in self.broadcastTokens { t.cancel() }
+            self.broadcastTokens.removeAll()
         })
     }
 
@@ -659,27 +659,27 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         // ── Generic NSDistributedNotificationCenter observer ─────────────────
         // Complements Caffeinate (which hard-codes screenIsLocked / screenIsUnlocked):
         // here the stack picks the notification name. Same mint-id + window-global
-        // fire pattern as hotkey.bind. Permission: "distributednotifications".
-        .custom("dn.observe", permission: "distributednotifications") { bridge, body, requestId in
+        // fire pattern as hotkey.bind. Permission: "broadcasts".
+        .custom("broadcasts.observe", permission: "broadcasts") { bridge, body, requestId in
             guard let name = body["name"] as? String else {
                 bridge.respond(requestId: requestId, value: NSNull()); return
             }
-            let id = bridge.nextDnId
-            bridge.nextDnId += 1
-            let token = DistributedNotifications.observe(name: name) { [weak bridge] payload in
+            let id = bridge.nextBroadcastId
+            bridge.nextBroadcastId += 1
+            let token = Broadcasts.observe(name: name) { [weak bridge] payload in
                 guard let webView = bridge?.webView else { return }
                 let json = Bridge.jsonify(payload)
                 DispatchQueue.main.async {
-                    webView.evaluateJavaScript("window.__sd_dn_fire && window.__sd_dn_fire(\(id), \(json));",
+                    webView.evaluateJavaScript("window.__sd_broadcast_fire && window.__sd_broadcast_fire(\(id), \(json));",
                                                completionHandler: nil)
                 }
             }
-            bridge.dnTokens[id] = token
+            bridge.broadcastTokens[id] = token
             bridge.respond(requestId: requestId, value: id)
         },
-        .syncBridge("dn.unobserve", permission: "distributednotifications", denyValue: false) { b, body in
+        .syncBridge("broadcasts.unobserve", permission: "broadcasts", denyValue: false) { b, body in
             guard let id = body["id"] as? Int,
-                  let t = b.dnTokens.removeValue(forKey: id) else { return false }
+                  let t = b.broadcastTokens.removeValue(forKey: id) else { return false }
             t.cancel()
             return true
         },

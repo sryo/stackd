@@ -1,10 +1,16 @@
 import Foundation
 
-// Generic JS-side observer of NSDistributedNotificationCenter. Complements
-// Caffeinate (which hard-codes the lock/sleep DN names) by exposing the same
-// underlying machinery for any notification name a stack wants to listen for.
-// Hammerspoon's hs.distributednotifications is the reference.
-enum DistributedNotifications {
+// Generic JS-side observer of NSDistributedNotificationCenter. Listens IN for
+// system / inter-process events (e.g. com.apple.screenIsLocked, app-published
+// broadcasts) and forwards them to a JS callback. Complements Caffeinate
+// (which hard-codes the lock/sleep DN names) by exposing the same underlying
+// machinery for any notification name a stack wants to observe.
+//
+// Named "Broadcasts" rather than "DistributedNotifications" to avoid the
+// macOS naming collision: Notify.swift sends OUT to Notification Center;
+// this file listens IN to the system event bus. Different direction,
+// different responsibility. Hammerspoon calls it hs.distributednotifications.
+enum Broadcasts {
     static func observe(name: String,
                         callback: @escaping ([String: Any]) -> Void) -> Token {
         let center = DistributedNotificationCenter.default()

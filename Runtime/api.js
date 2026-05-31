@@ -66,10 +66,10 @@ window.__sd_hotkey_fire = (id) => {
   const fn = hotkeyHandlers.get(id);
   if (fn) fn();
 };
-// DN callbacks routed by mint id. Populated by sd.distributednotifications.observe.
-const dnHandlers = new Map();
-window.__sd_dn_fire = (id, payload) => {
-  const fn = dnHandlers.get(id);
+// DN callbacks routed by mint id. Populated by sd.broadcasts.observe.
+const broadcastHandlers = new Map();
+window.__sd_broadcast_fire = (id, payload) => {
+  const fn = broadcastHandlers.get(id);
   if (fn) fn(payload);
 };
 function request(payload) {
@@ -364,22 +364,22 @@ export const sd = {
   },
   // Generic NSDistributedNotificationCenter observer. The same machinery
   // Caffeinate uses internally (com.apple.screenIsLocked, etc.) but exposed
-  // to any stack. Permission: "distributednotifications".
-  //   const id = await sd.distributednotifications.observe(
+  // to any stack. Permission: "broadcasts".
+  //   const id = await sd.broadcasts.observe(
   //     "com.apple.screenIsLocked",
   //     (payload) => console.log("locked at", payload));
   //   ...later...
-  //   await sd.distributednotifications.unobserve(id);
-  distributednotifications: {
+  //   await sd.broadcasts.unobserve(id);
+  broadcasts: {
     async observe(name, fn) {
-      const id = await request({ type: "dn.observe", name });
+      const id = await request({ type: "broadcasts.observe", name });
       if (id == null || id === false) return null;
-      dnHandlers.set(id, fn);
+      broadcastHandlers.set(id, fn);
       return id;
     },
     async unobserve(id) {
-      dnHandlers.delete(id);
-      return request({ type: "dn.unobserve", id });
+      broadcastHandlers.delete(id);
+      return request({ type: "broadcasts.unobserve", id });
     }
   },
   // Fire a bang to every stack whose manifest `handles` array contains `name`.
