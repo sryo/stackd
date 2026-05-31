@@ -2,37 +2,23 @@ import AppKit
 import Foundation
 
 // Per-display Spaces info via SkyLight private SPI. Same family of symbols
-// hs.spaces uses (SLSCopyManagedDisplaySpaces, SLSSpaceGetType). Resolved
-// at runtime via dlsym; degrades gracefully if Apple ever renames them.
-enum SkyLightSpaces {
+// hs.spaces uses (SLSCopyManagedDisplaySpaces, SLSSpaceGetType). Shared
+// SkyLight loader lives in Sources/Private/SkyLight.swift; this enum just
+// declares the symbol surface this domain needs.
+private enum SkyLightSpaces {
     typealias MainConnectionFn       = @convention(c) () -> Int32
     typealias CopyManagedSpacesFn    = @convention(c) (Int32) -> Unmanaged<CFArray>?
     typealias SpaceGetTypeFn         = @convention(c) (Int32, UInt64) -> Int32
     typealias GetActiveSpaceFn       = @convention(c) (Int32) -> UInt64
-
-    static let handle: UnsafeMutableRawPointer? = {
-        // SkyLight reliably resolves at this path on modern macOS; if Apple
-        // moves it we'll fail to load and the source returns empty data.
-        dlopen("/System/Library/PrivateFrameworks/SkyLight.framework/SkyLight", RTLD_LAZY)
-    }()
-
-    static let mainConnection: MainConnectionFn? = sym("SLSMainConnectionID")
-    static let copyManagedSpaces: CopyManagedSpacesFn? = sym("SLSCopyManagedDisplaySpaces")
-    static let spaceGetType: SpaceGetTypeFn? = sym("SLSSpaceGetType")
-    static let getActiveSpace: GetActiveSpaceFn? = sym("SLSGetActiveSpace")
-
     typealias CopySpacesForWindowsFn = @convention(c) (Int32, UInt32, CFArray) -> Unmanaged<CFArray>?
-    static let copySpacesForWindows: CopySpacesForWindowsFn? = sym("SLSCopySpacesForWindows")
 
-    static let cid: Int32 = {
-        guard let fn = mainConnection else { return 0 }
-        return fn()
-    }()
+    static let mainConnection:       MainConnectionFn?       = SkyLight.sym("SLSMainConnectionID")
+    static let copyManagedSpaces:    CopyManagedSpacesFn?    = SkyLight.sym("SLSCopyManagedDisplaySpaces")
+    static let spaceGetType:         SpaceGetTypeFn?         = SkyLight.sym("SLSSpaceGetType")
+    static let getActiveSpace:       GetActiveSpaceFn?       = SkyLight.sym("SLSGetActiveSpace")
+    static let copySpacesForWindows: CopySpacesForWindowsFn? = SkyLight.sym("SLSCopySpacesForWindows")
 
-    private static func sym<T>(_ name: String) -> T? {
-        guard let h = handle, let s = dlsym(h, name) else { return nil }
-        return unsafeBitCast(s, to: T.self)
-    }
+    static let cid: Int32 = mainConnection?() ?? 0
 }
 
 enum Spaces {

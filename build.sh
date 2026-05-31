@@ -11,6 +11,8 @@ SWIFT_SOURCES=(
   Sources/StackHost.swift
   Sources/URLSchemeHandler.swift
   Sources/StackScope.swift
+  Sources/Private/SkyLight.swift
+
   Sources/RefCountedObserver.swift
 
   Sources/Bridge.swift

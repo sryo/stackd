@@ -12,22 +12,11 @@ import AppKit
 // PopupMenu (sd.menu.popup) lives in Menu.swift — it's a transient cursor
 // menu, not part of the system menu bar.
 
-// MARK: - SkyLight private framework (CGSSetMenuBarVisibility)
+// MARK: - SkyLight CGSSetMenuBarVisibility (shared loader in Sources/Private/SkyLight.swift)
 
-// CGSSetMenuBarVisibility lives in SkyLight private framework. Loaded via
-// dlopen so it degrades to a no-op if the symbol is ever moved or removed.
-// This is the same "vendor private SPI" pattern as DisplayServicesShim.
-enum SkyLight {
+private enum SkyLightMenuBar {
     typealias SetMenuBarVisibilityFn = @convention(c) (Bool) -> Void
-
-    static let handle: UnsafeMutableRawPointer? = {
-        dlopen("/System/Library/PrivateFrameworks/SkyLight.framework/SkyLight", RTLD_LAZY)
-    }()
-
-    static let setMenuBarVisibility: SetMenuBarVisibilityFn? = {
-        guard let h = handle, let sym = dlsym(h, "CGSSetMenuBarVisibility") else { return nil }
-        return unsafeBitCast(sym, to: SetMenuBarVisibilityFn.self)
-    }()
+    static let setMenuBarVisibility: SetMenuBarVisibilityFn? = SkyLight.sym("CGSSetMenuBarVisibility")
 }
 
 // MARK: - Refcounted system menu bar visibility
@@ -43,7 +32,7 @@ enum MenuBarVisibility {
     /// suppression — no more leaks if a stack dies between suppress/restore.
     /// Returns nil if SkyLight failed to load.
     static func suppress() -> Token? {
-        guard let fn = SkyLight.setMenuBarVisibility else { return nil }
+        guard let fn = SkyLightMenuBar.setMenuBarVisibility else { return nil }
         lock.lock()
         suppressorCount += 1
         if suppressorCount == 1 { fn(false) }
@@ -61,7 +50,7 @@ enum MenuBarVisibility {
 
     /// Called on daemon shutdown / reload so we never leak the menu bar hidden.
     static func resetForReload() {
-        guard let fn = SkyLight.setMenuBarVisibility else { return }
+        guard let fn = SkyLightMenuBar.setMenuBarVisibility else { return }
         lock.lock(); defer { lock.unlock() }
         if suppressorCount > 0 {
             suppressorCount = 0
@@ -74,9 +63,9 @@ enum MenuBarVisibility {
     /// rather than the user's stale "menubar hidden" surprise.
     static func forceRestoreOnLaunch() {
         let handleOK = SkyLight.handle != nil
-        let symOK    = SkyLight.setMenuBarVisibility != nil
+        let symOK    = SkyLightMenuBar.setMenuBarVisibility != nil
         FileHandle.standardError.write(Data("stackd: SkyLight handle=\(handleOK) sym=\(symOK)\n".utf8))
-        guard let fn = SkyLight.setMenuBarVisibility else { return }
+        guard let fn = SkyLightMenuBar.setMenuBarVisibility else { return }
         lock.lock(); defer { lock.unlock() }
         suppressorCount = 0
         fn(true)
