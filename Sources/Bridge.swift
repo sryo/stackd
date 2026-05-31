@@ -22,6 +22,7 @@ final class Bridge: NSObject, WKScriptMessageHandler {
     private var lastAppsByBundle: [String: [String: Any]] = [:]
     private var lastSpaces: String?
     private var lastCaffeinate: String?
+    private var lastLocation: String?
     private var settings: StackSettings?
     private var fsWatches: [Int: FSWatch] = [:]
     private var handlesBangs: Set<String> = []
@@ -127,6 +128,7 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         if manifest.permissions.contains("apps")       { startApps() }
         if manifest.permissions.contains("spaces")     { startSpaces() }
         if manifest.permissions.contains("caffeinate") { startCaffeinate() }
+        if manifest.permissions.contains("location")   { startLocation() }
         if manifest.permissions.contains("app") || manifest.permissions.contains("windows") {
             startWorkspace(includeApp: manifest.permissions.contains("app"),
                            includeWindows: manifest.permissions.contains("windows"))
@@ -700,6 +702,9 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         if permissions.contains("caffeinate"), let json = lastCaffeinate {
             push(channel: "caffeinate", json: json)
         }
+        if permissions.contains("location"), let json = lastLocation {
+            push(channel: "location", json: json)
+        }
     }
 
     private func startBattery() {
@@ -912,6 +917,20 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         }
         pushFn()
         scope.adopt(CaffeinateObserver.shared.subscribe(pushFn))
+    }
+
+    private func startLocation() {
+        let pushFn: () -> Void = { [weak self] in
+            guard let self = self else { return }
+            // snapshot() is nil until authorization + first fix; serialize
+            // explicitly as "null" so the JS channel sees that initial state.
+            let json = Location.snapshot().map(Bridge.jsonify) ?? "null"
+            if json == self.lastLocation { return }
+            self.lastLocation = json
+            self.push(channel: "location", json: json)
+        }
+        pushFn()
+        scope.adopt(LocationObserver.shared.subscribe(pushFn))
     }
 
     // App activations come from NSWorkspace; within-app focus / title changes

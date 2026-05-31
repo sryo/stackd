@@ -1,0 +1,38 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <style>
+    html, body { margin: 0; padding: 0; background: transparent; }
+    body {
+      font-family: -apple-system, "SF Pro Text", system-ui, sans-serif;
+      color: #f5f5f7;
+    }
+    .card {
+      padding: 8px 12px;
+      background: rgba(20, 20, 22, 0.7);
+      backdrop-filter: blur(20px);
+      border-radius: 10px;
+      font-size: 12px;
+      line-height: 1.35;
+    }
+    .title { font-size: 10px; opacity: 0.6; text-transform: uppercase; letter-spacing: 0.05em; }
+    .value { font-variant-numeric: tabular-nums; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="title">location</div>
+    <div class="value" id="value">waiting for fix…</div>
+  </div>
+  <script type="module">
+    import { sd } from "sd://runtime/api.js";
+    sd.location.subscribe(loc => {
+      console.log("sd.location →", loc);
+      const el = document.getElementById("value");
+      if (!loc) { el.textContent = "waiting for fix…"; return; }
+      el.textContent = `${loc.lat.toFixed(3)}, ${loc.lon.toFixed(3)} (±${Math.round(loc.accuracy)}m)`;
+    });
+  </script>
+</body>
+</html>

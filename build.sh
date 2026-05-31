@@ -29,6 +29,7 @@ SWIFT_SOURCES=(
   Sources/DataSources/Gesture.swift
   Sources/DataSources/Appearance.swift
   Sources/DataSources/Input.swift
+  Sources/DataSources/Location.swift
   Sources/DataSources/Defaults.swift
   Sources/DataSources/Menubar.swift
 
@@ -61,6 +62,7 @@ swiftc -O \
   -framework WebKit \
   -framework IOKit \
   -framework Carbon \
+  -framework CoreLocation \
   -target arm64-apple-macos13.0
 
 # Stage Runtime next to the binary so URLSchemeHandler can find it via

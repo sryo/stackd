@@ -368,6 +368,10 @@ export const sd = {
   // Use for "don't accumulate time while screen is off" (AppTimeout),
   // "stop drawing while asleep" (TimeTrail), etc.
   caffeinate: channel("caffeinate"),
+  // Current location signal: { lat, lon, accuracy, altitude?, heading?, speed?, timestamp }.
+  // macOS asks for Location authorization the first time a stack with the
+  // "location" permission loads. Returns null until granted + first fix.
+  location: channel("location"),
   spaces: {
     all: channel("spaces"),
     // Spaces this window is on, by CGWindowID — Promise<number[]>.
