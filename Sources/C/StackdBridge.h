@@ -7,5 +7,6 @@
 #define GlasspaneBridge_h
 
 #include "TouchEvents.h"
+#include "../Private/MultitouchSupport.h"
 
 #endif

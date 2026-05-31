@@ -59,6 +59,7 @@ SWIFT_SOURCES=(
   Sources/DataSources/Caffeinate.swift
   Sources/DataSources/NLP.swift
   Sources/DataSources/Notify.swift
+  Sources/DataSources/TouchDevice.swift
   Sources/DataSources/USB.swift
 )
 
@@ -72,13 +73,15 @@ swiftc -O \
   -import-objc-header Sources/C/StackdBridge.h \
   -Xcc -Wno-zero-length-array \
   -framework AppKit \
-  -framework WebKit \
-  -framework IOKit \
+  -framework AVFoundation \
   -framework Carbon \
   -framework CoreLocation \
-  -framework AVFoundation \
-  -framework OSAKit \
+  -framework IOKit \
+  -framework MultitouchSupport \
   -framework NaturalLanguage \
+  -framework OSAKit \
+  -framework WebKit \
+  -F /System/Library/PrivateFrameworks \
   -target arm64-apple-macos13.0
 
 # Stage Runtime next to the binary so URLSchemeHandler can find it via

@@ -27,6 +27,7 @@ final class Bridge: NSObject, WKScriptMessageHandler {
     private var lastUSB: String?
     private var lastCamera: String?
     private var lastHostLoad: String?
+    private var lastTouchDevice: String?
     private var settings: StackSettings?
     private var fsWatches: [Int: FSWatch] = [:]
     private var handlesBangs: Set<String> = []
@@ -140,6 +141,7 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         if manifest.permissions.contains("usb")        { startUSB() }
         if manifest.permissions.contains("camera")     { startCamera() }
         if manifest.permissions.contains("host")       { startHost() }
+        if manifest.permissions.contains("touchdevice") { startTouchDevice() }
         if manifest.permissions.contains("app") || manifest.permissions.contains("windows") {
             startWorkspace(includeApp: manifest.permissions.contains("app"),
                            includeWindows: manifest.permissions.contains("windows"))
@@ -811,6 +813,9 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         if permissions.contains("host"), let json = lastHostLoad {
             push(channel: "hostLoad", json: json)
         }
+        if permissions.contains("touchdevice"), let json = lastTouchDevice {
+            push(channel: "touchdevice", json: json)
+        }
     }
 
     private func startBattery() {
@@ -1088,6 +1093,21 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         }
         pushFn()
         scope.adopt(HostObserver.shared.subscribe(pushFn))
+    }
+
+    private func startTouchDevice() {
+        let pushFn: () -> Void = { [weak self] in
+            guard let self = self else { return }
+            // No-frame state (untouched trackpad before first event) skips
+            // the push — JS sees the channel stay at its null initial.
+            guard let snap = TouchDevice.snapshot() else { return }
+            let json = Bridge.jsonify(snap)
+            if json == self.lastTouchDevice { return }
+            self.lastTouchDevice = json
+            self.push(channel: "touchdevice", json: json)
+        }
+        pushFn()
+        scope.adopt(TouchDeviceObserver.shared.subscribe(pushFn))
     }
 
     // App activations come from NSWorkspace; within-app focus / title changes

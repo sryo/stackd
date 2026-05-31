@@ -517,9 +517,7 @@ enum AXObserverPool {
             return nil
         }
         subCounts[pid] = (subCounts[pid] ?? 0) + 1
-        let dbgCount = pool.count
         lock.unlock()
-        FileHandle.standardError.write(Data("AXObserverPool: +sub pid=\(pid) notif=\(notification) pool=\(dbgCount)\n".utf8))
 
         var cancelled = false
         return Token {
@@ -536,9 +534,7 @@ enum AXObserverPool {
             } else {
                 subCounts[pid] = n
             }
-            let dbgCount = pool.count
             lock.unlock()
-            FileHandle.standardError.write(Data("AXObserverPool: -sub pid=\(pid) notif=\(notification) pool=\(dbgCount)\n".utf8))
         }
     }
 

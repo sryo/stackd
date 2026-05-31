@@ -1,0 +1,98 @@
+<!doctype html>
+<html><head><meta charset="utf-8">
+<style>
+  html, body { margin: 0; padding: 0; height: 100%; background: transparent; overflow: hidden; }
+  canvas { display: block; width: 100vw; height: 100vh; }
+  #hud {
+    position: fixed; top: 12px; left: 12px;
+    padding: 8px 12px; border-radius: 8px;
+    background: rgba(20, 20, 22, 0.78);
+    color: #fff;
+    font: 11px ui-monospace, Menlo, monospace;
+    -webkit-backdrop-filter: blur(20px);
+    pointer-events: none;
+  }
+</style>
+</head><body>
+<canvas id="c"></canvas>
+<div id="hud">touchdevice — touch trackpad</div>
+<script type="module">
+  import { sd } from "sd://runtime/api.js";
+
+  const canvas = document.getElementById("c");
+  const ctx = canvas.getContext("2d");
+  const hud = document.getElementById("hud");
+
+  function resize() {
+    const dpr = window.devicePixelRatio || 1;
+    canvas.width = window.innerWidth * dpr;
+    canvas.height = window.innerHeight * dpr;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+  resize();
+  window.addEventListener("resize", resize);
+
+  // Distinct color per stable finger identifier. MultitouchSupport.framework
+  // keeps fingerID stable across frames as long as the finger stays on the
+  // trackpad — so the same finger keeps the same color across moves.
+  const palette = [
+    "#ff453a", "#ff9f0a", "#ffd60a", "#30d158", "#64d2ff",
+    "#0a84ff", "#bf5af2", "#ff375f", "#5ac8fa", "#ffd60a"
+  ];
+  const colorFor = (id) => palette[((id % palette.length) + palette.length) % palette.length];
+
+  let lastFrameCount = 0;
+  let frameRateSamples = [];
+  let lastRateTick = performance.now();
+
+  sd.bind(null, sd.touchdevice, (snap) => {
+    const w = window.innerWidth;
+    const h = window.innerHeight;
+    ctx.clearRect(0, 0, w, h);
+
+    if (!snap || !snap.touches) {
+      hud.textContent = "touchdevice — no frames yet (touch trackpad)";
+      return;
+    }
+
+    const touches = snap.touches;
+    const now = performance.now();
+    frameRateSamples.push(now);
+    // Drop samples older than 1 second.
+    while (frameRateSamples.length && frameRateSamples[0] < now - 1000) {
+      frameRateSamples.shift();
+    }
+    const hz = frameRateSamples.length;
+
+    for (const t of touches) {
+      // y is bottom-origin in MT coordinates; flip for screen-top origin.
+      const x = t.x * w;
+      const y = (1 - t.y) * h;
+      // size is the zTotal field (0..1, surface-area proxy). Scale up so a
+      // bare-fingertip touch is visible without being a wall.
+      const r = 12 + (t.size || 0) * 80;
+
+      ctx.beginPath();
+      ctx.arc(x, y, r, 0, Math.PI * 2);
+      ctx.fillStyle = colorFor(t.identifier) + "cc";
+      ctx.fill();
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = colorFor(t.identifier);
+      ctx.stroke();
+
+      ctx.fillStyle = "#fff";
+      ctx.font = "11px ui-monospace, Menlo, monospace";
+      ctx.textAlign = "center";
+      ctx.fillText(`#${t.identifier}`, x, y - r - 6);
+      ctx.fillText(t.state, x, y + r + 14);
+    }
+
+    hud.textContent =
+      `touchdevice — fingers: ${touches.length}  frame: ${snap.frame}  rate: ${hz} Hz`;
+    if (snap.frame !== lastFrameCount) {
+      lastFrameCount = snap.frame;
+      console.log(`tdev: ${touches.length} touches @ frame ${snap.frame}`);
+    }
+  });
+</script>
+</body></html>

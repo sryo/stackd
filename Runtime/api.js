@@ -438,6 +438,19 @@ export const sd = {
   //   sd.sensors → { temperatures: [{name,value,unit}, ...], voltages: [...],
   //                  currents: [...], fans: [{name, rpm}, ...] }
   sensors: channel("sensors"),
+  // Raw per-finger trackpad frames via MultitouchSupport (private framework).
+  // ~30 Hz coalesced from the underlying ~80 Hz callback. Frames arrive
+  // BELOW the layer where AppKit recognizes swipe/pinch/rotate — use this
+  // (not sd.gesture) when you want raw fingers with stable identity.
+  //   sd.touchdevice → { timestamp, frame, touches: [
+  //     { identifier, state, x, y, vx, vy, angle, size, pressure,
+  //       majorAxis, minorAxis }, ...] }
+  // state values: "began" | "stationary" | "moved" | "ended" | "cancelled" | "lifted".
+  // x/y are 0..1 trackpad-normalized (origin bottom-left). Empty touches[]
+  // = all fingers lifted (the "release" edge consumers' state machines need).
+  // Consumers: TTTaps multi-finger recognizer, trackpad heatmap, custom
+  // pinch-curve overlay. Cost: zero CPU when no stack subscribes.
+  touchdevice: channel("touchdevice"),
   // Apple's NaturalLanguage framework — language ID, tokenization, lemmas,
   // sentence similarity (via NLEmbedding cosine). All synchronous. Useful for
   // Palette command ranking, smart-paste rewrites, "did you mean X" hints.
