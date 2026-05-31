@@ -11,12 +11,13 @@ SWIFT_SOURCES=(
   Sources/StackHost.swift
   Sources/URLSchemeHandler.swift
   Sources/StackScope.swift
+  Sources/RefCountedObserver.swift
+
   Sources/Bridge.swift
   Sources/IPC.swift
   Sources/CLI.swift
   Sources/StackTemplates.swift
   Sources/FileWatcher.swift
-  Sources/DataSources/RefCountedObserver.swift
   Sources/DataSources/Battery.swift
   Sources/DataSources/Mouse.swift
   Sources/DataSources/Hotkey.swift
