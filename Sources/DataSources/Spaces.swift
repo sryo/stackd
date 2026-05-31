@@ -6,7 +6,6 @@ import Foundation
 // SkyLight loader lives in Sources/Private/SkyLight.swift; this enum just
 // declares the symbol surface this domain needs.
 private enum SkyLightSpaces {
-    typealias MainConnectionFn       = @convention(c) () -> Int32
     typealias CopyManagedSpacesFn    = @convention(c) (Int32) -> Unmanaged<CFArray>?
     typealias SpaceGetTypeFn         = @convention(c) (Int32, UInt64) -> Int32
     typealias GetActiveSpaceFn       = @convention(c) (Int32) -> UInt64
@@ -18,14 +17,11 @@ private enum SkyLightSpaces {
     typealias CGSConnectionCallback = @convention(c) (UInt32, UnsafeMutableRawPointer?, Int, UnsafeMutableRawPointer?, Int32) -> Void
     typealias RegisterNotifyProcFn  = @convention(c) (Int32, CGSConnectionCallback, UInt32, UnsafeMutableRawPointer?) -> Int32
 
-    static let mainConnection:       MainConnectionFn?       = SkyLight.sym("SLSMainConnectionID")
     static let copyManagedSpaces:    CopyManagedSpacesFn?    = SkyLight.sym("SLSCopyManagedDisplaySpaces")
     static let spaceGetType:         SpaceGetTypeFn?         = SkyLight.sym("SLSSpaceGetType")
     static let getActiveSpace:       GetActiveSpaceFn?       = SkyLight.sym("SLSGetActiveSpace")
     static let copySpacesForWindows: CopySpacesForWindowsFn? = SkyLight.sym("SLSCopySpacesForWindows")
     static let registerNotifyProc:   RegisterNotifyProcFn?   = SkyLight.sym("SLSRegisterConnectionNotifyProc")
-
-    static let cid: Int32 = mainConnection?() ?? 0
 }
 
 enum Spaces {
@@ -36,7 +32,7 @@ enum Spaces {
               let getType = SkyLightSpaces.spaceGetType else {
             return [:]
         }
-        let cid = SkyLightSpaces.cid
+        let cid = SkyLight.cid
         guard let cfRef = copy(cid)?.takeRetainedValue() else { return [:] }
         let displays = cfRef as? [[String: Any]] ?? []
 
@@ -87,7 +83,7 @@ enum Spaces {
     /// belongs to without trusting NSScreen-derived heuristics.
     static func windowSpaces(windowID: UInt32) -> [UInt64] {
         guard let fn = SkyLightSpaces.copySpacesForWindows else { return [] }
-        let cid = SkyLightSpaces.cid
+        let cid = SkyLight.cid
         // 0x7 covers all space-set masks (current, others, fullscreen, etc.)
         let arr: CFArray = [NSNumber(value: windowID)] as CFArray
         guard let cfRef = fn(cid, 0x7, arr)?.takeRetainedValue() else { return [] }
@@ -179,7 +175,7 @@ final class SpacesObserver: RefCountedObserver {
 
         if !SpacesObserver.cgsRegistered,
            let reg = SkyLightSpaces.registerNotifyProc {
-            let cid = SkyLightSpaces.cid
+            let cid = SkyLight.cid
             _ = reg(cid, spacesCGSCallback, kCGSEventSpaceCreated,        nil)
             _ = reg(cid, spacesCGSCallback, kCGSEventSpaceDestroyed,      nil)
             _ = reg(cid, spacesCGSCallback, kCGSEventMissionControlEnter, nil)

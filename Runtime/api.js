@@ -72,6 +72,17 @@ window.__sd_broadcast_fire = (id, payload) => {
   const fn = broadcastHandlers.get(id);
   if (fn) fn(payload);
 };
+// sd.overlay draw callbacks routed by mint id. Native calls
+// __sd_overlay_draw(id, geometry) on every vsync tick and expects a
+// declarative spec back ({ rects, lines, circles, clear? }). Returning
+// null skips the draw for that tick (cheaper than returning {} with
+// clear:true). Native JSON-stringifies the return value to bridge it
+// back to Swift — keep specs JSON-serializable.
+const overlayHandlers = new Map();
+window.__sd_overlay_draw = (id, geometry) => {
+  const fn = overlayHandlers.get(id);
+  return fn ? fn(geometry) : null;
+};
 // HTTP servers: serverId → { routes: { "POST /events": fn }, ... }.
 // Native fires window.__sd_http_request(serverId, reqId, req) on every match.
 // JS resolves with sd.httpserver.respond(reqId, response).
@@ -466,6 +477,47 @@ export const sd = {
     async unobserve(id) {
       broadcastHandlers.delete(id);
       return request({ type: "broadcasts.unobserve", id });
+    }
+  },
+  // CG-context overlay pinned to a target window the stack doesn't own
+  // (JankyBorders pattern). Lets you render focused-window accent borders,
+  // debug highlights, or pixel-accurate annotations without spawning an
+  // NSWindow per overlay.
+  //
+  //   const h = await sd.overlay.attach(windowId, (geo) => ({
+  //     rects: [{ x: 0, y: 0, w: geo.window.w, h: geo.window.h,
+  //               stroke: "#7c8cff", strokeWidth: 2, radius: 8 }]
+  //   }));
+  //   ...later...
+  //   await h.detach();
+  //
+  // The draw callback runs every vsync (sd.displayLink rate — 60 or 120Hz
+  // on ProMotion). Keep it short: a single declarative spec dict beats N
+  // CGContext calls across the JS↔Swift boundary.
+  //
+  // Spec shape (v1):
+  //   { clear?: true,
+  //     rects:   [{ x, y, w, h, fill?, stroke?, strokeWidth?, radius? }],
+  //     lines:   [{ x1, y1, x2, y2, stroke, width? }],
+  //     circles: [{ cx, cy, r, fill?, stroke?, strokeWidth? }] }
+  //
+  // Colors are "#RGB" / "#RRGGBB" / "#RRGGBBAA". Coordinates use a
+  // top-left origin where (0,0) is the top-left of the TARGET window — the
+  // surrounding padding band stackd allocates for spill-over strokes is
+  // invisible to spec authors. Permission: "overlay".
+  overlay: {
+    async attach(windowId, draw) {
+      const id = await request({ type: "overlay.attach", windowId });
+      if (id == null || id === false) return null;
+      overlayHandlers.set(id, draw);
+      return {
+        id,
+        update() { return request({ type: "overlay.update", id }); },
+        async detach() {
+          overlayHandlers.delete(id);
+          return request({ type: "overlay.detach", id });
+        }
+      };
     }
   },
   // Long-running HTTP server. Loopback-only by default; pass

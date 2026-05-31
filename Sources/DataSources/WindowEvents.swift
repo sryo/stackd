@@ -50,7 +50,6 @@ import Foundation
 //   CGWindowID in little-endian.
 
 private enum SkyLightWindowEvents {
-    typealias MainConnectionFn      = @convention(c) () -> Int32
     // SLSRegisterNotifyProc — JankyBorders/yabai use this for per-window
     // events. Callback signature: (event, data, dataLength, context). NO
     // connection id is passed (unlike SLSRegisterConnectionNotifyProc which
@@ -60,10 +59,7 @@ private enum SkyLightWindowEvents {
     typealias CGSNotifyCallback     = @convention(c) (UInt32, UnsafeMutableRawPointer?, Int, UnsafeMutableRawPointer?) -> Void
     typealias RegisterNotifyProcFn  = @convention(c) (CGSNotifyCallback, UInt32, UnsafeMutableRawPointer?) -> Int32
 
-    static let mainConnection:     MainConnectionFn?     = SkyLight.sym("SLSMainConnectionID")
     static let registerNotifyProc: RegisterNotifyProcFn? = SkyLight.sym("SLSRegisterNotifyProc")
-
-    static let cid: Int32 = mainConnection?() ?? 0
 }
 
 // CGS window event IDs. JankyBorders/events.h is the canonical reference for

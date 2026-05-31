@@ -1,0 +1,8 @@
+{
+  "id": "overlay-border",
+  "name": "Focused Window Border (JankyBorders)",
+  "region": "fullscreen",
+  "size": { "h": 0 },
+  "clickThrough": true,
+  "permissions": ["overlay", "windows"]
+}

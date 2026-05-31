@@ -49,6 +49,19 @@ final class Bridge: NSObject, WKScriptMessageHandler {
     // JS-bound DN observers: id → Token. Scope drains them on unload.
     fileprivate var broadcastTokens: [Int: Token] = [:]
     fileprivate var nextBroadcastId: Int = 1
+    // sd.overlay handles: id → (handle, displayLink subscription token).
+    // Each handle owns a SLS overlay window pinned to a foreign target wid;
+    // the token drives per-vsync redraw via DisplayLinkObserver. Scope drains
+    // both on unload (detach releases the SLS window, token cancel removes
+    // the subscription).
+    fileprivate var overlayHandles: [Int: OverlayHandle] = [:]
+    fileprivate var overlayTokens: [Int: Token] = [:]
+    fileprivate var nextOverlayId: Int = 1
+    // Per-overlay "in-flight" guard. evaluateJavaScript completion handlers
+    // arrive async — if a tick fires before the previous tick's JS callback
+    // resolved, skipping the new tick keeps us from queueing N WebKit calls
+    // deep when the JS draw closure runs slow.
+    fileprivate var overlayInFlight: Set<Int> = []
     // Owned HTTP servers: serverId → Token (cancel = server.stop()).
     // Pending route requests waiting for sd.httpserver.respond() — keyed
     // by mint id, value is the NWConnection-side completion closure.
@@ -267,6 +280,18 @@ final class Bridge: NSObject, WKScriptMessageHandler {
             guard let self = self else { return }
             for h in self.sqliteHandles { SQLite.close(handle: h) }
             self.sqliteHandles.removeAll()
+        })
+        // Overlays — cancel each per-overlay displayLink subscription, then
+        // detach each handle (releases the SLS overlay window). Mirrors the
+        // statusItems / hotkeyTokens drain shape so a hot-reload doesn't
+        // leak SkyLight windows on the WindowServer side.
+        scope.adopt(Token { [weak self] in
+            guard let self = self else { return }
+            for (_, t) in self.overlayTokens { t.cancel() }
+            self.overlayTokens.removeAll()
+            for (_, h) in self.overlayHandles { h.detach() }
+            self.overlayHandles.removeAll()
+            self.overlayInFlight.removeAll()
         })
     }
 
@@ -942,6 +967,103 @@ final class Bridge: NSObject, WKScriptMessageHandler {
             guard let id = body["id"] as? Int,
                   let t = b.broadcastTokens.removeValue(forKey: id) else { return false }
             t.cancel()
+            return true
+        },
+
+        // ── Overlay (JankyBorders pattern) ─────────────────────────────────
+        // Attach a vsync-driven CG overlay to a target window we don't own.
+        // Returns a mint id; the JS side keeps the user's draw fn in a Map
+        // and __sd_overlay_draw(id, geo) looks it up. Per tick we:
+        //   1. read the target's current bounds via SLSGetWindowBounds
+        //   2. evaluateJavaScript("__sd_overlay_draw(id, geo)") with a
+        //      completion handler that gets the spec dict
+        //   3. dispatch handle.draw(spec, targetFrame) on main
+        // Permission: "overlay". Reference: examples/overlay-border.
+        .custom("overlay.attach", permission: "overlay") { bridge, body, requestId in
+            DispatchQueue.main.async { [weak bridge] in
+                guard let bridge = bridge,
+                      let wid = body["windowId"] as? Int else {
+                    bridge?.respond(requestId: requestId, value: NSNull()); return
+                }
+                let id = bridge.nextOverlayId
+                bridge.nextOverlayId += 1
+                guard let handle = Overlay.attach(targetID: CGWindowID(wid), id: id) else {
+                    bridge.respond(requestId: requestId, value: NSNull()); return
+                }
+                bridge.overlayHandles[id] = handle
+
+                // Vsync tick → JS draw fn → CG draw. We subscribe to the
+                // shared DisplayLinkObserver (already used by sd.displayLink)
+                // so multiple overlays + the displayLink channel share one
+                // CVDisplayLink — RefCountedObserver handles install/teardown.
+                let token = DisplayLinkObserver.shared.subscribe { [weak bridge] in
+                    guard let bridge = bridge,
+                          let webView = bridge.webView,
+                          let h = bridge.overlayHandles[id] else { return }
+                    // Skip if the target's gone or hidden — avoids drawing
+                    // into the void when the user minimizes / closes the
+                    // window mid-overlay.
+                    guard Overlay.isOrderedIn(h.targetWID),
+                          let frame = Overlay.bounds(of: h.targetWID) else { return }
+                    // Backpressure: drop the tick if the previous one's JS
+                    // round-trip hasn't completed. At 120Hz with a slow
+                    // draw fn this otherwise stacks WebKit calls deep.
+                    if bridge.overlayInFlight.contains(id) { return }
+                    bridge.overlayInFlight.insert(id)
+
+                    let geo: [String: Any] = [
+                        "window": [
+                            "x": Int(frame.origin.x),
+                            "y": Int(frame.origin.y),
+                            "w": Int(frame.size.width),
+                            "h": Int(frame.size.height)
+                        ],
+                        "id": Int(h.targetWID)
+                    ]
+                    let geoJson = Bridge.jsonify(geo)
+                    // Wrap in JSON.stringify so the WebKit JS-to-host
+                    // bridge can carry the dict back as a String (it can't
+                    // bridge arbitrary JS objects). We parse on the Swift
+                    // side and dispatch on main for handle.draw.
+                    let js = "JSON.stringify(window.__sd_overlay_draw ? window.__sd_overlay_draw(\(id), \(geoJson)) : null)"
+                    webView.evaluateJavaScript(js) { [weak bridge] result, _ in
+                        guard let bridge = bridge,
+                              let handle = bridge.overlayHandles[id] else {
+                            bridge?.overlayInFlight.remove(id); return
+                        }
+                        defer { bridge.overlayInFlight.remove(id) }
+                        let str = (result as? String) ?? ""
+                        guard !str.isEmpty, str != "null",
+                              let data = str.data(using: .utf8),
+                              let parsed = try? JSONSerialization.jsonObject(with: data),
+                              let spec = parsed as? [String: Any] else { return }
+                        // Re-fetch the target bounds in case the user
+                        // dragged between the tick and the JS round-trip;
+                        // staleness here causes visible lag during fast drags.
+                        let fresh = Overlay.bounds(of: handle.targetWID) ?? frame
+                        handle.draw(spec: spec, targetFrame: fresh)
+                    }
+                }
+                bridge.overlayTokens[id] = token
+                bridge.respond(requestId: requestId, value: id)
+            }
+        },
+        // Force a fresh redraw on the next tick. The vsync subscription
+        // already fires every frame so this is mostly a no-op in v1 — but
+        // it documents the intended API for a future "only draw when JS
+        // sets dirty" optimization.
+        .syncBridge("overlay.update", permission: "overlay", denyValue: false) { b, body in
+            guard let id = body["id"] as? Int,
+                  b.overlayHandles[id] != nil else { return false }
+            return true
+        },
+        // Tear down: cancel the displayLink subscription, then release the
+        // SLS overlay window. Detaching does NOT touch the target window.
+        .syncBridge("overlay.detach", permission: "overlay", denyValue: false) { b, body in
+            guard let id = body["id"] as? Int else { return false }
+            if let token = b.overlayTokens.removeValue(forKey: id) { token.cancel() }
+            if let handle = b.overlayHandles.removeValue(forKey: id) { handle.detach() }
+            b.overlayInFlight.remove(id)
             return true
         },
 

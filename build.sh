@@ -64,6 +64,7 @@ SWIFT_SOURCES=(
   Sources/DataSources/Caffeinate.swift
   Sources/DataSources/Disks.swift
   Sources/DataSources/DisplayLink.swift
+  Sources/DataSources/Overlay.swift
   Sources/DataSources/HTTPServer.swift
   Sources/DataSources/VisionOCR.swift
   Sources/DataSources/VisionFaces.swift

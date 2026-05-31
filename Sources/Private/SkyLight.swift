@@ -28,4 +28,20 @@ enum SkyLight {
         guard let h = handle, let s = dlsym(h, name) else { return nil }
         return unsafeBitCast(s, to: T.self)
     }
+
+    /// Shared WindowServer connection id. Every CGS/SLS call that addresses
+    /// "our session" takes this as the first argument. Resolved once at
+    /// process start — calling SLSMainConnectionID more than once costs a
+    /// mach round-trip and returns the same value.
+    ///
+    /// Lives here (instead of per-consumer) so Spaces, Overlay, and future
+    /// hotcorners/transactions/menubar code all share one source of truth.
+    /// Zero when the SkyLight handle is missing — every consumer that derefs
+    /// already no-ops when their typed symbol is nil, so a zero cid never
+    /// reaches a live call.
+    static let cid: Int32 = {
+        typealias MainConnectionFn = @convention(c) () -> Int32
+        let fn: MainConnectionFn? = sym("SLSMainConnectionID")
+        return fn?() ?? 0
+    }()
 }

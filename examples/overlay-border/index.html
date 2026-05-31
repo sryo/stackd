@@ -1,0 +1,58 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"></head>
+<body>
+<script type="module">
+  // Draws a 2px accent border around whichever window is focused. Re-attaches
+  // every time sd.windows.focused changes; the previous overlay is detached
+  // before the next attach so we always own at most one SLS window.
+  import { sd } from "sd://runtime/api.js";
+
+  let current = null;          // { id, detach } from the last attach
+  let currentWid = null;       // CGWindowID we're decorating
+
+  // Border style. radius matches macOS window rounding (Sonoma+ = ~10pt).
+  const STROKE = "#7c8cff";
+  const WIDTH  = 2;
+  const RADIUS = 10;
+
+  function draw(geo) {
+    const w = geo.window.w, h = geo.window.h;
+    if (w <= 0 || h <= 0) return null;
+    // Inset by half the stroke so the border sits ON the window edge
+    // rather than half-outside. Spec coords have (0,0) at the target's
+    // top-left, so the border rect lives at (half, half) extending to
+    // (w - half, h - half).
+    const half = WIDTH / 2;
+    return {
+      rects: [{
+        x: half, y: half,
+        w: w - WIDTH, h: h - WIDTH,
+        stroke: STROKE,
+        strokeWidth: WIDTH,
+        radius: RADIUS
+      }]
+    };
+  }
+
+  sd.windows.focused.subscribe(async (win) => {
+    if (!win || typeof win.id !== "number") {
+      // No focused window (Finder desktop, Mission Control): tear down
+      // whatever we had. The compositor cleans up the SLS surface as
+      // soon as detach releases the window.
+      if (current) {
+        await current.detach();
+        current = null;
+        currentWid = null;
+      }
+      return;
+    }
+    if (currentWid === win.id) return;   // same window — keep existing overlay
+    if (current) await current.detach();
+    currentWid = win.id;
+    current = await sd.overlay.attach(win.id, draw);
+    console.log("overlay attached", { wid: win.id, app: win.app, title: win.title });
+  });
+</script>
+</body>
+</html>
