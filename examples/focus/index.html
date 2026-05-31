@@ -1,0 +1,22 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <link rel="stylesheet" href="index.css">
+  <title>Focus</title>
+</head>
+<body>
+  <div class="card">
+    <div class="row">
+      <span class="dot" id="dot"></span>
+      <span class="app" id="app">—</span>
+    </div>
+    <div class="title" id="title">no focus</div>
+  </div>
+  <script type="module">
+    import { sd } from "sd://runtime/api.js";
+    sd.bind(app,   sd.app.frontmost,    a => a?.name ?? "—");
+    sd.bind(title, sd.windows.focused,  w => (w?.title && w.title.length) ? w.title : "(no window title)");
+  </script>
+</body>
+</html>

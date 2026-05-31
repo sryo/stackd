@@ -1,0 +1,7 @@
+{
+  "id": "cursor-warp-test",
+  "name": "Cursor warp",
+  "anchor": { "edge": "top-left", "inset": [40, 40] },
+  "size": { "w": 240, "h": 120 },
+  "permissions": ["cursor", "display"]
+}

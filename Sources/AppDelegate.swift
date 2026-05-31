@@ -107,6 +107,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // handles the bang. See Sources/DataSources/WindowEvents.swift for
         // event IDs and payload decoding.
         WindowEvents.install()
+
+        // Display hotplug bangs (added/removed/reconfigured). Same lifetime
+        // pattern as WindowEvents — install once at startup; CG fans out per
+        // change, host.bang is a no-op when no stack handles the bang.
+        DisplayHotplug.install()
+
+        // Mission Control state bangs (entered/exited + the three "show"
+        // gestures). "Entered" is the CGS 1204 event already wired in
+        // Spaces.swift; this installs the Dock AX observer that surfaces the
+        // exit / show-all-windows / show-front-windows / show-desktop notifs.
+        MissionControl.install()
+
+        // Disk mount / unmount bangs. DiskArbitration session lives for the
+        // process; the appeared callback fires once per already-mounted
+        // volume at install time so late-loaded stacks still see the disks
+        // that were attached before stackd started.
+        DisksHotplug.install()
     }
 
     func applicationWillTerminate(_ note: Notification) {

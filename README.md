@@ -43,15 +43,13 @@ stackd new hello
 
 Scaffolds `~/stackd/stacks/hello/` with three files (`stack.json`, `index.html`, `index.css`) — a transparent panel in your top-right showing the current battery percent and theme. FSEvents picks it up within ~300ms; no build step. Edit `index.html`, save, watch it change.
 
-Every stack is the same three files. `stack.json` says where it lives on screen and what system data it's allowed to read (`permissions`). `index.html` is the markup, loaded into a transparent WKWebView. The `sd.*` namespace inside is the bridge to the daemon — `sd.battery`, `sd.windows.focused`, `sd.appearance` are *signals* you subscribe to with `sd.bind(...)`:
+Every stack is the same three files. `stack.json` says where it lives on screen and what system data it's allowed to read (`permissions`). `index.html` is the markup, loaded into a transparent WKWebView. The `sd.*` namespace inside is the bridge to the daemon — `sd.battery`, `sd.windows.focused`, `sd.appearance` are *signals* you can either drop into HTML with `{{ … }}` or subscribe to from JS with `sd.bind(...)`.
+
+The short form — for putting a value on screen, just write the expression in your HTML. No `<script>`, no import, no callback. The runtime walks the DOM at load time, finds every `{{ … }}`, and re-renders it whenever any signal it touches changes:
 
 ```html
 <!doctype html><meta charset="utf-8">
-<div id="t"></div>
-<script type="module">
-  import { sd } from "sd://runtime/api.js";
-  sd.bind(t, sd.mouse, m => m ? `${m.x}, ${m.y}` : "…");
-</script>
+<div>{{ sd.mouse.x }}, {{ sd.mouse.y }}</div>
 ```
 
 ```json
@@ -60,6 +58,18 @@ Every stack is the same three files. `stack.json` says where it lives on screen 
   "size": { "w": 140, "h": 48 },
   "permissions": ["mouse"] }
 ```
+
+The longer form — for anything beyond display (loops, conditionals, calling `sd.fs.watch`, etc.) — drop into JS:
+
+```html
+<div id="t"></div>
+<script type="module">
+  import { sd } from "sd://runtime/api.js";
+  sd.bind(t, sd.mouse, m => m ? `${m.x}, ${m.y}` : "…");
+</script>
+```
+
+Both forms work side-by-side in the same stack.
 
 When you're ready for something more, copy one of the [`examples/`](examples) folders into `~/stackd/stacks/`. `examples/menubar-item` shows `sd.menubar.addItem` for NSStatusItem widgets. `examples/invocable-palette` shows hotkey-summoned overlays + AX reads. `examples/fs-watcher` shows the filesystem API. `examples/bang-pair` shows two stacks talking via bangs.
 

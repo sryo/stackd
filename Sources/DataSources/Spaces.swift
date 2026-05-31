@@ -147,9 +147,14 @@ private let kCGSEventSpaceCreated:        UInt32 = 1327
 private let kCGSEventSpaceDestroyed:      UInt32 = 1328
 private let kCGSEventMissionControlEnter: UInt32 = 1204
 
-private let spacesCGSCallback: SkyLightSpaces.CGSConnectionCallback = { _, _, _, _, _ in
+private let spacesCGSCallback: SkyLightSpaces.CGSConnectionCallback = { eventType, _, _, _, _ in
     DispatchQueue.main.async {
         SpacesObserver.shared.fire()
+        // 1204 is the only CGS signal for "Mission Control entered" — exit is
+        // an AX notification on the Dock, handled in MissionControl.swift.
+        if eventType == kCGSEventMissionControlEnter {
+            AppDelegate.shared?.host?.bang(name: "sd.missionControl.entered", detail: [:])
+        }
     }
 }
 

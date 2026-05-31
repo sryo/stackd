@@ -1,0 +1,34 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <link rel="stylesheet" href="index.css">
+  <title>Gesture</title>
+</head>
+<body>
+  <div class="card">
+    <div class="label">GESTURE</div>
+    <div class="row">
+      <span id="kind" class="kind">—</span>
+      <span id="fingers" class="fingers"></span>
+    </div>
+  </div>
+  <script type="module">
+    const kindEl    = document.getElementById("kind");
+    const fingersEl = document.getElementById("fingers");
+    let resetT;
+    window.onTap_g = (e) => {
+      kindEl.textContent = e.subtypeName ?? "gesture";
+      fingersEl.textContent = e.fingers ? `${e.fingers}f` : "";
+      document.body.classList.remove("ping");
+      void document.body.offsetWidth;
+      document.body.classList.add("ping");
+      clearTimeout(resetT);
+      resetT = setTimeout(() => {
+        kindEl.textContent = "—";
+        fingersEl.textContent = "";
+      }, 1500);
+    };
+  </script>
+</body>
+</html>

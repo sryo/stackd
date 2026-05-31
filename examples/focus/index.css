@@ -1,0 +1,41 @@
+:root {
+  --sd-bg: rgba(10, 10, 14, 0.62);
+  --sd-fg: #e8e8ea;
+  --sd-fg-dim: rgba(232, 232, 234, 0.55);
+  --sd-radius: 12px;
+  --sd-pad: 9px 14px;
+  --sd-font: -apple-system, system-ui, ui-system;
+  --sd-accent: #7c8cff;
+}
+html, body {
+  margin: 0; padding: 0; height: 100%;
+  background: transparent;
+  color: var(--sd-fg);
+  font: 13px var(--sd-font);
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+}
+.card {
+  height: 100%;
+  box-sizing: border-box;
+  background: var(--sd-bg);
+  border-radius: var(--sd-radius);
+  padding: var(--sd-pad);
+  display: flex; flex-direction: column; justify-content: center; gap: 2px;
+  -webkit-backdrop-filter: blur(24px) saturate(180%);
+  backdrop-filter: blur(24px) saturate(180%);
+  box-shadow: 0 12px 40px -8px rgba(0,0,0,0.5);
+}
+.row { display: flex; align-items: center; gap: 7px; }
+.dot {
+  width: 7px; height: 7px;
+  border-radius: 50%;
+  background: var(--sd-accent);
+  box-shadow: 0 0 6px var(--sd-accent);
+  flex: 0 0 auto;
+}
+.app { font-weight: 600; font-size: 13px; letter-spacing: -0.01em; }
+.title {
+  font-size: 11px; color: var(--sd-fg-dim);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}

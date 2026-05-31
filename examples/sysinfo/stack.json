@@ -1,0 +1,7 @@
+{
+  "id": "sysinfo",
+  "name": "System Info",
+  "anchor": { "edge": "bottom-right", "inset": [16, 16] },
+  "size": { "w": 260, "h": 128 },
+  "permissions": ["input", "net", "defaults", "appearance", "audio", "display"]
+}

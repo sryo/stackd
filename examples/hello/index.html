@@ -1,18 +1,10 @@
 <!doctype html>
-<html>
+<html style="--sd-accent: {{ sd.appearance.accentHex || '#0a84ff' }}">
 <head><meta charset="utf-8"><link rel="stylesheet" href="index.css"></head>
-<body>
+<body data-theme="{{ sd.appearance.dark ? 'dark' : 'light' }}">
   <div class="card">
     <div class="title">hello</div>
-    <div class="value" id="value">…</div>
+    <div class="value">{{ sd.battery.percent }}%{{ sd.battery.charging ? ' ⚡' : '' }}</div>
   </div>
-  <script type="module">
-    import { sd } from "sd://runtime/api.js";
-    // sd.bind(target, signal, fmt) replaces signal.subscribe(v => el.textContent = fmt(v)).
-    // Target shapes: Element | [el, "data-x"] | [el, "style.--y"] | [el, "class.z"] | [el, "attr.foo"]
-    sd.bind(value,                            sd.battery,    b => b ? `${b.percent}% ${b.charging ? "⚡" : ""}` : "…");
-    sd.bind([document.body, "data-theme"],    sd.appearance, a => a?.dark ? "dark" : "light");
-    sd.bind([document.documentElement, "style.--sd-accent"], sd.appearance, a => a?.accentHex || "#0a84ff");
-  </script>
 </body>
 </html>

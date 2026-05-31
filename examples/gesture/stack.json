@@ -1,0 +1,9 @@
+{
+  "id": "gesture",
+  "name": "Gesture",
+  "anchor": { "edge": "top-right", "inset": [312, 16] },
+  "size": { "w": 220, "h": 56 },
+  "eventtap": [
+    { "event": "gesture", "callback": "g" }
+  ]
+}

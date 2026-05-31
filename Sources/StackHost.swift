@@ -11,6 +11,7 @@ struct StackManifest: Decodable {
     let hotkeys: [Hotkey]?
     let handles: [String]?          // bangs this stack handles
     let eventtap: [EventTap]?
+    let hotcorners: [HotCorner]?
     let display: String?            // "primary" (default) | "all" | "<index>"
     let invocable: Bool?            // window starts hidden + can take key on .invoke()
     let level: String?              // "high" → above default .statusBar (for toasts on fullscreen stacks)
@@ -18,8 +19,27 @@ struct StackManifest: Decodable {
 
     struct Anchor: Decodable { let edge: String; let inset: [Int] }
     struct Size: Decodable { let w: Int?; let h: Int }
-    struct Hotkey: Decodable { let key: String; let callback: String }
+    /// `key` is the chord (`"cmd+shift+l"`, `"hyper+a"`, …). `mode` gates
+    /// dispatch on the active HotkeyRegistry mode (skhd-style modal keymaps;
+    /// nil means always-on). `apps` gates on the frontmost app's bundleID
+    /// (nil = ungated; element `"*"` = any).
+    struct Hotkey: Decodable {
+        let key: String
+        let callback: String
+        let mode: String?
+        let apps: [String]?
+    }
     struct EventTap: Decodable { let event: String; let callback: String }
+    /// `corner` ∈ {"top-left","top-right","bottom-left","bottom-right"}.
+    /// `tooltip` is optional and re-uses the same JS-function-name shape as
+    /// `callback` — the stack defines `globalThis[name]({corner, x, y})` to
+    /// surface hover text or any other on-enter side effect distinct from
+    /// the primary callback (the corner port of FrameMaster wants both).
+    struct HotCorner: Decodable {
+        let corner: String
+        let callback: String
+        let tooltip: String?
+    }
 }
 
 final class StackHost {

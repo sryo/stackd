@@ -1,0 +1,7 @@
+{
+  "id": "focus",
+  "name": "Focus",
+  "anchor": { "edge": "top-right", "inset": [232, 16] },
+  "size": { "w": 260, "h": 64 },
+  "permissions": ["app", "windows"]
+}

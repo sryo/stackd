@@ -1,0 +1,10 @@
+{
+  "id": "display-snapshot-test",
+  "name": "Display snapshot",
+  "anchor": { "edge": "top-left", "inset": [40, 40] },
+  "size": { "w": 360, "h": 280 },
+  "permissions": ["display"],
+  "hotkeys": [
+    { "key": "ctrl+alt+s", "callback": "snap" }
+  ]
+}

@@ -1,0 +1,61 @@
+<!doctype html>
+<html><head><meta charset="utf-8">
+<style>
+  body {
+    margin: 0; padding: 10px 12px;
+    font: 11px -apple-system, system-ui, sans-serif;
+    color: #fff;
+    background: rgba(20, 20, 22, 0.78);
+    border-radius: 10px;
+    -webkit-backdrop-filter: blur(20px);
+  }
+  h1 { font-size: 10px; margin: 0 0 6px; opacity: 0.55; text-transform: uppercase; letter-spacing: 0.08em; }
+  #path { font: 10px ui-monospace; opacity: 0.55; margin-bottom: 6px; word-break: break-all; }
+  pre { margin: 0; font: 11px ui-monospace, Menlo, monospace; line-height: 1.35; }
+</style>
+</head><body>
+<h1>sqlite</h1>
+<div id="path">opening…</div>
+<pre id="out">—</pre>
+<script type="module">
+  import { sd } from "sd://runtime/api.js";
+
+  const out = document.getElementById("out");
+  const log = (...args) => { out.textContent += args.join(" ") + "\n"; console.log(...args); };
+
+  // Sandboxed path — lands under ~/stackd/stacks/sqlite-test/data/notes.db.
+  const db = await sd.sqlite.open("notes.db");
+  document.getElementById("path").textContent = db ? db.path : "open failed";
+  out.textContent = "";
+  if (!db) throw new Error("open failed");
+
+  await db.exec(`CREATE TABLE IF NOT EXISTS notes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    body TEXT NOT NULL,
+    created REAL NOT NULL
+  )`);
+
+  // FTS5 — DigUp needs this; smoke-test it here so the next stack porter has
+  // a working reference.
+  await db.exec(`CREATE VIRTUAL TABLE IF NOT EXISTS notes_fts USING fts5(body, content='notes', content_rowid='id')`);
+
+  const ins = await db.query("INSERT INTO notes(body, created) VALUES (?, ?) RETURNING id",
+                             [`note at ${new Date().toISOString()}`, Date.now() / 1000]);
+  log("inserted id:", ins.rows[0].id);
+
+  await db.exec(`INSERT INTO notes_fts(rowid, body) SELECT id, body FROM notes WHERE id = ${ins.rows[0].id}`);
+
+  const q1 = await db.query("SELECT id, body FROM notes ORDER BY id DESC LIMIT 3");
+  log(`last ${q1.rows.length} notes:`);
+  for (const r of q1.rows) log(" ", r.id, r.body);
+
+  const q2 = await db.query("SELECT body FROM notes_fts WHERE notes_fts MATCH ? LIMIT 3", ["note"]);
+  log(`fts5 hits: ${q2.rows.length}`);
+
+  const total = await db.query("SELECT COUNT(*) c FROM notes");
+  log("total notes:", total.rows[0].c);
+
+  // close() optional — stack unload would close it anyway, but be polite.
+  await db.close();
+</script>
+</body></html>

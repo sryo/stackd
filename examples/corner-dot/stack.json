@@ -1,0 +1,7 @@
+{
+  "id": "corner-dot",
+  "name": "Corner Dot",
+  "display": "all",
+  "anchor": { "edge": "bottom-left", "inset": [12, 12] },
+  "size": { "w": 18, "h": 18 }
+}

@@ -2,6 +2,7 @@ import WebKit
 
 final class Bridge: NSObject, WKScriptMessageHandler {
     weak var webView: WKWebView?
+    fileprivate var stackId: String = ""
     private var permissions: [String] = []
     private var lastBattery: String?
     private var lastMouse: String?
@@ -48,6 +49,16 @@ final class Bridge: NSObject, WKScriptMessageHandler {
     // JS-bound DN observers: id → Token. Scope drains them on unload.
     fileprivate var broadcastTokens: [Int: Token] = [:]
     fileprivate var nextBroadcastId: Int = 1
+    // Owned HTTP servers: serverId → Token (cancel = server.stop()).
+    // Pending route requests waiting for sd.httpserver.respond() — keyed
+    // by mint id, value is the NWConnection-side completion closure.
+    fileprivate var httpServerTokens: [Int: Token] = [:]
+    fileprivate var pendingHttpResponses: [Int: (HTTPResponse) -> Void] = [:]
+    fileprivate var nextHttpId: Int = 1
+    // SQLite handles minted via sd.sqlite.open(). Tracked per-Bridge so the
+    // scope drain on stack unload closes every connection — the underlying
+    // SQLite.HandleStore is process-wide but the *ownership* is stack-scoped.
+    fileprivate var sqliteHandles: Set<Int> = []
     /// Per-stack native-resource scope. Every observer subscription, hotkey
     /// bind, eventtap register, menubar suppression goes in here. StackHost
     /// calls drain() on unload to release them all in reverse order.
@@ -77,6 +88,21 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         return WKUserScript(source: source, injectionTime: .atDocumentStart, forMainFrameOnly: true)
     }()
 
+    // Auto-load the sd.* runtime so stacks can be just HTML — no
+    // `<script type="module">import "sd://runtime/api.js"</script>` boilerplate
+    // required. Stacks that explicitly import the runtime still work: dynamic
+    // import resolves to the same module record by URL, so the module body
+    // runs once regardless. Dispatched at document end so the runtime can walk
+    // the parsed DOM for `{{ }}` template placeholders.
+    private static let runtimeLoaderScript: WKUserScript = {
+        let source = """
+        import("sd://runtime/api.js").catch(e => {
+          try { console.error("[stackd] runtime load failed:", String(e)); } catch (_) {}
+        });
+        """
+        return WKUserScript(source: source, injectionTime: .atDocumentEnd, forMainFrameOnly: true)
+    }()
+
     init(webView: WKWebView, screen: NSScreen? = nil, screenIndex: Int = 0) {
         self.webView = webView
         super.init()
@@ -84,6 +110,7 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         ucc.add(self, name: "sd")
         ucc.add(self, name: "log")
         ucc.addUserScript(Bridge.consoleHookScript)
+        ucc.addUserScript(Bridge.runtimeLoaderScript)
         // Per-instance window.__sd_screen so items like spacenum + brightness
         // can target the screen they're rendered on. Injected at document
         // start so it's visible before any module script runs.
@@ -116,6 +143,7 @@ final class Bridge: NSObject, WKScriptMessageHandler {
     }
 
     func start(manifest: StackManifest) {
+        self.stackId = manifest.id
         self.permissions = manifest.permissions
         self.handlesBangs = Set(manifest.handles ?? [])
         self.settings = StackSettings(stackId: manifest.id)
@@ -151,7 +179,11 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         if let hks = manifest.hotkeys {
             for hk in hks {
                 let cb = hk.callback
-                scope.adopt(HotkeyRegistry.shared.bind(spec: hk.key) { [weak self] in
+                scope.adopt(HotkeyRegistry.shared.bind(
+                    spec: hk.key,
+                    mode: hk.mode,
+                    apps: hk.apps
+                ) { [weak self] in
                     self?.fireHotkey(callback: cb)
                 })
             }
@@ -165,6 +197,26 @@ final class Bridge: NSObject, WKScriptMessageHandler {
                 let cb = et.callback
                 scope.adopt(EventTapRegistry.shared.register(eventType: type) { [weak self] event in
                     self?.fireEventTap(callback: cb, type: type, event: event)
+                })
+            }
+        }
+        if let corners = manifest.hotcorners, !corners.isEmpty {
+            let specs: [HotCornerSpec] = corners.compactMap { hc in
+                guard let c = HotCornerSpec.Corner(rawValue: hc.corner) else {
+                    FileHandle.standardError.write(Data("stackd: unknown hotcorner '\(hc.corner)'\n".utf8))
+                    return nil
+                }
+                return HotCornerSpec(corner: c, callback: hc.callback, tooltip: hc.tooltip)
+            }
+            if !specs.isEmpty {
+                let watcher = HotCornerWatcher(entries: specs) { [weak self] spec, isEnter, p in
+                    self?.fireHotCorner(spec: spec, isEnter: isEnter, at: p)
+                }
+                // Piggyback on the existing mouseMoved tap. Adding a second
+                // CGEventTap would just cost another Accessibility-gated mach
+                // port for the same stream of events.
+                scope.adopt(EventTapRegistry.shared.register(eventType: .mouseMoved) { event in
+                    watcher.tick(loc: event.location)
                 })
             }
         }
@@ -196,6 +248,25 @@ final class Bridge: NSObject, WKScriptMessageHandler {
             guard let self = self else { return }
             for (_, t) in self.broadcastTokens { t.cancel() }
             self.broadcastTokens.removeAll()
+        })
+        // HTTP servers — stop every listener owned by this stack and resolve
+        // any in-flight requests with 503 so the connection's send-then-cancel
+        // path doesn't leak the NWConnection.
+        scope.adopt(Token { [weak self] in
+            guard let self = self else { return }
+            for (_, t) in self.httpServerTokens { t.cancel() }
+            self.httpServerTokens.removeAll()
+            for (_, complete) in self.pendingHttpResponses {
+                complete(HTTPResponse(status: 503, headers: [:], body: "stack unloaded"))
+            }
+            self.pendingHttpResponses.removeAll()
+        })
+        // SQLite — sqlite3_close_v2 every connection minted by this stack.
+        // No-ops if the JS code already called db.close() explicitly.
+        scope.adopt(Token { [weak self] in
+            guard let self = self else { return }
+            for h in self.sqliteHandles { SQLite.close(handle: h) }
+            self.sqliteHandles.removeAll()
         })
     }
 
@@ -327,6 +398,19 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         // by startHost() above.
         .sync("host.info", permission: "host") { _ in Host.info() },
 
+        // Disks — one-shot snapshot of currently-mounted volumes. Live
+        // changes flow via `sd.disk.mounted` / `sd.disk.unmounted` bangs
+        // (no permission required to receive bangs; install is global).
+        .sync("disks.list", permission: "disks", denyValue: [[String: Any]]()) { _ in Disks.list() },
+
+        // Move the cursor without clicking. The missing primitive next to
+        // sd.events.click — stacks composing mouse-follows-focus or radial
+        // gestures need cursor motion as a first-class action. Gated under
+        // "mouse" to match the read side (channel("mouse")).
+        .sync("mouse.warp", permission: "mouse", denyValue: false) { body in
+            Mouse.warp(x: (body["x"] as? Double) ?? 0, y: (body["y"] as? Double) ?? 0)
+        },
+
         // Audio — Bool side-effect ops, deny → false.
         .sync("audio.setVolume", permission: "audio", denyValue: false) { body in
             Audio.setVolume(Float((body["value"] as? Double) ?? 0))
@@ -340,6 +424,34 @@ final class Bridge: NSObject, WKScriptMessageHandler {
             Display.setBrightness(
                 displayID: CGDirectDisplayID((body["displayID"] as? Int) ?? 0),
                 Float((body["value"] as? Double) ?? 0))
+        },
+
+        // Display snapshot — single-frame ScreenCaptureKit grab (14+) or
+        // CGWindowListCreateImage on 13. Returns { dataURL, width, height }
+        // or null on failure. Folded under the existing "display" permission
+        // because every consumer that needs pixels already wants sd.display.all
+        // to enumerate screens.
+        .custom("display.snapshot", permission: "display") { bridge, body, requestId in
+            let id = (body["displayID"] as? Int).map { CGDirectDisplayID($0) }
+                ?? CGMainDisplayID()
+            var region: CGRect? = nil
+            if let r = body["region"] as? [String: Any] {
+                region = CGRect(
+                    x: (r["x"] as? Double) ?? 0,
+                    y: (r["y"] as? Double) ?? 0,
+                    width:  (r["w"] as? Double) ?? 0,
+                    height: (r["h"] as? Double) ?? 0
+                )
+            }
+            let opts = DisplaySnapshot.Options(
+                displayID: id,
+                region: region,
+                format: body["format"] as? String ?? "png",
+                quality: body["quality"] as? Double ?? 0.85
+            )
+            DisplaySnapshot.capture(opts) { [weak bridge] result in
+                bridge?.respond(requestId: requestId, value: result as Any? ?? NSNull())
+            }
         },
 
         // Menubar suppression — refcounted via per-Bridge stack of tokens.
@@ -447,6 +559,88 @@ final class Bridge: NSObject, WKScriptMessageHandler {
             NLP.similarity(body["a"] as? String ?? "", body["b"] as? String ?? "")
         },
 
+        // Vision OCR — VNRecognizeTextRequest. Async (perform() blocks on a
+        // worker queue); image accepts a dataURL or an absolute file path.
+        // Bounding boxes are y-flipped from Vision's normalized origin-bottom-
+        // left to web-friendly top-left so JS overlays don't have to redo it.
+        .custom("vision.ocr", permission: "vision") { bridge, body, requestId in
+            let image = body["image"]
+            let languages = body["languages"] as? [String]
+            let level = body["recognitionLevel"] as? String ?? "accurate"
+            Vision.ocr(image: image, languages: languages, level: level) { [weak bridge] result in
+                bridge?.respond(requestId: requestId, value: result as Any? ?? NSNull())
+            }
+        },
+
+        // Vision faces — VNDetectFaceRectanglesRequest. Bounding rects + head
+        // pose (roll/yaw/pitch when reportable). No recognition, no landmarks.
+        .custom("vision.faces", permission: "vision") { bridge, body, requestId in
+            Vision.faces(image: body["image"]) { [weak bridge] result in
+                bridge?.respond(requestId: requestId, value: result as Any? ?? NSNull())
+            }
+        },
+
+        // Vision featurePrint — perceptual hash. Returns a base64 NSKeyedArchiver
+        // blob; round-trip via vision.featurePrintDistance for similarity.
+        .custom("vision.featurePrint", permission: "vision") { bridge, body, requestId in
+            Vision.featurePrint(image: body["image"]) { [weak bridge] result in
+                bridge?.respond(requestId: requestId, value: result as Any? ?? NSNull())
+            }
+        },
+        .sync("vision.featurePrintDistance", permission: "vision") { body in
+            Vision.featurePrintDistance(a: body["a"] as? String,
+                                        b: body["b"] as? String)
+        },
+
+        // Vision subjectMask — VNGenerateForegroundInstanceMaskRequest (macOS 14+).
+        // Returns a PNG dataURL with the subject on transparent background, or
+        // null on older macOS / failed extraction.
+        .custom("vision.subjectMask", permission: "vision") { bridge, body, requestId in
+            Vision.subjectMask(image: body["image"]) { [weak bridge] result in
+                bridge?.respond(requestId: requestId, value: result as Any? ?? NSNull())
+            }
+        },
+
+        // Vision bodyPose — VNDetectHumanBodyPoseRequest. 17 named joints
+        // per detected body, normalized to web-style top-left 0..1 coordinates.
+        .custom("vision.bodyPose", permission: "vision") { bridge, body, requestId in
+            Vision.bodyPose(image: body["image"]) { [weak bridge] result in
+                bridge?.respond(requestId: requestId, value: result as Any? ?? NSNull())
+            }
+        },
+
+        // ── SQLite ──────────────────────────────────────────────────────────
+        // Minimal libsqlite3 wrapper — open / exec / query / close. Default
+        // path lands under ~/stackd/stacks/<id>/data/ (sandbox-style); absolute
+        // paths and ~ paths pass through. Handles are integers minted by a
+        // process-wide store but ownership is per-Bridge so unload closes
+        // every connection. Permission: "sqlite".
+        .syncBridge("sqlite.open", permission: "sqlite") { b, body in
+            let path = body["path"] as? String ?? ""
+            let mode = body["mode"] as? String ?? "readwrite"
+            guard let result = SQLite.open(stackId: b.stackId, path: path, mode: mode) else {
+                return NSNull()
+            }
+            if let h = result["handle"] as? Int { b.sqliteHandles.insert(h) }
+            return result
+        },
+        .syncBridge("sqlite.exec", permission: "sqlite") { _, body in
+            SQLite.exec(
+                handle: body["handle"] as? Int ?? -1,
+                sql:    body["sql"]    as? String ?? "")
+        },
+        .syncBridge("sqlite.query", permission: "sqlite") { _, body in
+            SQLite.query(
+                handle: body["handle"] as? Int ?? -1,
+                sql:    body["sql"]    as? String ?? "",
+                params: body["params"] as? [Any] ?? [])
+        },
+        .syncBridge("sqlite.close", permission: "sqlite", denyValue: false) { b, body in
+            guard let h = body["handle"] as? Int else { return false }
+            b.sqliteHandles.remove(h)
+            return SQLite.close(handle: h)
+        },
+
         // Process exec — async; respond from the completion callback.
         .custom("proc.exec", permission: "proc") { bridge, body, requestId in
             Proc.exec(
@@ -489,6 +683,21 @@ final class Bridge: NSObject, WKScriptMessageHandler {
                 y: body["y"] as? Double ?? 0,
                 button: body["button"] as? String ?? "left")
         },
+
+        // Cursor — warp / read. setPosition takes top-left global coords
+        // (same convention as sd.mouse / sd.events.click); pass `display`
+        // to interpret coords as display-local. Gated on a separate "cursor"
+        // permission rather than folding under "events": warping doesn't fire
+        // a CGEvent that other taps observe, so it's a different threat surface
+        // than the events.* synthesizers.
+        .sync("cursor.setPosition", permission: "cursor", denyValue: false) { body in
+            let displayID = (body["display"] as? Int).map { CGDirectDisplayID($0) }
+            return Cursor.setPosition(
+                x: body["x"] as? Double ?? 0,
+                y: body["y"] as? Double ?? 0,
+                display: displayID)
+        },
+        .sync("cursor.position", permission: "cursor") { _ in Cursor.position() },
 
         // Apps — Bool side-effect ops, deny → false.
         .sync("apps.launch", permission: "apps", denyValue: false) { body in Apps.launch(bundleId: body["bundleId"] as? String ?? "") },
@@ -657,9 +866,16 @@ final class Bridge: NSObject, WKScriptMessageHandler {
             guard let spec = body["spec"] as? String else {
                 bridge.respond(requestId: requestId, value: NSNull()); return
             }
+            // Optional skhd-style scoping. `mode` gates dispatch on the
+            // active HotkeyRegistry mode; `apps` gates on the frontmost
+            // app's bundleID. Both nil = current always-on behavior.
+            let mode = body["mode"] as? String
+            let apps = body["apps"] as? [String]
             let id = bridge.nextHotkeyId
             bridge.nextHotkeyId += 1
-            let token = HotkeyRegistry.shared.bind(spec: spec) { [weak bridge] in
+            let token = HotkeyRegistry.shared.bind(
+                spec: spec, mode: mode, apps: apps
+            ) { [weak bridge] in
                 // Fire on the same hop pattern as fireBang / fireHotkey — the
                 // Carbon callback already runs on main, but the eval has to be
                 // async to keep main from re-entering JS while a script is mid-flight.
@@ -680,6 +896,25 @@ final class Bridge: NSObject, WKScriptMessageHandler {
                   let token = b.hotkeyTokens.removeValue(forKey: id) else { return false }
             token.cancel()
             return true
+        },
+
+        // Modal keymaps (skhd). Entering a mode suppresses every binding
+        // declared for a different mode until exit; bindings with no mode
+        // declared (mode == nil) stay always-on so the chord that exits the
+        // mode itself can be expressed. Mode is GLOBAL — a single string
+        // shared across stacks, matching skhd's "the keyboard is one
+        // resource" model. Folded under the existing "hotkey" permission.
+        .sync("hotkey.mode.enter", permission: "hotkey", denyValue: false) { body in
+            guard let name = body["name"] as? String else { return false }
+            HotkeyRegistry.shared.enterMode(name)
+            return true
+        },
+        .sync("hotkey.mode.exit", permission: "hotkey", denyValue: false) { _ in
+            HotkeyRegistry.shared.exitMode()
+            return true
+        },
+        .sync("hotkey.mode.current", permission: "hotkey") { _ in
+            HotkeyRegistry.shared.currentMode
         },
 
         // ── Generic NSDistributedNotificationCenter observer ─────────────────
@@ -707,6 +942,89 @@ final class Bridge: NSObject, WKScriptMessageHandler {
             guard let id = body["id"] as? Int,
                   let t = b.broadcastTokens.removeValue(forKey: id) else { return false }
             t.cancel()
+            return true
+        },
+
+        // ── HTTP server ─────────────────────────────────────────────────────
+        // Long-running Network.framework listener owned by the stack. Routes
+        // are method+path pairs; matched requests fan out to JS via
+        // __sd_http_request(serverId, requestId, {method,path,query,headers,body}).
+        // JS replies with sd.httpserver.respond(reqId, {status,headers,body}).
+        // Loopback-only unless bindHost === "0.0.0.0". Permission: "httpserver".
+        .custom("httpserver.serve", permission: "httpserver") { bridge, body, requestId in
+            let port = UInt16((body["port"] as? Int) ?? 0)
+            let bindHost = body["bindHost"] as? String ?? "127.0.0.1"
+            let assetsDir = body["assetsDir"] as? String
+            let routesIn = body["routes"] as? [String] ?? []
+            let routes: [(String, String)] = routesIn.compactMap { spec in
+                let parts = spec.split(separator: " ", maxSplits: 1).map(String.init)
+                if parts.count == 2 { return (parts[0].uppercased(), parts[1]) }
+                return ("*", parts[0])
+            }
+            let bonjourType: String? = (body["bonjour"] as? [String: Any])?["type"] as? String
+            let bonjourName: String? = (body["bonjour"] as? [String: Any])?["name"] as? String
+
+            let serverId = bridge.nextHttpId
+            bridge.nextHttpId += 1
+            do {
+                let server = try HTTPServer(
+                    port: port,
+                    bindHost: bindHost,
+                    assetsDir: assetsDir,
+                    routes: routes,
+                    bonjourType: bonjourType,
+                    bonjourName: bonjourName
+                ) { [weak bridge] req, complete in
+                    guard let bridge = bridge else {
+                        complete(HTTPResponse(status: 503)); return
+                    }
+                    DispatchQueue.main.async {
+                        let reqId = bridge.nextHttpId
+                        bridge.nextHttpId += 1
+                        bridge.pendingHttpResponses[reqId] = complete
+                        let payload: [String: Any] = [
+                            "method":  req.method,
+                            "path":    req.path,
+                            "query":   req.query,
+                            "headers": req.headers,
+                            "body":    req.body
+                        ]
+                        let json = Bridge.jsonify(payload)
+                        bridge.webView?.evaluateJavaScript(
+                            "window.__sd_http_request && window.__sd_http_request(\(serverId), \(reqId), \(json));",
+                            completionHandler: nil
+                        )
+                    }
+                }
+                server.start()
+                let token = Token { server.stop() }
+                bridge.httpServerTokens[serverId] = token
+                bridge.respond(requestId: requestId, value: serverId)
+            } catch {
+                FileHandle.standardError.write(Data("stackd: httpserver bind failed on :\(port) — \(error)\n".utf8))
+                bridge.respond(requestId: requestId, value: NSNull())
+            }
+        },
+        .syncBridge("httpserver.stop", permission: "httpserver", denyValue: false) { b, body in
+            guard let id = body["id"] as? Int,
+                  let token = b.httpServerTokens.removeValue(forKey: id) else { return false }
+            token.cancel()
+            return true
+        },
+        // No permission gate on respond — sending a reply to an in-flight
+        // request the stack already accepted is always safe. Without this
+        // exemption, manifest authors would have to remember "httpserver"
+        // on the respond side too, which is friction the API doesn't need.
+        .syncBridge("httpserver.respond", permission: nil, denyValue: false) { b, body in
+            guard let reqId = body["reqId"] as? Int,
+                  let complete = b.pendingHttpResponses.removeValue(forKey: reqId) else {
+                return false
+            }
+            var response = HTTPResponse()
+            response.status  = body["status"] as? Int ?? 200
+            response.headers = body["headers"] as? [String: String] ?? [:]
+            response.body    = body["body"]    as? String ?? ""
+            complete(response)
             return true
         },
 
@@ -1182,6 +1500,17 @@ final class Bridge: NSObject, WKScriptMessageHandler {
             "x":        Int(loc.x),
             "y":        Int(loc.y)
         ]
+        // mouseMoved + the dragged variants carry frame-to-frame deltas in the
+        // CGEvent's mouseEventDeltaX/Y fields. Consumers that integrate motion
+        // (EdgeHopper accumulates these to detect cursor "punch-through" at
+        // screen edges) need them — sampling location() at JS rate misses
+        // sub-frame motion.
+        switch type {
+        case .mouseMoved, .leftMouseDragged, .rightMouseDragged, .otherMouseDragged:
+            payload["deltaX"] = event.getDoubleValueField(.mouseEventDeltaX)
+            payload["deltaY"] = event.getDoubleValueField(.mouseEventDeltaY)
+        default: break
+        }
         if type.rawValue == Gesture.cgEventType.rawValue,
            let g = Gesture.describe(cgEvent: event) {
             for (k, v) in g { payload[k] = v }
@@ -1192,6 +1521,39 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         DispatchQueue.main.async {
             webView.evaluateJavaScript(script, completionHandler: nil)
         }
+    }
+
+    private func fireHotCorner(spec: HotCornerSpec, isEnter: Bool, at p: CGPoint) {
+        guard let webView = webView else { return }
+        let payload: [String: Any] = [
+            "corner": spec.corner.rawValue,
+            "state":  isEnter ? "enter" : "leave",
+            "x":      Int(p.x),
+            "y":      Int(p.y)
+        ]
+        let json = Bridge.jsonify(payload)
+        // The tooltip callback only fires on enter — leave-side it has nothing
+        // to add (the primary callback's leave fires whether or not a tooltip
+        // was declared). Stack code that wants tooltip-hide behavior reads
+        // state === "leave" from the primary.
+        let primary = "globalThis[\(Bridge.jsString(spec.callback))] && globalThis[\(Bridge.jsString(spec.callback))](\(json));"
+        let tooltipFire: String = {
+            guard isEnter, let t = spec.tooltip else { return "" }
+            return "globalThis[\(Bridge.jsString(t))] && globalThis[\(Bridge.jsString(t))](\(json));"
+        }()
+        let script = primary + tooltipFire
+        DispatchQueue.main.async { webView.evaluateJavaScript(script, completionHandler: nil) }
+    }
+
+    /// Escape an arbitrary string into a JS string literal. JSONSerialization
+    /// handles the corner cases (quotes, backslashes, control chars) that
+    /// naive replacement would miss.
+    fileprivate static func jsString(_ s: String) -> String {
+        if let data = try? JSONSerialization.data(withJSONObject: s, options: [.fragmentsAllowed]),
+           let out = String(data: data, encoding: .utf8) {
+            return out
+        }
+        return "\"\""
     }
 
     private func push(channel: String, json: String) {

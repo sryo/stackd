@@ -23,12 +23,15 @@ SWIFT_SOURCES=(
   Sources/DataSources/Battery.swift
   Sources/DataSources/Camera.swift
   Sources/DataSources/Mouse.swift
+  Sources/DataSources/Cursor.swift
+  Sources/DataSources/HotCorners.swift
   Sources/DataSources/Hotkey.swift
   Sources/DataSources/Events.swift
 
   Sources/DataSources/App.swift
   Sources/DataSources/Windows.swift
   Sources/DataSources/WindowEvents.swift
+  Sources/DataSources/MissionControl.swift
 
   Sources/DataSources/Gesture.swift
   Sources/DataSources/Appearance.swift
@@ -45,6 +48,7 @@ SWIFT_SOURCES=(
   Sources/DataSources/Network.swift
   Sources/DataSources/Audio.swift
   Sources/DataSources/Display.swift
+  Sources/DataSources/DisplaySnapshot.swift
   Sources/DataSources/Media.swift
   Sources/DataSources/Settings.swift
   Sources/DataSources/Sensors.swift
@@ -58,7 +62,15 @@ SWIFT_SOURCES=(
   Sources/DataSources/AX.swift
   Sources/DataSources/Spaces.swift
   Sources/DataSources/Caffeinate.swift
+  Sources/DataSources/Disks.swift
   Sources/DataSources/DisplayLink.swift
+  Sources/DataSources/HTTPServer.swift
+  Sources/DataSources/VisionOCR.swift
+  Sources/DataSources/VisionFaces.swift
+  Sources/DataSources/VisionFeaturePrint.swift
+  Sources/DataSources/VisionSubjectMask.swift
+  Sources/DataSources/VisionBodyPose.swift
+  Sources/DataSources/SQLite.swift
   Sources/DataSources/NLP.swift
   Sources/DataSources/Notify.swift
   Sources/DataSources/TouchDevice.swift
@@ -79,10 +91,13 @@ swiftc -O \
   -framework Carbon \
   -framework CoreLocation \
   -framework CoreVideo \
+  -framework DiskArbitration \
   -framework IOKit \
   -framework MultitouchSupport \
   -framework NaturalLanguage \
   -framework OSAKit \
+  -framework ScreenCaptureKit \
+  -framework Vision \
   -framework WebKit \
   -F /System/Library/PrivateFrameworks \
   -target arm64-apple-macos13.0

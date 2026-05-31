@@ -1,0 +1,33 @@
+<!doctype html>
+<html><head><meta charset="utf-8">
+<style>
+  html, body { margin: 0; padding: 0; height: 100%; background: transparent;
+               font: 11px ui-monospace, Menlo, monospace; color: #fff; user-select: none; }
+  .card {
+    height: 100%; box-sizing: border-box;
+    padding: 10px 14px;
+    background: rgba(20, 20, 22, 0.78);
+    border-radius: 12px;
+    -webkit-backdrop-filter: blur(20px) saturate(180%);
+    display: flex; flex-direction: column; gap: 4px; justify-content: center;
+  }
+  .label { font-size: 9px; opacity: 0.55; text-transform: uppercase; letter-spacing: 0.1em; }
+  .row { display: flex; gap: 12px; }
+  .row span:first-child { opacity: 0.55; width: 28px; }
+  .v { font-variant-numeric: tabular-nums; }
+</style>
+</head><body>
+<div class="card">
+  <div class="label">mouseMoved</div>
+  <div class="row"><span>pos</span><span class="v" id="pos">—</span></div>
+  <div class="row"><span>delta</span><span class="v" id="delta">—</span></div>
+</div>
+<script type="module">
+  const pos = document.getElementById("pos");
+  const delta = document.getElementById("delta");
+  window.onTap_move = (e) => {
+    pos.textContent   = `${e.x}, ${e.y}`;
+    delta.textContent = `${e.deltaX?.toFixed?.(1) ?? 0}, ${e.deltaY?.toFixed?.(1) ?? 0}`;
+  };
+</script>
+</body></html>

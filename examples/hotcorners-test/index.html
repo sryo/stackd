@@ -1,0 +1,38 @@
+<!doctype html>
+<html><head><meta charset="utf-8">
+<style>
+  html, body { margin: 0; padding: 0; height: 100%; background: transparent;
+               font: 11px ui-monospace, Menlo, monospace; color: #fff; user-select: none; }
+  .card {
+    height: 100%; box-sizing: border-box;
+    padding: 10px 14px;
+    background: rgba(20, 20, 22, 0.78);
+    border-radius: 12px;
+    -webkit-backdrop-filter: blur(20px) saturate(180%);
+    display: flex; flex-direction: column; gap: 4px; justify-content: center;
+  }
+  .label { font-size: 9px; opacity: 0.55; text-transform: uppercase; letter-spacing: 0.1em; }
+  #last { font-variant-numeric: tabular-nums; }
+</style>
+</head><body>
+<div class="card">
+  <div class="label">hotcorners</div>
+  <div id="last">touch any corner…</div>
+</div>
+<script type="module">
+  import { sd } from "sd://runtime/api.js";
+  const last = document.getElementById("last");
+  const log = (e) => {
+    last.textContent = `${e.state} ${e.corner} @ ${e.x},${e.y}`;
+    console.log("hotcorner", e);
+    if (e.state === "enter") {
+      sd.notify.show({ title: "hotcorner", body: `${e.corner} at ${e.x},${e.y}` });
+    }
+  };
+  globalThis.onTL = log;
+  globalThis.onTR = log;
+  globalThis.onBL = log;
+  globalThis.onBR = log;
+  globalThis.tipTL = (e) => console.log("tooltip TL", e);
+</script>
+</body></html>

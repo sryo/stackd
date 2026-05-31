@@ -1,0 +1,42 @@
+:root {
+  --sd-bg: rgba(10, 10, 14, 0.62);
+  --sd-fg: #e8e8ea;
+  --sd-fg-dim: rgba(232, 232, 234, 0.55);
+  --sd-radius: 12px;
+  --sd-pad: 10px 14px;
+  --sd-font: -apple-system, system-ui, ui-system;
+  --sd-font-mono: ui-monospace, "SF Mono", Menlo, monospace;
+  --sd-accent: #7c8cff;
+}
+
+html, body {
+  margin: 0; padding: 0; height: 100%;
+  background: transparent;
+  color: var(--sd-fg);
+  font: 12px var(--sd-font);
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+}
+
+.card {
+  height: 100%;
+  box-sizing: border-box;
+  background: var(--sd-bg);
+  border-radius: var(--sd-radius);
+  padding: var(--sd-pad);
+  display: flex; flex-direction: column; justify-content: center;
+  gap: 2px;
+  -webkit-backdrop-filter: blur(24px) saturate(180%);
+  backdrop-filter: blur(24px) saturate(180%);
+  box-shadow: 0 12px 40px -8px rgba(0,0,0,0.5);
+}
+
+.row {
+  display: flex; align-items: baseline; gap: 8px;
+  font-family: var(--sd-font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 11px;
+  line-height: 1.5;
+}
+.key { color: var(--sd-fg-dim); white-space: pre; letter-spacing: 0.08em; }
+.val { color: var(--sd-accent); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

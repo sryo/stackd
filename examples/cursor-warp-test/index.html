@@ -1,0 +1,48 @@
+<!doctype html>
+<html><head><meta charset="utf-8">
+<style>
+  html, body { margin: 0; padding: 0; height: 100%; background: transparent;
+               font: 12px -apple-system, system-ui, sans-serif; color: #fff;
+               user-select: none; }
+  .card {
+    height: 100%; box-sizing: border-box;
+    padding: 12px 14px;
+    background: rgba(20, 20, 22, 0.78);
+    border-radius: 12px;
+    -webkit-backdrop-filter: blur(20px) saturate(180%);
+    display: flex; flex-direction: column; gap: 8px; justify-content: center;
+  }
+  h1 { font-size: 10px; margin: 0; opacity: 0.55; text-transform: uppercase; letter-spacing: 0.1em; }
+  button {
+    appearance: none; border: 0; cursor: pointer;
+    padding: 8px 12px; border-radius: 8px;
+    background: rgba(255,255,255,0.12); color: #fff; font: inherit;
+  }
+  button:hover { background: rgba(255,255,255,0.2); }
+  #pos { font-family: ui-monospace, Menlo, monospace; font-size: 11px; opacity: 0.75; }
+</style>
+</head><body>
+<div class="card">
+  <h1>sd.cursor.setPosition</h1>
+  <button id="warp">Warp to primary display center</button>
+  <div id="pos">…</div>
+</div>
+<script type="module">
+  import { sd } from "sd://runtime/api.js";
+  const btn = document.getElementById("warp");
+  const pos = document.getElementById("pos");
+
+  btn.addEventListener("click", async () => {
+    const displays = await new Promise(r => {
+      const unsub = sd.display.all.subscribe(v => { if (v) { unsub(); r(v); } });
+    });
+    const primary = displays[0];
+    if (!primary) return;
+    const cx = primary.frame.x + primary.frame.w / 2;
+    const cy = primary.frame.y + primary.frame.h / 2;
+    await sd.cursor.setPosition({ x: cx, y: cy });
+    const p = await sd.cursor.position();
+    pos.textContent = `now at ${p.x}, ${p.y}`;
+  });
+</script>
+</body></html>

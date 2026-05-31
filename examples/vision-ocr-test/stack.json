@@ -1,0 +1,10 @@
+{
+  "id": "vision-ocr-test",
+  "name": "Vision OCR",
+  "anchor": { "edge": "top-left", "inset": [40, 40] },
+  "size": { "w": 420, "h": 380 },
+  "permissions": ["display", "vision"],
+  "hotkeys": [
+    { "key": "ctrl+alt+o", "callback": "snap" }
+  ]
+}

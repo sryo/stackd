@@ -72,6 +72,34 @@ window.__sd_broadcast_fire = (id, payload) => {
   const fn = broadcastHandlers.get(id);
   if (fn) fn(payload);
 };
+// HTTP servers: serverId → { routes: { "POST /events": fn }, ... }.
+// Native fires window.__sd_http_request(serverId, reqId, req) on every match.
+// JS resolves with sd.httpserver.respond(reqId, response).
+const httpServers = new Map();
+window.__sd_http_request = async (serverId, reqId, req) => {
+  const server = httpServers.get(serverId);
+  if (!server) {
+    await request({ type: "httpserver.respond", reqId, status: 503, headers: {}, body: "no server" });
+    return;
+  }
+  const key = `${req.method} ${req.path}`;
+  const handler = server.routes[key] || server.routes[`* ${req.path}`];
+  if (!handler) {
+    await request({ type: "httpserver.respond", reqId, status: 404, headers: {}, body: "no route" });
+    return;
+  }
+  let resp;
+  try { resp = await handler(req); }
+  catch (e) { resp = { status: 500, body: String(e) }; }
+  resp = resp || {};
+  await request({
+    type: "httpserver.respond",
+    reqId,
+    status:  resp.status  || 200,
+    headers: resp.headers || {},
+    body:    resp.body == null ? "" : String(resp.body)
+  });
+};
 function request(payload) {
   const requestId = nextRequestId++;
   return new Promise((resolve) => {
@@ -91,7 +119,13 @@ export const sd = {
   // know which screen they're rendered on without an async round-trip.
   screen:     { current: window.__sd_screen || null },
   battery:    channel("battery"),
-  mouse:      channel("mouse"),
+  mouse:      Object.assign(channel("mouse"), {
+    // Move the cursor without clicking. Top-left origin (same coord space
+    // as sd.windows.focused().frame). Pairs with the subscribe channel:
+    //   sd.mouse.subscribe(pt => /* read .x .y */);
+    //   sd.mouse.warp(100, 200);
+    warp(x, y) { return request({ type: "mouse.warp", x, y }); }
+  }),
   appearance: channel("appearance"),
   app:        { frontmost: channel("frontApp") },
   windows:    {
@@ -147,6 +181,22 @@ export const sd = {
     all:        channel("displays"),
     setBrightness(displayID, value) {
       return request({ type: "display.setBrightness", displayID, value });
+    },
+    // Single-frame pixel capture. Returns { dataURL, width, height } or null.
+    //   await sd.display.snapshot()                       // main display, PNG
+    //   await sd.display.snapshot({ display: id })        // by CGDirectDisplayID
+    //   await sd.display.snapshot({ region: {x,y,w,h} })  // point-space crop on main
+    //   await sd.display.snapshot({ format: "jpeg", quality: 0.7 })
+    // dataURL is droppable directly into <img src>. width/height are pixels.
+    snapshot(opts) {
+      const o = opts || {};
+      return request({
+        type: "display.snapshot",
+        displayID: o.display,
+        region: o.region,
+        format: o.format || "png",
+        quality: o.quality
+      });
     }
   },
   menubar: {
@@ -278,6 +328,22 @@ export const sd = {
     scroll(dx, dy)        { return request({ type: "events.scroll", dx, dy }); },
     click(x, y, button)   { return request({ type: "events.click", x, y, button: button || "left" }); }
   },
+  // Cursor — warp / read. Top-left global coords by default (same convention
+  // as sd.mouse). Pass `display` (CGDirectDisplayID from sd.display.all) to
+  // interpret coords as display-local.
+  //   await sd.cursor.setPosition({ x: 100, y: 200 });
+  //   await sd.cursor.setPosition({ x: 0, y: 0, display: displays[1].displayID });
+  //   const p = await sd.cursor.position();   // { x, y } — top-left global
+  // Consumers: EdgeHopper (wrap cursor to opposite edge on punch-through);
+  // CloudPad (in-process replacement for the JXA CGWarpMouseCursorPosition
+  // shim under continuous pointer-mode moves).
+  cursor: {
+    setPosition(p) {
+      const o = p || {};
+      return request({ type: "cursor.setPosition", x: o.x, y: o.y, display: o.display });
+    },
+    position() { return request({ type: "cursor.position" }); }
+  },
   apps: {
     // running: signal<[{pid, bundleId, name, active, hidden, launchedAt?}]>
     // — fires on launch/quit/hide/unhide/activate.
@@ -350,9 +416,17 @@ export const sd = {
     //   const h = await sd.hotkey.bind("ctrl+alt+l", () => doThing());
     //   ...later...
     //   await sd.hotkey.unbind(h);
+    // Options (skhd parity):
+    //   { mode: "command" }            // only fires while sd.hotkey.mode.current() === "command"
+    //   { apps: ["com.apple.Safari"] } // only fires when Safari is frontmost; "*" matches any
     // Returns null if the spec doesn't parse. Per-stack: unload cancels all.
-    async bind(spec, fn) {
-      const id = await request({ type: "hotkey.bind", spec });
+    async bind(spec, fn, opts = {}) {
+      const id = await request({
+        type: "hotkey.bind",
+        spec,
+        mode: opts.mode ?? null,
+        apps: opts.apps ?? null
+      });
       if (id == null || id === false) return null;
       hotkeyHandlers.set(id, fn);
       return id;
@@ -360,6 +434,18 @@ export const sd = {
     async unbind(id) {
       hotkeyHandlers.delete(id);
       return request({ type: "hotkey.unbind", id });
+    },
+    // Modal keymaps. While a non-default mode is active, only bindings
+    // declared for that mode fire; bindings without a mode are always-on.
+    // Mode is GLOBAL across all stacks — entering "command" suppresses every
+    // other stack's default-mode hotkeys too, matching skhd's model.
+    //   await sd.hotkey.mode.enter("window");
+    //   await sd.hotkey.mode.exit();   // back to "default"
+    //   await sd.hotkey.mode.current(); // → "default" | "window" | ...
+    mode: {
+      enter(name)  { return request({ type: "hotkey.mode.enter", name }); },
+      exit()       { return request({ type: "hotkey.mode.exit" }); },
+      current()    { return request({ type: "hotkey.mode.current" }); }
     }
   },
   // Generic NSDistributedNotificationCenter observer. The same machinery
@@ -380,6 +466,48 @@ export const sd = {
     async unobserve(id) {
       broadcastHandlers.delete(id);
       return request({ type: "broadcasts.unobserve", id });
+    }
+  },
+  // Long-running HTTP server. Loopback-only by default; pass
+  // bindHost: "0.0.0.0" to expose on the LAN. Routes are method+path keys
+  // pointing to async handlers that return { status?, headers?, body? }.
+  // Static assets ride on assetsDir (relative paths under it served as-is).
+  //   const srv = await sd.httpserver.serve({
+  //     port: 7373,
+  //     routes: {
+  //       "GET /hello":  async (req) => ({ body: "hello" }),
+  //       "POST /event": async (req) => { handle(req.body); return { status: 204 }; }
+  //     },
+  //     assetsDir: "~/stackd/stacks/cloudpad/public",  // optional
+  //     bonjour: { type: "_http._tcp.", name: "cloudpad" } // optional
+  //   });
+  //   ...later...
+  //   await srv.stop();
+  // Consumers: CloudPad (serves snapshot + bang surface to phones on the LAN);
+  // any webhook receiver or local API dashboard stack.
+  httpserver: {
+    async serve(opts) {
+      const o = opts || {};
+      const routes = o.routes || {};
+      const id = await request({
+        type: "httpserver.serve",
+        port: o.port || 0,
+        bindHost: o.bindHost || "127.0.0.1",
+        assetsDir: o.assetsDir,
+        routes: Object.keys(routes),
+        bonjour: o.bonjour
+      });
+      if (id == null) return null;
+      httpServers.set(id, { routes });
+      return {
+        id,
+        port: o.port,
+        url: `http://${o.bindHost === "0.0.0.0" ? "localhost" : (o.bindHost || "127.0.0.1")}:${o.port}`,
+        async stop() {
+          httpServers.delete(id);
+          return request({ type: "httpserver.stop", id });
+        }
+      };
     }
   },
   // Fire a bang to every stack whose manifest `handles` array contains `name`.
@@ -484,6 +612,102 @@ export const sd = {
     lemmas(text)       { return request({ type: "nlp.lemmas",     text: String(text ?? "") }); },
     similarity(a, b)   { return request({ type: "nlp.similarity", a: String(a ?? ""), b: String(b ?? "") }); }
   },
+  // Embedded SQLite (libsqlite3). Minimal wrapper: open / exec / query / close.
+  // Default path lands under ~/stackd/stacks/<id>/data/ — absolute paths
+  // and ~ paths pass through. FTS4 and FTS5 are compiled into the system
+  // libsqlite3 so `CREATE VIRTUAL TABLE ... USING fts5(...)` works.
+  //   const db = await sd.sqlite.open("notes.db");
+  //   await db.exec("CREATE TABLE IF NOT EXISTS k(v INTEGER)");
+  //   await db.exec("INSERT INTO k(v) VALUES (42)");
+  //   const r = await db.query("SELECT v FROM k WHERE v > ?", [10]);
+  //   await db.close();
+  // Consumers: DigUp (FTS-indexed OCR snapshots); persistence-heavy stacks
+  // (notes app, quick-search index, history-of-clipboard) where settings.set
+  // would be a denormalized mess.
+  sqlite: {
+    async open(path, opts) {
+      const o = opts || {};
+      const result = await request({
+        type: "sqlite.open",
+        path: String(path ?? ""),
+        mode: o.mode || "readwrite"
+      });
+      if (!result || !result.handle) return null;
+      const handle = result.handle;
+      return {
+        handle,
+        path: result.path,
+        exec(sql)              { return request({ type: "sqlite.exec",  handle, sql: String(sql ?? "") }); },
+        query(sql, params)     { return request({ type: "sqlite.query", handle, sql: String(sql ?? ""), params: params || [] }); },
+        close()                { return request({ type: "sqlite.close", handle }); }
+      };
+    }
+  },
+  // Apple's Vision framework. OCR via VNRecognizeTextRequest.
+  //   await sd.vision.ocr({ image: dataURL })
+  //   await sd.vision.ocr({ image: "/path/to/img.png", languages: ["en"], recognitionLevel: "fast" })
+  // Returns { observations: [{ text, confidence, boundingBox: {x,y,w,h} }] }
+  // where boundingBox is normalized (0..1) in web-style top-left origin so
+  // overlays render directly on top of an <img> with no flip math.
+  // Consumers: DigUp (screenshot → OCR → FTS index); ad-hoc "extract text
+  // from a screenshot" stack (drop image, copy text to clipboard).
+  vision: {
+    ocr(opts) {
+      const o = opts || {};
+      return request({
+        type: "vision.ocr",
+        image: o.image,
+        languages: o.languages,
+        recognitionLevel: o.recognitionLevel || "accurate"
+      });
+    },
+    // VNDetectFaceRectanglesRequest. Returns
+    //   { observations: [{ boundingBox: {x,y,w,h}, confidence,
+    //                      roll?, yaw?, pitch? }] }
+    // boundingBox is normalized 0..1, top-left origin. Head-pose angles are
+    // in radians; absent when Vision can't estimate. No identity / landmarks.
+    faces(opts) {
+      const o = opts || {};
+      return request({ type: "vision.faces", image: o.image });
+    },
+    // Perceptual hash via VNGenerateImageFeaturePrintRequest. Returns
+    //   { print: base64, elementCount, elementType }
+    // where `print` is an opaque blob — store it (SQLite, JSON) and later
+    // pass two prints to .featurePrintDistance for an L2 similarity score.
+    //   const a = await sd.vision.featurePrint({ image: imgA });
+    //   const b = await sd.vision.featurePrint({ image: imgB });
+    //   const { distance } = await sd.vision.featurePrintDistance(a.print, b.print);
+    //   // distance ≈ 0 → near-identical; larger → less similar
+    featurePrint(opts) {
+      const o = opts || {};
+      return request({ type: "vision.featurePrint", image: o.image });
+    },
+    featurePrintDistance(a, b) {
+      return request({ type: "vision.featurePrintDistance", a, b });
+    },
+    // VNGenerateForegroundInstanceMaskRequest (macOS 14+). Returns
+    //   { dataURL: "data:image/png;base64,...", width, height }
+    // — the original image with the background made transparent. Returns
+    // null on macOS 13 (capability gap, not an error) or when no subject is
+    // detected. Same engine Photos.app uses for long-press subject lift.
+    subjectMask(opts) {
+      const o = opts || {};
+      return request({ type: "vision.subjectMask", image: o.image });
+    },
+    // VNDetectHumanBodyPoseRequest. Returns
+    //   { bodies: [{ joints: { nose, leftEye, rightShoulder, ... :
+    //                         { x, y, confidence } }, confidence }] }
+    // Joint positions are normalized 0..1, top-left origin. Joints with
+    // confidence < 0.1 are dropped to avoid noise. Multiple bodies per
+    // frame. Each named joint: nose, leftEye, rightEye, leftEar, rightEar,
+    // leftShoulder, rightShoulder, neck, leftElbow, rightElbow, leftWrist,
+    // rightWrist, leftHip, rightHip, root, leftKnee, rightKnee, leftAnkle,
+    // rightAnkle.
+    bodyPose(opts) {
+      const o = opts || {};
+      return request({ type: "vision.bodyPose", image: o.image });
+    }
+  },
   // Current location signal: { lat, lon, accuracy, altitude?, heading?, speed?, timestamp }.
   // macOS asks for Location authorization the first time a stack with the
   // "location" permission loads. Returns null until granted + first fix.
@@ -491,6 +715,14 @@ export const sd = {
   // Attached USB devices: [{ vendorID, productID, vendorName?, productName?,
   //   serialNumber?, locationID }, ...]. Fires on attach/detach via IOKit.
   usb: channel("usb"),
+  // Mounted volumes via DiskArbitration. One-shot snapshot:
+  //   const disks = await sd.disks.list();
+  //   // → [{ name, mountPoint, fs?, removable?, ejectable?, size?, internal? }, ...]
+  // Live changes via `handles: ["sd.disk.mounted", "sd.disk.unmounted"]` in
+  // the stack manifest + window.onBang_sd_disk_mounted(detail) / _unmounted.
+  disks: {
+    list() { return request({ type: "disks.list" }); }
+  },
   // Video capture devices: [{ id, name, position, isInUse, manufacturer? }, ...].
   // Fires on connect / disconnect via AVFoundation, and on per-device
   // isInUseByAnotherApplication KVO. Use for "camera in use" indicators
@@ -613,6 +845,189 @@ function sdTpl(strings, ...exprs) {
 
 sd.bind = sdBind;
 sd.tpl  = sdTpl;
+
+// ── Template syntax: {{ sd.battery.percent }} in HTML ──────────────────────
+// Walks the document at load time, finds `{{ ... }}` in text content and
+// attribute values, compiles each as a JS expression, subscribes to whichever
+// sd.* signals it references, and updates the DOM on every fire. Lets simple
+// stacks skip writing `sd.bind(...)` and `<script>` entirely.
+//
+// Limitations:
+//   - Dependency tracking is regex-based: `{{ sd.battery.percent }}` finds
+//     `sd.battery` in the source and subscribes. `const b = sd.battery;
+//     b.percent` won't track because the regex never sees the alias. For
+//     dynamic usage, drop down to `<script>` + `sd.bind`.
+//   - Expressions wrap in try/catch and substitute "" on throw, so
+//     `{{ sd.battery.percent }}` renders empty until the first sample arrives
+//     (no manual `b?.percent` ceremony needed in the common case).
+//   - <script> and <style> contents are skipped — they're not display surface.
+
+// Lookup of every signal exposed on `sd.*` that templates can auto-subscribe
+// to. Path strings match what the expression author writes (e.g.
+// "windows.focused" for `{{ sd.windows.focused.title }}`). Longer paths are
+// matched first so "windows.focused" wins over "windows".
+const __sdSignalPaths = {
+  "battery":            sd.battery,
+  "mouse":              sd.mouse,
+  "appearance":         sd.appearance,
+  "app.frontmost":      sd.app.frontmost,
+  "windows.focused":    sd.windows.focused,
+  "windows.all":        sd.windows.all,
+  "input.layout":       sd.input.layout,
+  "net.wifi":           sd.net.wifi,
+  "net.lan":            sd.net.lan,
+  "audio.output":       sd.audio.output,
+  "display.all":        sd.display.all,
+  "media.nowPlaying":   sd.media.nowPlaying,
+  "pasteboard.changed": sd.pasteboard.changed,
+  "apps.running":       sd.apps.running,
+  "apps.changed":       sd.apps.changed,
+  "spaces.all":         sd.spaces.all,
+  "caffeinate":         sd.caffeinate,
+  "displayLink":        sd.displayLink,
+  "host.load":          sd.host.load,
+  "sensors":            sd.sensors,
+  "touchdevice":        sd.touchdevice,
+  "location":           sd.location,
+  "usb":                sd.usb,
+  "camera":             sd.camera,
+};
+
+// Sort once, longer-first, so "windows.focused" matches before "windows" —
+// otherwise the shorter prefix would always win and the longer path's signal
+// would never get subscribed.
+const __sdSignalPathsSorted = Object.keys(__sdSignalPaths)
+  .sort((a, b) => b.length - a.length);
+
+function __sdCompilePlaceholder(expr) {
+  let fn;
+  try {
+    fn = new Function("sd", "return (" + expr + ");");
+  } catch (e) {
+    console.error("[stackd] template parse error in {{", expr.trim(), "}}:", String(e));
+    fn = () => "";
+  }
+  const deps = new Set();
+  for (const path of __sdSignalPathsSorted) {
+    const re = new RegExp("\\bsd\\." + path.replace(/\./g, "\\.") + "\\b");
+    if (re.test(expr)) deps.add(__sdSignalPaths[path]);
+  }
+  return { fn, deps: [...deps] };
+}
+
+function __sdEvalPlaceholder(compiled) {
+  try {
+    const v = compiled.fn(sd);
+    return v == null ? "" : String(v);
+  } catch (e) {
+    // Typical cause: signal's value is still null, so `sd.battery.percent`
+    // throws on the first read. Once the first sample arrives, the
+    // subscription re-runs and the value renders.
+    return "";
+  }
+}
+
+function __sdProcessTextNode(textNode) {
+  const raw = textNode.nodeValue;
+  const re = /\{\{([\s\S]+?)\}\}/g;
+  const frag = document.createDocumentFragment();
+  let lastIndex = 0;
+  let m;
+  let hadMatch = false;
+  while ((m = re.exec(raw)) !== null) {
+    hadMatch = true;
+    if (m.index > lastIndex) {
+      frag.appendChild(document.createTextNode(raw.slice(lastIndex, m.index)));
+    }
+    const slot = document.createElement("span");
+    const compiled = __sdCompilePlaceholder(m[1]);
+    const apply = () => { slot.textContent = __sdEvalPlaceholder(compiled); };
+    apply();
+    for (const sig of compiled.deps) {
+      const unsub = sig.subscribe(apply);
+      __sdBindUnsubs.add(unsub);
+    }
+    frag.appendChild(slot);
+    lastIndex = m.index + m[0].length;
+  }
+  if (!hadMatch) return;
+  if (lastIndex < raw.length) {
+    frag.appendChild(document.createTextNode(raw.slice(lastIndex)));
+  }
+  textNode.parentNode.replaceChild(frag, textNode);
+}
+
+function __sdProcessAttribute(el, attrName, raw) {
+  const re = /\{\{([\s\S]+?)\}\}/g;
+  // parts[i] is either a literal string or null (meaning "splice in
+  // slots[slotIdx++]"). Cheap concat on every fire.
+  const parts = [];
+  const slots = [];
+  let lastIndex = 0;
+  let m;
+  while ((m = re.exec(raw)) !== null) {
+    parts.push(raw.slice(lastIndex, m.index));
+    slots.push(__sdCompilePlaceholder(m[1]));
+    parts.push(null);
+    lastIndex = m.index + m[0].length;
+  }
+  parts.push(raw.slice(lastIndex));
+
+  const apply = () => {
+    let out = "";
+    let slotIdx = 0;
+    for (const p of parts) out += p === null ? __sdEvalPlaceholder(slots[slotIdx++]) : p;
+    el.setAttribute(attrName, out);
+  };
+  apply();
+  const allDeps = new Set();
+  for (const s of slots) for (const d of s.deps) allDeps.add(d);
+  for (const sig of allDeps) {
+    const unsub = sig.subscribe(apply);
+    __sdBindUnsubs.add(unsub);
+  }
+}
+
+function __sdCompileTemplates(root) {
+  const SKIP = new Set(["SCRIPT", "STYLE"]);
+  const PROBE = /\{\{[\s\S]+?\}\}/;
+
+  // Collect text nodes first, mutate after — mutating during walk skips siblings.
+  const textNodes = [];
+  const tw = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+    acceptNode(n) {
+      if (n.parentNode && SKIP.has(n.parentNode.nodeName)) return NodeFilter.FILTER_REJECT;
+      return PROBE.test(n.nodeValue) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
+    }
+  });
+  let t;
+  while ((t = tw.nextNode())) textNodes.push(t);
+  for (const node of textNodes) __sdProcessTextNode(node);
+
+  // Attributes — same shape, element walker.
+  const ew = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT);
+  let el;
+  const attrJobs = [];
+  while ((el = ew.nextNode())) {
+    if (SKIP.has(el.nodeName)) continue;
+    for (const attr of Array.from(el.attributes)) {
+      if (PROBE.test(attr.value)) attrJobs.push([el, attr.name, attr.value]);
+    }
+  }
+  for (const [e, name, raw] of attrJobs) __sdProcessAttribute(e, name, raw);
+}
+
+// Guard against double-compilation if an explicit `import { sd }` in a stack
+// races with the auto-injected runtime loader. ES modules dedup by URL so
+// the body only runs once anyway — guard is belt-and-suspenders.
+if (!window.__sd_templates_compiled) {
+  window.__sd_templates_compiled = true;
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", () => __sdCompileTemplates(document));
+  } else {
+    __sdCompileTemplates(document);
+  }
+}
 
 // Handshake: tell native we're ready so it can replay buffered state.
 try {

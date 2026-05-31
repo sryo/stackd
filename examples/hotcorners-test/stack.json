@@ -1,0 +1,14 @@
+{
+  "id": "hotcorners-test",
+  "name": "Hot corners",
+  "anchor": { "edge": "top-right", "inset": [340, 16] },
+  "size": { "w": 220, "h": 100 },
+  "clickThrough": true,
+  "permissions": ["notify"],
+  "hotcorners": [
+    { "corner": "top-left",     "callback": "onTL", "tooltip": "tipTL" },
+    { "corner": "top-right",    "callback": "onTR" },
+    { "corner": "bottom-left",  "callback": "onBL" },
+    { "corner": "bottom-right", "callback": "onBR" }
+  ]
+}

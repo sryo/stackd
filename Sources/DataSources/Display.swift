@@ -93,3 +93,54 @@ final class DisplayObserver: RefCountedObserver {
         }
     }
 }
+
+// MARK: - Display hotplug bangs
+//
+// Lifecycle bangs (`sd.display.added`, `sd.display.removed`,
+// `sd.display.reconfigured`) fan out to stacks that declare them in
+// `handles`. Installed once at startup from AppDelegate — same shape as
+// WindowEvents.install() — so the bangs fire even with no `sd.display`
+// subscriber.
+//
+// `CGDisplayRegisterReconfigurationCallback` (public CoreGraphics API) fires
+// twice per change: a pre-pass with `.beginConfigurationFlag` only, then a
+// post-pass with the resolved flags. We ignore the pre-pass and fan out on
+// the second call so consumers see one bang per change.
+enum DisplayHotplug {
+    private static var installed = false
+
+    static func install() {
+        guard !installed else { return }
+        CGDisplayRegisterReconfigurationCallback(displayHotplugCallback, nil)
+        installed = true
+    }
+}
+
+private let displayHotplugCallback: CGDisplayReconfigurationCallBack = { displayID, flags, _ in
+    if flags.contains(.beginConfigurationFlag) { return }
+
+    DispatchQueue.main.async {
+        guard let host = AppDelegate.shared?.host else { return }
+        let detail: [String: Any] = ["displayID": Int(displayID)]
+
+        if flags.contains(.addFlag) {
+            host.bang(name: "sd.display.added", detail: detail)
+            return
+        }
+        if flags.contains(.removeFlag) {
+            host.bang(name: "sd.display.removed", detail: detail)
+            return
+        }
+        // Anything else worth surfacing — move, mode change, mirror, rotation,
+        // set-main, desktop reshape — collapses to `reconfigured` so consumers
+        // have one channel to react to. If none of those bits is set the
+        // notification is a no-op (e.g. begin pass already filtered above).
+        let reconfigured: CGDisplayChangeSummaryFlags = [
+            .movedFlag, .setMainFlag, .setModeFlag, .enabledFlag,
+            .disabledFlag, .mirrorFlag, .unMirrorFlag, .desktopShapeChangedFlag
+        ]
+        if !flags.intersection(reconfigured).isEmpty {
+            host.bang(name: "sd.display.reconfigured", detail: detail)
+        }
+    }
+}

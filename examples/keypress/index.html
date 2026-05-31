@@ -1,0 +1,44 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <link rel="stylesheet" href="index.css">
+  <title>Keypress</title>
+</head>
+<body>
+  <div class="card">
+    <div class="label">KEY</div>
+    <div class="row">
+      <span id="code" class="code">—</span>
+      <span id="mods" class="mods"></span>
+    </div>
+  </div>
+  <script type="module">
+    const code = document.getElementById("code");
+    const mods = document.getElementById("mods");
+    const FLAGS = {
+      ctrl:  0x040000, alt:  0x080000, shift: 0x020000,
+      cmd:   0x100000, fn:   0x800000,
+    };
+    function modString(flags) {
+      const out = [];
+      if (flags & FLAGS.ctrl)  out.push("⌃");
+      if (flags & FLAGS.alt)   out.push("⌥");
+      if (flags & FLAGS.shift) out.push("⇧");
+      if (flags & FLAGS.cmd)   out.push("⌘");
+      if (flags & FLAGS.fn)    out.push("fn");
+      return out.join("");
+    }
+    window.onTap_key = (e) => {
+      code.textContent = String(e.keyCode);
+      mods.textContent = modString(e.flags);
+      document.body.classList.remove("bump");
+      void document.body.offsetWidth;
+      document.body.classList.add("bump");
+    };
+    window.onTap_flags = (e) => {
+      mods.textContent = modString(e.flags);
+    };
+  </script>
+</body>
+</html>
