@@ -2,9 +2,6 @@ import WebKit
 
 final class Bridge: NSObject, WKScriptMessageHandler {
     weak var webView: WKWebView?
-    private var batteryTimer: Timer?
-    private var mouseTimer: Timer?
-    private var workspaceTimer: Timer?
     private var permissions: [String] = []
     private var lastBattery: String?
     private var lastMouse: String?
@@ -25,6 +22,22 @@ final class Bridge: NSObject, WKScriptMessageHandler {
     private var fsWatches: [Int: FSWatch] = [:]
     private var handlesBangs: Set<String> = []
     private let axHandles = AX.HandleStore()
+    // Outstanding sd.menubar.suppress() tokens (LIFO). sd.menubar.restore()
+    // pops one. Anything left at unload is drained by scope.
+    private var menubarSuppressions: [Token] = []
+    // NSStatusItem handles owned by this stack, keyed by mint id. Scope adopts
+    // a drain entry at start(); unload removes every item from NSStatusBar.
+    fileprivate var statusItems: [Int: StatusItemHandle] = [:]
+    fileprivate var nextStatusItemId: Int = 1
+    // JS-bound Carbon hotkeys: id → Token. Each Token's cancel removes the
+    // Carbon registration; scope drains them on unload too. The JS side keeps
+    // its own map keyed by the same id so __sd_hotkey_fire can find the callback.
+    fileprivate var hotkeyTokens: [Int: Token] = [:]
+    fileprivate var nextHotkeyId: Int = 1
+    /// Per-stack native-resource scope. Every observer subscription, hotkey
+    /// bind, eventtap register, menubar suppression goes in here. StackHost
+    /// calls drain() on unload to release them all in reverse order.
+    let scope = StackScope()
 
     private static let consoleHookScript: WKUserScript = {
         let source = """
@@ -110,9 +123,9 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         if let hks = manifest.hotkeys {
             for hk in hks {
                 let cb = hk.callback
-                _ = HotkeyRegistry.shared.bind(spec: hk.key) { [weak self] in
+                scope.adopt(HotkeyRegistry.shared.bind(spec: hk.key) { [weak self] in
                     self?.fireHotkey(callback: cb)
-                }
+                })
             }
         }
         if let taps = manifest.eventtap {
@@ -122,11 +135,33 @@ final class Bridge: NSObject, WKScriptMessageHandler {
                     continue
                 }
                 let cb = et.callback
-                _ = EventTapRegistry.shared.register(eventType: type) { [weak self] event in
+                scope.adopt(EventTapRegistry.shared.register(eventType: type) { [weak self] event in
                     self?.fireEventTap(callback: cb, type: type, event: event)
-                }
+                })
             }
         }
+        // Drain any leftover sd.menubar.suppress() tokens. If the stack
+        // paired suppress/restore correctly this is a no-op; if it crashed
+        // mid-suppress this is the safety net so the bar reappears.
+        scope.adopt(Token { [weak self] in
+            guard let self = self else { return }
+            for t in self.menubarSuppressions { t.cancel() }
+            self.menubarSuppressions.removeAll()
+        })
+        // Same shape for NSStatusItems: stack unload removes every item this
+        // stack added (no orphan icons sitting in the menu bar forever).
+        scope.adopt(Token { [weak self] in
+            guard let self = self else { return }
+            for (_, h) in self.statusItems { h.remove() }
+            self.statusItems.removeAll()
+        })
+        // Same shape for JS-bound hotkeys: stack unload cancels every Carbon
+        // registration so reload-then-rebind doesn't leak duplicate bindings.
+        scope.adopt(Token { [weak self] in
+            guard let self = self else { return }
+            for (_, t) in self.hotkeyTokens { t.cancel() }
+            self.hotkeyTokens.removeAll()
+        })
     }
 
     func handles(bang: String) -> Bool { handlesBangs.contains(bang) }
@@ -147,164 +182,36 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         }
     }
 
+    // MARK: - Message dispatch
+
+    // Single entry point: look up the type in the static `dispatch` table,
+    // gate on `permission` if declared, then call the primitive's handler.
+    // Adding a new primitive is one entry in the table below — no edits to
+    // userContentController, no per-call permission boilerplate.
     func userContentController(_ uc: WKUserContentController, didReceive message: WKScriptMessage) {
         if message.name == "log", let body = message.body as? [String: Any] {
             let level = body["level"] as? String ?? "log"
             let msg = body["msg"] as? String ?? ""
             FileHandle.standardError.write(Data("stackd: js[\(level)] \(msg)\n".utf8))
-        } else if message.name == "sd", let body = message.body as? [String: Any] {
-            let type = body["type"] as? String ?? ""
-            if type == "ready" {
-                replayState()
-            } else if type == "defaults.read" {
-                handleDefaultsRead(body)
-            } else if type == "audio.setVolume" {
-                handleAudioSetVolume(body)
-            } else if type == "audio.setMuted" {
-                handleAudioSetMuted(body)
-            } else if type == "display.setBrightness" {
-                handleDisplaySetBrightness(body)
-            } else if type == "menubar.suppress" {
-                handleMenubarSuppress(body)
-            } else if type == "menubar.restore" {
-                handleMenubarRestore(body)
-            } else if type == "media.command" {
-                handleMediaCommand(body)
-            } else if type == "settings.get" {
-                handleSettingsGet(body)
-            } else if type == "settings.set" {
-                handleSettingsSet(body)
-            } else if type == "settings.delete" {
-                handleSettingsDelete(body)
-            } else if type == "settings.all" {
-                handleSettingsAll(body)
-            } else if type == "fs.read" {
-                handleFsRead(body)
-            } else if type == "fs.stat" {
-                handleFsStat(body)
-            } else if type == "fs.list" {
-                handleFsList(body)
-            } else if type == "fs.watch.start" {
-                handleFsWatchStart(body)
-            } else if type == "fs.watch.stop" {
-                handleFsWatchStop(body)
-            } else if type == "pasteboard.get" {
-                handlePasteboardGet(body)
-            } else if type == "pasteboard.set" {
-                handlePasteboardSet(body)
-            } else if type == "proc.exec" {
-                handleProcExec(body)
-            } else if type == "events.type" {
-                handleEventsType(body)
-            } else if type == "events.key" {
-                handleEventsKey(body)
-            } else if type == "events.scroll" {
-                handleEventsScroll(body)
-            } else if type == "events.click" {
-                handleEventsClick(body)
-            } else if type == "apps.launch" {
-                handleAppsLaunch(body)
-            } else if type == "apps.focus" {
-                handleAppsFocus(body)
-            } else if type == "apps.kill" {
-                handleAppsKill(body)
-            } else if type == "apps.hide" {
-                handleAppsHide(body)
-            } else if type == "icons.app" {
-                handleIconsApp(body)
-            } else if type == "icons.file" {
-                handleIconsFile(body)
-            } else if type == "windows.setFrame" {
-                handleWindowsSetFrame(body)
-            } else if type == "windows.minimize" {
-                handleWindowsMinimize(body)
-            } else if type == "windows.fullscreen" {
-                handleWindowsFullscreen(body)
-            } else if type == "windows.raise" {
-                handleWindowsRaise(body)
-            } else if type == "windows.byId.setFrame" {
-                handleWindowsByIdSetFrame(body)
-            } else if type == "windows.byId.minimize" {
-                handleWindowsByIdMinimize(body)
-            } else if type == "windows.byId.fullscreen" {
-                handleWindowsByIdFullscreen(body)
-            } else if type == "windows.byId.raise" {
-                handleWindowsByIdRaise(body)
-            } else if type == "windows.byId.focus" {
-                handleWindowsByIdFocus(body)
-            } else if type == "windows.byId.close" {
-                handleWindowsByIdClose(body)
-            } else if type == "windows.byId.frame" {
-                handleWindowsByIdFrame(body)
-            } else if type == "spaces.windowSpaces" {
-                handleSpacesWindowSpaces(body)
-            } else if type == "ax.focused" {
-                handleAxFocused(body)
-            } else if type == "ax.application" {
-                handleAxApplication(body)
-            } else if type == "ax.system" {
-                handleAxSystem(body)
-            } else if type == "ax.systemElementAtPosition" {
-                handleAxSystemElementAtPosition(body)
-            } else if type == "ax.focusedElement" {
-                handleAxFocusedElement(body)
-            } else if type == "ax.attributeNames" {
-                handleAxAttributeNames(body)
-            } else if type == "ax.attribute" {
-                handleAxAttribute(body)
-            } else if type == "ax.attributes" {
-                handleAxAttributes(body)
-            } else if type == "ax.parameterizedAttributeNames" {
-                handleAxParameterizedAttributeNames(body)
-            } else if type == "ax.parameterizedAttribute" {
-                handleAxParameterizedAttribute(body)
-            } else if type == "ax.actionNames" {
-                handleAxActionNames(body)
-            } else if type == "ax.isAttributeSettable" {
-                handleAxIsAttributeSettable(body)
-            } else if type == "ax.setAttribute" {
-                handleAxSetAttribute(body)
-            } else if type == "ax.performAction" {
-                handleAxPerformAction(body)
-            } else if type == "ax.children" {
-                handleAxChildren(body)
-            } else if type == "ax.parent" {
-                handleAxParent(body)
-            } else if type == "ax.role" {
-                handleAxRole(body)
-            } else if type == "ax.release" {
-                handleAxRelease(body)
-            } else if type == "ax.releaseAll" {
-                handleAxReleaseAll(body)
-            } else if type == "window.invoke" {
-                handleWindowInvoke(body)
-            } else if type == "window.dismiss" {
-                handleWindowDismiss(body)
-            } else if type == "menu.popup" {
-                handleMenuPopup(body)
-            } else if type == "bang" {
-                handleBang(body)
-            }
+            return
         }
-    }
-
-    /// Stack-to-stack bang dispatch from JS. Fans out via StackHost.bang() to
-    /// every stack whose manifest `handles` array contains `name`. Returns the
-    /// number of stacks that received the bang.
-    private func handleBang(_ body: [String: Any]) {
+        guard message.name == "sd",
+              let body = message.body as? [String: Any],
+              let type = body["type"] as? String,
+              let primitive = Bridge.dispatch[type] else { return }
         let requestId = body["requestId"] as? Int ?? -1
-        guard let name = body["name"] as? String else {
-            respond(requestId: requestId, value: 0); return
+        if let perm = primitive.permission, !permissions.contains(perm) {
+            // Single-line guidance: the manifest is right there in the stack
+            // folder; this tells the author exactly what to add.
+            log("\(type) denied — add \"\(perm)\" to permissions in stack.json")
+            respond(requestId: requestId, value: NSNull())
+            return
         }
-        let detail = (body["detail"] as? [String: Any]) ?? [:]
-        DispatchQueue.main.async { [weak self] in
-            let fired = AppDelegate.shared?.host?.bang(name: name, detail: detail) ?? 0
-            self?.respond(requestId: requestId, value: fired)
-        }
+        primitive.handler(self, body, requestId)
     }
 
     /// JSON-encode a value (or "null") and fire window.__sd_response(requestId, value).
-    private func respond(requestId: Int, value: Any?) {
+    fileprivate func respond(requestId: Int, value: Any?) {
         guard let webView = webView else { return }
         let json = value.map { Bridge.jsonify($0) } ?? "null"
         let script = "window.__sd_response && window.__sd_response(\(requestId), \(json));"
@@ -313,595 +220,363 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         }
     }
 
-    private func handleDefaultsRead(_ body: [String: Any]) {
-        let requestId = body["requestId"] as? Int ?? -1
-        guard permissions.contains("defaults") else {
-            log("defaults.read denied (stack lacks 'defaults' permission)")
-            respond(requestId: requestId, value: nil)
-            return
+    // MARK: - Primitive table
+
+    /// Declarative dispatch entry. Each `Primitive` ties a JS-side type string
+    /// to its permission gate (nil = always allowed) and a handler. Builder
+    /// helpers below remove the requestId / permission / respond boilerplate
+    /// for the ~60 sync entries; the messy 6 (proc.exec, fs.watch.*, menu.popup,
+    /// window.invoke/dismiss, bang) use `.custom` for raw control.
+    struct Primitive {
+        let type: String
+        let permission: String?
+        let handler: (Bridge, [String: Any], Int) -> Void
+
+        /// Sync — closure returns a JSON-able value (or nil); auto-respond.
+        static func sync(_ type: String, permission: String? = nil,
+                         _ handler: @escaping ([String: Any]) -> Any?) -> Primitive {
+            Primitive(type: type, permission: permission) { bridge, body, requestId in
+                bridge.respond(requestId: requestId, value: handler(body))
+            }
         }
-        let bundleId = body["bundleId"] as? String ?? ""
-        let key      = body["key"]      as? String ?? ""
-        respond(requestId: requestId, value: Defaults.read(bundleId: bundleId, key: key))
-    }
 
-    private func handleAudioSetVolume(_ body: [String: Any]) {
-        let requestId = body["requestId"] as? Int ?? -1
-        guard permissions.contains("audio") else {
-            log("audio.setVolume denied (stack lacks 'audio' permission)")
-            respond(requestId: requestId, value: false)
-            return
+        /// Sync that needs Bridge (for settings, fsWatches, menubarSuppressions).
+        static func syncBridge(_ type: String, permission: String? = nil,
+                               _ handler: @escaping (Bridge, [String: Any]) -> Any?) -> Primitive {
+            Primitive(type: type, permission: permission) { bridge, body, requestId in
+                bridge.respond(requestId: requestId, value: handler(bridge, body))
+            }
         }
-        let value = (body["value"] as? Double) ?? 0
-        respond(requestId: requestId, value: Audio.setVolume(Float(value)))
-    }
 
-    private func handleAudioSetMuted(_ body: [String: Any]) {
-        let requestId = body["requestId"] as? Int ?? -1
-        guard permissions.contains("audio") else {
-            log("audio.setMuted denied (stack lacks 'audio' permission)")
-            respond(requestId: requestId, value: false)
-            return
+        /// AX traffic must hop to main: AXUIElement APIs claim thread safety
+        /// but real apps deadlock under cross-thread calls.
+        static func ax(_ type: String, permission: String? = "ax",
+                       _ handler: @escaping (Bridge, [String: Any]) -> Any?) -> Primitive {
+            Primitive(type: type, permission: permission) { bridge, body, requestId in
+                DispatchQueue.main.async { [weak bridge] in
+                    guard let bridge = bridge else { return }
+                    bridge.respond(requestId: requestId, value: handler(bridge, body))
+                }
+            }
         }
-        let value = (body["value"] as? Bool) ?? false
-        respond(requestId: requestId, value: Audio.setMuted(value))
-    }
 
-    private func handleDisplaySetBrightness(_ body: [String: Any]) {
-        let requestId = body["requestId"] as? Int ?? -1
-        guard permissions.contains("display") else {
-            log("display.setBrightness denied (stack lacks 'display' permission)")
-            respond(requestId: requestId, value: false)
-            return
-        }
-        let id    = CGDirectDisplayID((body["displayID"] as? Int) ?? 0)
-        let value = (body["value"] as? Double) ?? 0
-        respond(requestId: requestId, value: Display.setBrightness(displayID: id, Float(value)))
-    }
-
-    private func handleMenubarSuppress(_ body: [String: Any]) {
-        let requestId = body["requestId"] as? Int ?? -1
-        guard permissions.contains("menubar") else {
-            log("menubar.suppress denied (stack lacks 'menubar' permission)")
-            respond(requestId: requestId, value: false)
-            return
-        }
-        respond(requestId: requestId, value: MenuBarVisibility.suppress())
-    }
-
-    private func handleMenubarRestore(_ body: [String: Any]) {
-        let requestId = body["requestId"] as? Int ?? -1
-        guard permissions.contains("menubar") else {
-            log("menubar.restore denied (stack lacks 'menubar' permission)")
-            respond(requestId: requestId, value: false)
-            return
-        }
-        respond(requestId: requestId, value: MenuBarVisibility.restore())
-    }
-
-    private func handleMediaCommand(_ body: [String: Any]) {
-        let requestId = body["requestId"] as? Int ?? -1
-        guard permissions.contains("media") else {
-            log("media.command denied (stack lacks 'media' permission)")
-            respond(requestId: requestId, value: false)
-            return
-        }
-        let name = body["name"] as? String ?? ""
-        respond(requestId: requestId, value: Media.command(name))
-    }
-
-    private func handleSettingsGet(_ body: [String: Any]) {
-        let requestId = body["requestId"] as? Int ?? -1
-        guard permissions.contains("settings"), let s = settings else {
-            respond(requestId: requestId, value: nil)
-            return
-        }
-        let key = body["key"] as? String ?? ""
-        respond(requestId: requestId, value: s.get(key))
-    }
-
-    private func handleSettingsSet(_ body: [String: Any]) {
-        let requestId = body["requestId"] as? Int ?? -1
-        guard permissions.contains("settings"), let s = settings else {
-            respond(requestId: requestId, value: false)
-            return
-        }
-        let key = body["key"] as? String ?? ""
-        s.set(key, body["value"])
-        respond(requestId: requestId, value: true)
-    }
-
-    private func handleSettingsDelete(_ body: [String: Any]) {
-        let requestId = body["requestId"] as? Int ?? -1
-        guard permissions.contains("settings"), let s = settings else {
-            respond(requestId: requestId, value: false)
-            return
-        }
-        let key = body["key"] as? String ?? ""
-        s.delete(key)
-        respond(requestId: requestId, value: true)
-    }
-
-    private func handleSettingsAll(_ body: [String: Any]) {
-        let requestId = body["requestId"] as? Int ?? -1
-        guard permissions.contains("settings"), let s = settings else {
-            respond(requestId: requestId, value: [String: Any]())
-            return
-        }
-        respond(requestId: requestId, value: s.all())
-    }
-
-    private func handleFsRead(_ body: [String: Any]) {
-        let requestId = body["requestId"] as? Int ?? -1
-        guard permissions.contains("fs") else { respond(requestId: requestId, value: nil); return }
-        let path = body["path"] as? String ?? ""
-        respond(requestId: requestId, value: FS.read(path: path))
-    }
-
-    private func handleFsStat(_ body: [String: Any]) {
-        let requestId = body["requestId"] as? Int ?? -1
-        guard permissions.contains("fs") else { respond(requestId: requestId, value: nil); return }
-        let path = body["path"] as? String ?? ""
-        respond(requestId: requestId, value: FS.stat(path: path))
-    }
-
-    private func handleFsList(_ body: [String: Any]) {
-        let requestId = body["requestId"] as? Int ?? -1
-        guard permissions.contains("fs") else { respond(requestId: requestId, value: nil); return }
-        let dir = body["dir"] as? String ?? ""
-        let hidden = body["hidden"] as? Bool ?? false
-        respond(requestId: requestId, value: FS.list(dir: dir, includeHidden: hidden))
-    }
-
-    private func handleFsWatchStart(_ body: [String: Any]) {
-        let requestId = body["requestId"] as? Int ?? -1
-        guard permissions.contains("fs") else { respond(requestId: requestId, value: false); return }
-        let path = body["path"] as? String ?? ""
-        let watchId = body["watchId"] as? Int ?? -1
-        let watch = FSWatch(paths: [path]) { [weak self] events in
-            self?.dispatchFsEvents(watchId: watchId, events: events)
-        }
-        guard let w = watch else { respond(requestId: requestId, value: false); return }
-        fsWatches[watchId] = w
-        respond(requestId: requestId, value: true)
-    }
-
-    private func handleFsWatchStop(_ body: [String: Any]) {
-        let requestId = body["requestId"] as? Int ?? -1
-        let watchId = body["watchId"] as? Int ?? -1
-        if let w = fsWatches.removeValue(forKey: watchId) {
-            w.stop()
-            respond(requestId: requestId, value: true)
-        } else {
-            respond(requestId: requestId, value: false)
+        /// Raw access for async / unusual entries: proc.exec, fs.watch.start,
+        /// menu.popup, window.invoke/dismiss, bang. The handler is responsible
+        /// for calling respond() (possibly later, possibly never).
+        static func custom(_ type: String, permission: String? = nil,
+                           _ handler: @escaping (Bridge, [String: Any], Int) -> Void) -> Primitive {
+            Primitive(type: type, permission: permission, handler: handler)
         }
     }
 
-    private func handlePasteboardGet(_ body: [String: Any]) {
-        let requestId = body["requestId"] as? Int ?? -1
-        guard permissions.contains("pasteboard") else { respond(requestId: requestId, value: nil); return }
-        respond(requestId: requestId, value: Pasteboard.getString())
-    }
+    private static let primitives: [Primitive] = [
+        // Bootstrap
+        .custom("ready") { bridge, _, _ in bridge.replayState() },
 
-    private func handlePasteboardSet(_ body: [String: Any]) {
-        let requestId = body["requestId"] as? Int ?? -1
-        guard permissions.contains("pasteboard") else { respond(requestId: requestId, value: false); return }
-        let s = body["value"] as? String ?? ""
-        respond(requestId: requestId, value: Pasteboard.setString(s))
-    }
+        // Defaults
+        .sync("defaults.read", permission: "defaults") { body in
+            Defaults.read(bundleId: body["bundleId"] as? String ?? "",
+                          key:      body["key"]      as? String ?? "")
+        },
 
-    private func handleProcExec(_ body: [String: Any]) {
-        let requestId = body["requestId"] as? Int ?? -1
-        guard permissions.contains("proc") else { respond(requestId: requestId, value: nil); return }
-        let cmd = body["cmd"] as? String ?? ""
-        let args = body["args"] as? [String] ?? []
-        let input = body["input"] as? String
-        let timeout = body["timeout"] as? Double
-        Proc.exec(cmd: cmd, args: args, input: input, timeoutSeconds: timeout) { [weak self] result in
-            self?.respond(requestId: requestId, value: result)
-        }
-    }
+        // Audio
+        .sync("audio.setVolume", permission: "audio") { body in
+            Audio.setVolume(Float((body["value"] as? Double) ?? 0))
+        },
+        .sync("audio.setMuted", permission: "audio") { body in
+            Audio.setMuted((body["value"] as? Bool) ?? false)
+        },
 
-    private func handleEventsType(_ body: [String: Any]) {
-        let requestId = body["requestId"] as? Int ?? -1
-        guard permissions.contains("events") else { respond(requestId: requestId, value: false); return }
-        EventsSynth.type(body["value"] as? String ?? "")
-        respond(requestId: requestId, value: true)
-    }
+        // Display
+        .sync("display.setBrightness", permission: "display") { body in
+            Display.setBrightness(
+                displayID: CGDirectDisplayID((body["displayID"] as? Int) ?? 0),
+                Float((body["value"] as? Double) ?? 0))
+        },
 
-    private func handleEventsKey(_ body: [String: Any]) {
-        let requestId = body["requestId"] as? Int ?? -1
-        guard permissions.contains("events") else { respond(requestId: requestId, value: false); return }
-        respond(requestId: requestId, value: EventsSynth.key(body["spec"] as? String ?? ""))
-    }
+        // Menubar suppression — refcounted via per-Bridge stack of tokens.
+        .syncBridge("menubar.suppress", permission: "menubar") { bridge, _ in
+            guard let token = MenuBarVisibility.suppress() else { return false }
+            bridge.menubarSuppressions.append(token)
+            return true
+        },
+        .syncBridge("menubar.restore", permission: "menubar") { bridge, _ in
+            guard let t = bridge.menubarSuppressions.popLast() else { return false }
+            t.cancel(); return true
+        },
 
-    private func handleEventsScroll(_ body: [String: Any]) {
-        let requestId = body["requestId"] as? Int ?? -1
-        guard permissions.contains("events") else { respond(requestId: requestId, value: false); return }
-        let dx = Int32(body["dx"] as? Int ?? 0)
-        let dy = Int32(body["dy"] as? Int ?? 0)
-        respond(requestId: requestId, value: EventsSynth.scroll(dx: dx, dy: dy))
-    }
+        // Media
+        .sync("media.command", permission: "media") { body in
+            Media.command(body["name"] as? String ?? "")
+        },
 
-    private func handleEventsClick(_ body: [String: Any]) {
-        let requestId = body["requestId"] as? Int ?? -1
-        guard permissions.contains("events") else { respond(requestId: requestId, value: false); return }
-        let x = body["x"] as? Double ?? 0
-        let y = body["y"] as? Double ?? 0
-        let button = body["button"] as? String ?? "left"
-        respond(requestId: requestId, value: EventsSynth.click(x: x, y: y, button: button))
-    }
+        // Per-stack settings (k/v scoped to this stack's id)
+        .syncBridge("settings.get",    permission: "settings") { b, body in b.settings?.get(body["key"] as? String ?? "") as Any? },
+        .syncBridge("settings.set",    permission: "settings") { b, body in b.settings?.set(body["key"] as? String ?? "", body["value"]); return true },
+        .syncBridge("settings.delete", permission: "settings") { b, body in b.settings?.delete(body["key"] as? String ?? ""); return true },
+        .syncBridge("settings.all",    permission: "settings") { b, _    in b.settings?.all() ?? [:] },
 
-    private func handleAppsLaunch(_ body: [String: Any]) {
-        let requestId = body["requestId"] as? Int ?? -1
-        guard permissions.contains("apps") else { respond(requestId: requestId, value: false); return }
-        respond(requestId: requestId, value: Apps.launch(bundleId: body["bundleId"] as? String ?? ""))
-    }
+        // Filesystem
+        .sync("fs.read", permission: "fs") { body in FS.read(path: body["path"] as? String ?? "") },
+        .sync("fs.stat", permission: "fs") { body in FS.stat(path: body["path"] as? String ?? "") },
+        .sync("fs.list", permission: "fs") { body in
+            FS.list(dir: body["dir"] as? String ?? "", includeHidden: body["hidden"] as? Bool ?? false)
+        },
+        .custom("fs.watch.start", permission: "fs") { bridge, body, requestId in
+            let path = body["path"] as? String ?? ""
+            let watchId = body["watchId"] as? Int ?? -1
+            let watch = FSWatch(paths: [path]) { [weak bridge] events in
+                bridge?.dispatchFsEvents(watchId: watchId, events: events)
+            }
+            guard let w = watch else { bridge.respond(requestId: requestId, value: false); return }
+            bridge.fsWatches[watchId] = w
+            bridge.respond(requestId: requestId, value: true)
+        },
+        .custom("fs.watch.stop") { bridge, body, requestId in
+            let watchId = body["watchId"] as? Int ?? -1
+            if let w = bridge.fsWatches.removeValue(forKey: watchId) {
+                w.stop(); bridge.respond(requestId: requestId, value: true)
+            } else {
+                bridge.respond(requestId: requestId, value: false)
+            }
+        },
 
-    private func handleAppsFocus(_ body: [String: Any]) {
-        let requestId = body["requestId"] as? Int ?? -1
-        guard permissions.contains("apps") else { respond(requestId: requestId, value: false); return }
-        respond(requestId: requestId, value: Apps.focus(bundleId: body["bundleId"] as? String ?? ""))
-    }
+        // Pasteboard
+        .sync("pasteboard.get", permission: "pasteboard") { _ in Pasteboard.getString() },
+        .sync("pasteboard.set", permission: "pasteboard") { body in
+            Pasteboard.setString(body["value"] as? String ?? "")
+        },
 
-    private func handleAppsKill(_ body: [String: Any]) {
-        let requestId = body["requestId"] as? Int ?? -1
-        guard permissions.contains("apps") else { respond(requestId: requestId, value: false); return }
-        let force = body["force"] as? Bool ?? false
-        respond(requestId: requestId, value: Apps.kill(bundleId: body["bundleId"] as? String ?? "", force: force))
-    }
+        // Process exec — async; respond from the completion callback.
+        .custom("proc.exec", permission: "proc") { bridge, body, requestId in
+            Proc.exec(
+                cmd:     body["cmd"]   as? String ?? "",
+                args:    body["args"]  as? [String] ?? [],
+                input:   body["input"] as? String,
+                timeoutSeconds: body["timeout"] as? Double
+            ) { [weak bridge] result in
+                bridge?.respond(requestId: requestId, value: result)
+            }
+        },
 
-    private func handleAppsHide(_ body: [String: Any]) {
-        let requestId = body["requestId"] as? Int ?? -1
-        guard permissions.contains("apps") else { respond(requestId: requestId, value: false); return }
-        respond(requestId: requestId, value: Apps.hide(bundleId: body["bundleId"] as? String ?? ""))
-    }
+        // Event synthesis
+        .sync("events.type", permission: "events") { body in
+            EventsSynth.type(body["value"] as? String ?? ""); return true
+        },
+        .sync("events.key", permission: "events") { body in
+            EventsSynth.key(body["spec"] as? String ?? "")
+        },
+        .sync("events.scroll", permission: "events") { body in
+            EventsSynth.scroll(
+                dx: Int32(body["dx"] as? Int ?? 0),
+                dy: Int32(body["dy"] as? Int ?? 0))
+        },
+        .sync("events.click", permission: "events") { body in
+            EventsSynth.click(
+                x: body["x"] as? Double ?? 0,
+                y: body["y"] as? Double ?? 0,
+                button: body["button"] as? String ?? "left")
+        },
 
-    private func handleIconsApp(_ body: [String: Any]) {
-        let requestId = body["requestId"] as? Int ?? -1
-        guard permissions.contains("icons") else { respond(requestId: requestId, value: nil); return }
-        let bundleId = body["bundleId"] as? String ?? ""
-        let size = body["size"] as? Int ?? 64
-        respond(requestId: requestId, value: Icons.forApp(bundleId: bundleId, size: size))
-    }
+        // Apps
+        .sync("apps.launch", permission: "apps") { body in Apps.launch(bundleId: body["bundleId"] as? String ?? "") },
+        .sync("apps.focus",  permission: "apps") { body in Apps.focus( bundleId: body["bundleId"] as? String ?? "") },
+        .sync("apps.kill",   permission: "apps") { body in Apps.kill(  bundleId: body["bundleId"] as? String ?? "", force: body["force"] as? Bool ?? false) },
+        .sync("apps.hide",   permission: "apps") { body in Apps.hide(  bundleId: body["bundleId"] as? String ?? "") },
 
-    private func handleIconsFile(_ body: [String: Any]) {
-        let requestId = body["requestId"] as? Int ?? -1
-        guard permissions.contains("icons") else { respond(requestId: requestId, value: nil); return }
-        let path = body["path"] as? String ?? ""
-        let size = body["size"] as? Int ?? 64
-        respond(requestId: requestId, value: Icons.forFile(path: path, size: size))
-    }
+        // Icons
+        .sync("icons.app",  permission: "icons") { body in
+            Icons.forApp( bundleId: body["bundleId"] as? String ?? "", size: body["size"] as? Int ?? 64)
+        },
+        .sync("icons.file", permission: "icons") { body in
+            Icons.forFile(path: body["path"] as? String ?? "", size: body["size"] as? Int ?? 64)
+        },
 
-    private func handleWindowsSetFrame(_ body: [String: Any]) {
-        let requestId = body["requestId"] as? Int ?? -1
-        guard permissions.contains("windows") else { respond(requestId: requestId, value: false); return }
-        let x = body["x"] as? Double ?? 0
-        let y = body["y"] as? Double ?? 0
-        let w = body["w"] as? Double ?? 0
-        let h = body["h"] as? Double ?? 0
-        respond(requestId: requestId, value: Windows.setFocusedFrame(x: x, y: y, w: w, h: h))
-    }
+        // Windows — focused-window helpers operate on the AX focused window of frontmost app
+        .sync("windows.setFrame",   permission: "windows") { body in
+            Windows.setFocusedFrame(
+                x: body["x"] as? Double ?? 0, y: body["y"] as? Double ?? 0,
+                w: body["w"] as? Double ?? 0, h: body["h"] as? Double ?? 0)
+        },
+        .sync("windows.minimize",   permission: "windows") { body in Windows.minimizeFocused(body["value"] as? Bool ?? true) },
+        .sync("windows.fullscreen", permission: "windows") { body in Windows.fullscreenFocused(body["value"] as? Bool ?? true) },
+        .sync("windows.raise",      permission: "windows") { _    in Windows.raiseFocused() },
 
-    private func handleWindowsMinimize(_ body: [String: Any]) {
-        let requestId = body["requestId"] as? Int ?? -1
-        guard permissions.contains("windows") else { respond(requestId: requestId, value: false); return }
-        let value = body["value"] as? Bool ?? true
-        respond(requestId: requestId, value: Windows.minimizeFocused(value))
-    }
-
-    private func handleWindowsFullscreen(_ body: [String: Any]) {
-        let requestId = body["requestId"] as? Int ?? -1
-        guard permissions.contains("windows") else { respond(requestId: requestId, value: false); return }
-        let value = body["value"] as? Bool ?? true
-        respond(requestId: requestId, value: Windows.fullscreenFocused(value))
-    }
-
-    private func handleWindowsRaise(_ body: [String: Any]) {
-        let requestId = body["requestId"] as? Int ?? -1
-        guard permissions.contains("windows") else { respond(requestId: requestId, value: false); return }
-        respond(requestId: requestId, value: Windows.raiseFocused())
-    }
-
-    private func handleWindowsByIdSetFrame(_ body: [String: Any]) {
-        let requestId = body["requestId"] as? Int ?? -1
-        guard permissions.contains("windows") else { respond(requestId: requestId, value: false); return }
-        let id = CGWindowID((body["id"] as? Int) ?? 0)
-        let x = body["x"] as? Double ?? 0
-        let y = body["y"] as? Double ?? 0
-        let w = body["w"] as? Double ?? 0
-        let h = body["h"] as? Double ?? 0
-        respond(requestId: requestId, value: WindowsByID.setFrame(windowID: id, x: x, y: y, w: w, h: h))
-    }
-
-    private func handleWindowsByIdMinimize(_ body: [String: Any]) {
-        let requestId = body["requestId"] as? Int ?? -1
-        guard permissions.contains("windows") else { respond(requestId: requestId, value: false); return }
-        let id = CGWindowID((body["id"] as? Int) ?? 0)
-        let value = body["value"] as? Bool ?? true
-        respond(requestId: requestId, value: WindowsByID.minimize(windowID: id, value))
-    }
-
-    private func handleWindowsByIdFullscreen(_ body: [String: Any]) {
-        let requestId = body["requestId"] as? Int ?? -1
-        guard permissions.contains("windows") else { respond(requestId: requestId, value: false); return }
-        let id = CGWindowID((body["id"] as? Int) ?? 0)
-        let value = body["value"] as? Bool ?? true
-        respond(requestId: requestId, value: WindowsByID.fullscreen(windowID: id, value))
-    }
-
-    private func handleWindowsByIdRaise(_ body: [String: Any]) {
-        let requestId = body["requestId"] as? Int ?? -1
-        guard permissions.contains("windows") else { respond(requestId: requestId, value: false); return }
-        let id = CGWindowID((body["id"] as? Int) ?? 0)
-        respond(requestId: requestId, value: WindowsByID.raise(windowID: id))
-    }
-
-    private func handleWindowsByIdFocus(_ body: [String: Any]) {
-        let requestId = body["requestId"] as? Int ?? -1
-        guard permissions.contains("windows") else { respond(requestId: requestId, value: false); return }
-        let id = CGWindowID((body["id"] as? Int) ?? 0)
-        respond(requestId: requestId, value: WindowsByID.focus(windowID: id))
-    }
-
-    private func handleWindowsByIdClose(_ body: [String: Any]) {
-        let requestId = body["requestId"] as? Int ?? -1
-        guard permissions.contains("windows") else { respond(requestId: requestId, value: false); return }
-        let id = CGWindowID((body["id"] as? Int) ?? 0)
-        respond(requestId: requestId, value: WindowsByID.close(windowID: id))
-    }
-
-    private func handleWindowsByIdFrame(_ body: [String: Any]) {
-        let requestId = body["requestId"] as? Int ?? -1
-        guard permissions.contains("windows") else { respond(requestId: requestId, value: nil); return }
-        let id = CGWindowID((body["id"] as? Int) ?? 0)
-        if let r = WindowsByID.frame(windowID: id) {
-            respond(requestId: requestId, value: [
+        // Windows-by-id
+        .sync("windows.byId.setFrame",   permission: "windows") { body in
+            WindowsByID.setFrame(
+                windowID: CGWindowID((body["id"] as? Int) ?? 0),
+                x: body["x"] as? Double ?? 0, y: body["y"] as? Double ?? 0,
+                w: body["w"] as? Double ?? 0, h: body["h"] as? Double ?? 0)
+        },
+        .sync("windows.byId.minimize",   permission: "windows") { body in WindowsByID.minimize(  windowID: CGWindowID((body["id"] as? Int) ?? 0), body["value"] as? Bool ?? true) },
+        .sync("windows.byId.fullscreen", permission: "windows") { body in WindowsByID.fullscreen(windowID: CGWindowID((body["id"] as? Int) ?? 0), body["value"] as? Bool ?? true) },
+        .sync("windows.byId.raise",      permission: "windows") { body in WindowsByID.raise(     windowID: CGWindowID((body["id"] as? Int) ?? 0)) },
+        .sync("windows.byId.focus",      permission: "windows") { body in WindowsByID.focus(     windowID: CGWindowID((body["id"] as? Int) ?? 0)) },
+        .sync("windows.byId.close",      permission: "windows") { body in WindowsByID.close(     windowID: CGWindowID((body["id"] as? Int) ?? 0)) },
+        .sync("windows.byId.frame",      permission: "windows") { body in
+            guard let r = WindowsByID.frame(windowID: CGWindowID((body["id"] as? Int) ?? 0)) else { return nil }
+            return [
                 "x": Int(r.origin.x), "y": Int(r.origin.y),
                 "w": Int(r.size.width), "h": Int(r.size.height)
-            ])
-        } else {
-            respond(requestId: requestId, value: nil)
-        }
-    }
+            ] as [String: Any]
+        },
 
-    private func handleSpacesWindowSpaces(_ body: [String: Any]) {
-        let requestId = body["requestId"] as? Int ?? -1
-        guard permissions.contains("spaces") else { respond(requestId: requestId, value: []); return }
-        let id = UInt32((body["id"] as? Int) ?? 0)
-        let result = Spaces.windowSpaces(windowID: id).map { NSNumber(value: $0) }
-        respond(requestId: requestId, value: result)
-    }
+        // Spaces
+        .sync("spaces.windowSpaces", permission: "spaces") { body in
+            Spaces.windowSpaces(windowID: UInt32((body["id"] as? Int) ?? 0)).map { NSNumber(value: $0) }
+        },
 
-    private func handleAxFocused(_ body: [String: Any]) {
-        let requestId = body["requestId"] as? Int ?? -1
-        guard permissions.contains("ax") else { respond(requestId: requestId, value: nil); return }
-        DispatchQueue.main.async { [weak self] in
-            self?.respond(requestId: requestId, value: AX.focusedElement())
-        }
-    }
+        // Accessibility — all .ax variants hop to main and have access to axHandles via bridge
+        .ax("ax.focused") { _, _ in AX.focusedElement() },
+        .ax("ax.application")             { b, body in AX.application(pid: pid_t((body["pid"] as? Int) ?? 0), store: b.axHandles) },
+        .ax("ax.system")                  { b, _    in AX.systemWide(store: b.axHandles) },
+        .ax("ax.systemElementAtPosition") { b, body in AX.systemElementAtPosition(x: Float((body["x"] as? Double) ?? 0), y: Float((body["y"] as? Double) ?? 0), store: b.axHandles) },
+        .ax("ax.focusedElement")          { b, _    in AX.focusedElementHandle(store: b.axHandles) },
+        .ax("ax.attributeNames")          { b, body in AX.attributeNames(handle: (body["handle"] as? Int) ?? -1, store: b.axHandles) },
+        .ax("ax.attribute")               { b, body in AX.attribute(handle: (body["handle"] as? Int) ?? -1, name: body["name"] as? String ?? "", store: b.axHandles) },
+        .ax("ax.attributes")              { b, body in AX.attributes(handle: (body["handle"] as? Int) ?? -1, store: b.axHandles) },
+        .ax("ax.parameterizedAttributeNames") { b, body in AX.parameterizedAttributeNames(handle: (body["handle"] as? Int) ?? -1, store: b.axHandles) },
+        .ax("ax.parameterizedAttribute")  { b, body in AX.parameterizedAttribute(handle: (body["handle"] as? Int) ?? -1, name: body["name"] as? String ?? "", param: body["param"], store: b.axHandles) },
+        .ax("ax.actionNames")             { b, body in AX.actionNames(handle: (body["handle"] as? Int) ?? -1, store: b.axHandles) },
+        .ax("ax.isAttributeSettable")     { b, body in AX.isAttributeSettable(handle: (body["handle"] as? Int) ?? -1, name: body["name"] as? String ?? "", store: b.axHandles) },
+        .ax("ax.setAttribute")            { b, body in AX.setAttribute(handle: (body["handle"] as? Int) ?? -1, name: body["name"] as? String ?? "", value: body["value"], store: b.axHandles) },
+        .ax("ax.performAction")           { b, body in AX.performAction(handle: (body["handle"] as? Int) ?? -1, action: body["action"] as? String ?? "", store: b.axHandles) },
+        .ax("ax.children")                { b, body in AX.children(handle: (body["handle"] as? Int) ?? -1, store: b.axHandles) },
+        .ax("ax.parent")                  { b, body in AX.parent(handle: (body["handle"] as? Int) ?? -1, store: b.axHandles) },
+        .ax("ax.role")                    { b, body in AX.role(handle: (body["handle"] as? Int) ?? -1, store: b.axHandles) },
+        // release / releaseAll have no permission gate — releasing a handle is
+        // always safe regardless of the original "ax" permission state.
+        .ax("ax.release",    permission: nil) { b, body in b.axHandles.release((body["handle"] as? Int) ?? -1) },
+        .ax("ax.releaseAll", permission: nil) { b, _    in b.axHandles.releaseAll(); return true },
 
-    // All AX traffic stays on main: AXUIElement APIs claim thread safety but
-    // real-world apps deadlock under cross-thread calls.
+        // Invocable-window control — async (must hop to main for AppKit).
+        .custom("window.invoke") { bridge, _, requestId in
+            DispatchQueue.main.async { [weak bridge] in
+                if let win = bridge?.webView?.window as? StackWindow, win.invocable {
+                    win.invoke()
+                    bridge?.respond(requestId: requestId, value: true)
+                } else {
+                    bridge?.respond(requestId: requestId, value: false)
+                }
+            }
+        },
+        .custom("window.dismiss") { bridge, _, requestId in
+            DispatchQueue.main.async { [weak bridge] in
+                if let win = bridge?.webView?.window as? StackWindow, win.invocable {
+                    win.dismiss()
+                    bridge?.respond(requestId: requestId, value: true)
+                } else {
+                    bridge?.respond(requestId: requestId, value: false)
+                }
+            }
+        },
 
-    private func handleAxApplication(_ body: [String: Any]) {
-        let requestId = body["requestId"] as? Int ?? -1
-        guard permissions.contains("ax") else { respond(requestId: requestId, value: nil); return }
-        let pid = pid_t((body["pid"] as? Int) ?? 0)
-        DispatchQueue.main.async { [weak self] in
-            guard let self = self else { return }
-            self.respond(requestId: requestId, value: AX.application(pid: pid, store: self.axHandles))
-        }
-    }
+        // Native popup menu — async (resolves on user pick / cancel).
+        .custom("menu.popup", permission: "menu") { bridge, body, requestId in
+            let items = body["items"] as? [[String: Any]] ?? []
+            PopupMenu.present(items: items) { [weak bridge] picked in
+                bridge?.respond(requestId: requestId, value: picked as Any? ?? NSNull())
+            }
+        },
 
-    private func handleAxSystem(_ body: [String: Any]) {
-        let requestId = body["requestId"] as? Int ?? -1
-        guard permissions.contains("ax") else { respond(requestId: requestId, value: nil); return }
-        DispatchQueue.main.async { [weak self] in
-            guard let self = self else { return }
-            self.respond(requestId: requestId, value: AX.systemWide(store: self.axHandles))
-        }
-    }
+        // ── Menubar items (NSStatusItem) ─────────────────────────────────────
+        // addItem mints an id, creates the NSStatusItem on main, wires click /
+        // menu-pick callbacks back to JS via __sd_menubar_event. Per-stack
+        // scope removes orphans on unload. New permission: "menubar.item",
+        // distinct from "menubar" (which gates suppress/restore).
+        .custom("menubar.addItem", permission: "menubar.item") { bridge, body, requestId in
+            DispatchQueue.main.async { [weak bridge] in
+                guard let bridge = bridge else { return }
+                let id = bridge.nextStatusItemId
+                bridge.nextStatusItemId += 1
+                let spec = Bridge.parseStatusItemSpec(body)
+                let handle = Menubar.addItem(id: id, spec: spec)
+                handle.onClick = { [weak bridge] in
+                    bridge?.dispatchMenubarEvent(itemId: id, type: "click", payload: nil)
+                }
+                handle.onMenuPick = { [weak bridge] pickId in
+                    bridge?.dispatchMenubarEvent(itemId: id, type: "pick", payload: pickId)
+                }
+                bridge.statusItems[id] = handle
+                bridge.respond(requestId: requestId, value: id)
+            }
+        },
+        .syncBridge("menubar.item.setTitle", permission: "menubar.item") { b, body in
+            guard let id = body["id"] as? Int, let h = b.statusItems[id] else { return false }
+            h.setTitle(body["title"] as? String)
+            return true
+        },
+        .syncBridge("menubar.item.setIcon", permission: "menubar.item") { b, body in
+            guard let id = body["id"] as? Int, let h = b.statusItems[id] else { return false }
+            let iconDict = body["icon"] as? [String: Any]
+            h.setIcon(iconDict.map(Bridge.parseIconSpec))
+            return true
+        },
+        .syncBridge("menubar.item.setMenu", permission: "menubar.item") { b, body in
+            guard let id = body["id"] as? Int, let h = b.statusItems[id] else { return false }
+            h.setMenu(body["items"] as? [[String: Any]])
+            return true
+        },
+        .syncBridge("menubar.item.setTooltip", permission: "menubar.item") { b, body in
+            guard let id = body["id"] as? Int, let h = b.statusItems[id] else { return false }
+            h.setTooltip(body["tooltip"] as? String)
+            return true
+        },
+        .syncBridge("menubar.item.remove", permission: "menubar.item") { b, body in
+            guard let id = body["id"] as? Int, let h = b.statusItems.removeValue(forKey: id) else { return false }
+            h.remove()
+            return true
+        },
 
-    private func handleAxSystemElementAtPosition(_ body: [String: Any]) {
-        let requestId = body["requestId"] as? Int ?? -1
-        guard permissions.contains("ax") else { respond(requestId: requestId, value: nil); return }
-        let x = Float((body["x"] as? Double) ?? 0)
-        let y = Float((body["y"] as? Double) ?? 0)
-        DispatchQueue.main.async { [weak self] in
-            guard let self = self else { return }
-            self.respond(requestId: requestId, value: AX.systemElementAtPosition(x: x, y: y, store: self.axHandles))
-        }
-    }
+        // ── Dynamic hotkey bind/unbind from JS ───────────────────────────────
+        // Static manifest hotkeys cover the common case; this lets palettes /
+        // modal stacks register transient chords on demand (Palette verb mode,
+        // ChoiceBox, ForceKeys). Returns the id on success, null on parse error.
+        .custom("hotkey.bind") { bridge, body, requestId in
+            guard let spec = body["spec"] as? String else {
+                bridge.respond(requestId: requestId, value: NSNull()); return
+            }
+            let id = bridge.nextHotkeyId
+            bridge.nextHotkeyId += 1
+            let token = HotkeyRegistry.shared.bind(spec: spec) { [weak bridge] in
+                // Fire on the same hop pattern as fireBang / fireHotkey — the
+                // Carbon callback already runs on main, but the eval has to be
+                // async to keep main from re-entering JS while a script is mid-flight.
+                guard let webView = bridge?.webView else { return }
+                DispatchQueue.main.async {
+                    webView.evaluateJavaScript("window.__sd_hotkey_fire && window.__sd_hotkey_fire(\(id));",
+                                               completionHandler: nil)
+                }
+            }
+            guard let token = token else {
+                bridge.respond(requestId: requestId, value: NSNull()); return
+            }
+            bridge.hotkeyTokens[id] = token
+            bridge.respond(requestId: requestId, value: id)
+        },
+        .syncBridge("hotkey.unbind") { b, body in
+            guard let id = body["id"] as? Int,
+                  let token = b.hotkeyTokens.removeValue(forKey: id) else { return false }
+            token.cancel()
+            return true
+        },
 
-    private func handleAxFocusedElement(_ body: [String: Any]) {
-        let requestId = body["requestId"] as? Int ?? -1
-        guard permissions.contains("ax") else { respond(requestId: requestId, value: nil); return }
-        DispatchQueue.main.async { [weak self] in
-            guard let self = self else { return }
-            self.respond(requestId: requestId, value: AX.focusedElementHandle(store: self.axHandles))
-        }
-    }
-
-    private func handleAxAttributeNames(_ body: [String: Any]) {
-        let requestId = body["requestId"] as? Int ?? -1
-        guard permissions.contains("ax") else { respond(requestId: requestId, value: nil); return }
-        let h = (body["handle"] as? Int) ?? -1
-        DispatchQueue.main.async { [weak self] in
-            guard let self = self else { return }
-            self.respond(requestId: requestId, value: AX.attributeNames(handle: h, store: self.axHandles))
-        }
-    }
-
-    private func handleAxAttribute(_ body: [String: Any]) {
-        let requestId = body["requestId"] as? Int ?? -1
-        guard permissions.contains("ax") else { respond(requestId: requestId, value: nil); return }
-        let h = (body["handle"] as? Int) ?? -1
-        let name = (body["name"] as? String) ?? ""
-        DispatchQueue.main.async { [weak self] in
-            guard let self = self else { return }
-            self.respond(requestId: requestId, value: AX.attribute(handle: h, name: name, store: self.axHandles))
-        }
-    }
-
-    private func handleAxAttributes(_ body: [String: Any]) {
-        let requestId = body["requestId"] as? Int ?? -1
-        guard permissions.contains("ax") else { respond(requestId: requestId, value: nil); return }
-        let h = (body["handle"] as? Int) ?? -1
-        DispatchQueue.main.async { [weak self] in
-            guard let self = self else { return }
-            self.respond(requestId: requestId, value: AX.attributes(handle: h, store: self.axHandles))
-        }
-    }
-
-    private func handleAxParameterizedAttributeNames(_ body: [String: Any]) {
-        let requestId = body["requestId"] as? Int ?? -1
-        guard permissions.contains("ax") else { respond(requestId: requestId, value: nil); return }
-        let h = (body["handle"] as? Int) ?? -1
-        DispatchQueue.main.async { [weak self] in
-            guard let self = self else { return }
-            self.respond(requestId: requestId, value: AX.parameterizedAttributeNames(handle: h, store: self.axHandles))
-        }
-    }
-
-    private func handleAxParameterizedAttribute(_ body: [String: Any]) {
-        let requestId = body["requestId"] as? Int ?? -1
-        guard permissions.contains("ax") else { respond(requestId: requestId, value: nil); return }
-        let h = (body["handle"] as? Int) ?? -1
-        let name = (body["name"] as? String) ?? ""
-        let param = body["param"]
-        DispatchQueue.main.async { [weak self] in
-            guard let self = self else { return }
-            self.respond(requestId: requestId, value: AX.parameterizedAttribute(handle: h, name: name, param: param, store: self.axHandles))
-        }
-    }
-
-    private func handleAxActionNames(_ body: [String: Any]) {
-        let requestId = body["requestId"] as? Int ?? -1
-        guard permissions.contains("ax") else { respond(requestId: requestId, value: nil); return }
-        let h = (body["handle"] as? Int) ?? -1
-        DispatchQueue.main.async { [weak self] in
-            guard let self = self else { return }
-            self.respond(requestId: requestId, value: AX.actionNames(handle: h, store: self.axHandles))
-        }
-    }
-
-    private func handleAxIsAttributeSettable(_ body: [String: Any]) {
-        let requestId = body["requestId"] as? Int ?? -1
-        guard permissions.contains("ax") else { respond(requestId: requestId, value: nil); return }
-        let h = (body["handle"] as? Int) ?? -1
-        let name = (body["name"] as? String) ?? ""
-        DispatchQueue.main.async { [weak self] in
-            guard let self = self else { return }
-            self.respond(requestId: requestId, value: AX.isAttributeSettable(handle: h, name: name, store: self.axHandles))
-        }
-    }
-
-    private func handleAxSetAttribute(_ body: [String: Any]) {
-        let requestId = body["requestId"] as? Int ?? -1
-        guard permissions.contains("ax") else { respond(requestId: requestId, value: false); return }
-        let h = (body["handle"] as? Int) ?? -1
-        let name = (body["name"] as? String) ?? ""
-        let value = body["value"]
-        DispatchQueue.main.async { [weak self] in
-            guard let self = self else { return }
-            self.respond(requestId: requestId, value: AX.setAttribute(handle: h, name: name, value: value, store: self.axHandles))
-        }
-    }
-
-    private func handleAxPerformAction(_ body: [String: Any]) {
-        let requestId = body["requestId"] as? Int ?? -1
-        guard permissions.contains("ax") else { respond(requestId: requestId, value: false); return }
-        let h = (body["handle"] as? Int) ?? -1
-        let action = (body["action"] as? String) ?? ""
-        DispatchQueue.main.async { [weak self] in
-            guard let self = self else { return }
-            self.respond(requestId: requestId, value: AX.performAction(handle: h, action: action, store: self.axHandles))
-        }
-    }
-
-    private func handleAxChildren(_ body: [String: Any]) {
-        let requestId = body["requestId"] as? Int ?? -1
-        guard permissions.contains("ax") else { respond(requestId: requestId, value: nil); return }
-        let h = (body["handle"] as? Int) ?? -1
-        DispatchQueue.main.async { [weak self] in
-            guard let self = self else { return }
-            self.respond(requestId: requestId, value: AX.children(handle: h, store: self.axHandles))
-        }
-    }
-
-    private func handleAxParent(_ body: [String: Any]) {
-        let requestId = body["requestId"] as? Int ?? -1
-        guard permissions.contains("ax") else { respond(requestId: requestId, value: nil); return }
-        let h = (body["handle"] as? Int) ?? -1
-        DispatchQueue.main.async { [weak self] in
-            guard let self = self else { return }
-            self.respond(requestId: requestId, value: AX.parent(handle: h, store: self.axHandles))
-        }
-    }
-
-    private func handleAxRole(_ body: [String: Any]) {
-        let requestId = body["requestId"] as? Int ?? -1
-        guard permissions.contains("ax") else { respond(requestId: requestId, value: nil); return }
-        let h = (body["handle"] as? Int) ?? -1
-        DispatchQueue.main.async { [weak self] in
-            guard let self = self else { return }
-            self.respond(requestId: requestId, value: AX.role(handle: h, store: self.axHandles))
-        }
-    }
-
-    private func handleAxRelease(_ body: [String: Any]) {
-        let requestId = body["requestId"] as? Int ?? -1
-        let h = (body["handle"] as? Int) ?? -1
-        DispatchQueue.main.async { [weak self] in
-            self?.respond(requestId: requestId, value: self?.axHandles.release(h) ?? false)
-        }
-    }
-
-    private func handleAxReleaseAll(_ body: [String: Any]) {
-        let requestId = body["requestId"] as? Int ?? -1
-        DispatchQueue.main.async { [weak self] in
-            self?.axHandles.releaseAll()
-            self?.respond(requestId: requestId, value: true)
-        }
-    }
-
-    private func handleWindowInvoke(_ body: [String: Any]) {
-        let requestId = body["requestId"] as? Int ?? -1
-        DispatchQueue.main.async { [weak self] in
-            if let win = self?.webView?.window as? StackWindow, win.invocable {
-                win.invoke()
-                self?.respond(requestId: requestId, value: true)
-            } else {
-                self?.respond(requestId: requestId, value: false)
+        // Stack-to-stack bang — async fan-out via StackHost.
+        .custom("bang") { bridge, body, requestId in
+            guard let name = body["name"] as? String else {
+                bridge.respond(requestId: requestId, value: 0); return
+            }
+            let detail = (body["detail"] as? [String: Any]) ?? [:]
+            DispatchQueue.main.async { [weak bridge] in
+                let fired = AppDelegate.shared?.host?.bang(name: name, detail: detail) ?? 0
+                bridge?.respond(requestId: requestId, value: fired)
             }
         }
-    }
+    ]
 
-    private func handleMenuPopup(_ body: [String: Any]) {
-        let requestId = body["requestId"] as? Int ?? -1
-        guard permissions.contains("menu") else {
-            log("menu.popup denied (stack lacks 'menu' permission)")
-            respond(requestId: requestId, value: nil)
-            return
-        }
-        let items = body["items"] as? [[String: Any]] ?? []
-        PopupMenu.present(items: items) { [weak self] picked in
-            self?.respond(requestId: requestId, value: picked as Any? ?? NSNull())
-        }
-    }
-
-    private func handleWindowDismiss(_ body: [String: Any]) {
-        let requestId = body["requestId"] as? Int ?? -1
-        DispatchQueue.main.async { [weak self] in
-            if let win = self?.webView?.window as? StackWindow, win.invocable {
-                win.dismiss()
-                self?.respond(requestId: requestId, value: true)
-            } else {
-                self?.respond(requestId: requestId, value: false)
-            }
-        }
-    }
+    private static let dispatch: [String: Primitive] =
+        Dictionary(uniqueKeysWithValues: primitives.map { ($0.type, $0) })
 
     private func dispatchFsEvents(watchId: Int, events: [(path: String, flags: FSEventStreamEventFlags)]) {
         guard let webView = webView else { return }
@@ -910,6 +585,17 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         }
         let json = Bridge.jsonify(payload)
         let script = "window.__sd_fs_event && window.__sd_fs_event(\(watchId), \(json));"
+        DispatchQueue.main.async {
+            webView.evaluateJavaScript(script, completionHandler: nil)
+        }
+    }
+
+    /// Pump a menubar-item click / pick / etc. back to JS. The JS-side proxy
+    /// in api.js (sd.menubar.addItem) routes this to the stack's callbacks.
+    fileprivate func dispatchMenubarEvent(itemId: Int, type: String, payload: Any?) {
+        guard let webView = webView else { return }
+        let payloadJson = payload.map { Bridge.jsonify($0) } ?? "null"
+        let script = "window.__sd_menubar_event && window.__sd_menubar_event(\(itemId), \"\(type)\", \(payloadJson));"
         DispatchQueue.main.async {
             webView.evaluateJavaScript(script, completionHandler: nil)
         }
@@ -966,7 +652,7 @@ final class Bridge: NSObject, WKScriptMessageHandler {
     }
 
     private func startBattery() {
-        let tick: () -> Void = { [weak self] in
+        let pushFn: () -> Void = { [weak self] in
             guard let self = self else { return }
             let pct = Battery.percent()
             let charging = Battery.isCharging()
@@ -975,14 +661,12 @@ final class Bridge: NSObject, WKScriptMessageHandler {
             self.lastBattery = json
             self.push(channel: "battery", json: json)
         }
-        tick()
-        let timer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { _ in tick() }
-        RunLoop.main.add(timer, forMode: .common)
-        batteryTimer = timer
+        pushFn()
+        scope.adopt(BatteryObserver.shared.subscribe(pushFn))
     }
 
     private func startMouse() {
-        let tick: () -> Void = { [weak self] in
+        let pushFn: () -> Void = { [weak self] in
             guard let self = self else { return }
             let p = Mouse.location()
             let json = "{\"x\":\(Int(p.x)),\"y\":\(Int(p.y))}"
@@ -990,10 +674,8 @@ final class Bridge: NSObject, WKScriptMessageHandler {
             self.lastMouse = json
             self.push(channel: "mouse", json: json)
         }
-        tick()
-        let timer = Timer.scheduledTimer(withTimeInterval: 1.0/30.0, repeats: true) { _ in tick() }
-        RunLoop.main.add(timer, forMode: .common)
-        mouseTimer = timer
+        pushFn()
+        scope.adopt(MouseObserver.shared.subscribe(pushFn))
     }
 
     private func startAppearance() {
@@ -1005,7 +687,7 @@ final class Bridge: NSObject, WKScriptMessageHandler {
             self.push(channel: "appearance", json: json)
         }
         pushFn()
-        AppearanceObserver.shared.subscribe(pushFn)
+        scope.adopt(AppearanceObserver.shared.subscribe(pushFn))
     }
 
     private func startInput() {
@@ -1017,7 +699,7 @@ final class Bridge: NSObject, WKScriptMessageHandler {
             self.push(channel: "inputLayout", json: json)
         }
         pushFn()
-        InputObserver.shared.subscribe(pushFn)
+        scope.adopt(InputObserver.shared.subscribe(pushFn))
     }
 
     private func startNetwork() {
@@ -1035,7 +717,7 @@ final class Bridge: NSObject, WKScriptMessageHandler {
             }
         }
         pushFn()
-        NetworkObserver.shared.subscribe(pushFn)
+        scope.adopt(NetworkObserver.shared.subscribe(pushFn))
     }
 
     private func startAudio() {
@@ -1047,7 +729,7 @@ final class Bridge: NSObject, WKScriptMessageHandler {
             self.push(channel: "audioOutput", json: json)
         }
         pushFn()
-        AudioObserver.shared.subscribe(pushFn)
+        scope.adopt(AudioObserver.shared.subscribe(pushFn))
     }
 
     private func startDisplay() {
@@ -1059,7 +741,7 @@ final class Bridge: NSObject, WKScriptMessageHandler {
             self.push(channel: "displays", json: json)
         }
         pushFn()
-        DisplayObserver.shared.subscribe(pushFn)
+        scope.adopt(DisplayObserver.shared.subscribe(pushFn))
     }
 
     private func startMedia() {
@@ -1075,7 +757,7 @@ final class Bridge: NSObject, WKScriptMessageHandler {
             }
         }
         pushFn()
-        MediaObserver.shared.subscribe(pushFn)
+        scope.adopt(MediaObserver.shared.subscribe(pushFn))
     }
 
     private func startPasteboard() {
@@ -1091,7 +773,7 @@ final class Bridge: NSObject, WKScriptMessageHandler {
             self.push(channel: "pasteboard", json: json)
         }
         pushFn()
-        PasteboardObserver.shared.subscribe(pushFn)
+        scope.adopt(PasteboardObserver.shared.subscribe(pushFn))
     }
 
     private func startApps() {
@@ -1103,7 +785,7 @@ final class Bridge: NSObject, WKScriptMessageHandler {
             self.push(channel: "apps", json: json)
         }
         pushFn()
-        AppsObserver.shared.subscribe(pushFn)
+        scope.adopt(AppsObserver.shared.subscribe(pushFn))
     }
 
     private func startSpaces() {
@@ -1115,12 +797,12 @@ final class Bridge: NSObject, WKScriptMessageHandler {
             self.push(channel: "spaces", json: json)
         }
         pushFn()
-        SpacesObserver.shared.subscribe(pushFn)
+        scope.adopt(SpacesObserver.shared.subscribe(pushFn))
     }
 
-    // App activations come from NSWorkspace; focused window inside an app is AX
-    // and changes asynchronously, so a slow tick covers within-app focus changes
-    // (Cmd-`, opening a doc) until we install an AXObserver per-app.
+    // App activations come from NSWorkspace; within-app focus / title changes
+    // come from a per-pid AXObserver (FrontmostWindowObserver) that rebinds
+    // on each NSWorkspace.didActivateApplicationNotification. No polling.
     private func startWorkspace(includeApp: Bool, includeWindows: Bool) {
         let pushFn: () -> Void = { [weak self] in
             guard let self = self else { return }
@@ -1145,11 +827,9 @@ final class Bridge: NSObject, WKScriptMessageHandler {
             }
         }
         pushFn()
-        WorkspaceObserver.shared.subscribe(pushFn)
+        scope.adopt(WorkspaceObserver.shared.subscribe(pushFn))
         if includeWindows {
-            let timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { _ in pushFn() }
-            RunLoop.main.add(timer, forMode: .common)
-            workspaceTimer = timer
+            scope.adopt(FrontmostWindowObserver.shared.subscribe(pushFn))
         }
     }
 
@@ -1192,6 +872,23 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         DispatchQueue.main.async { webView.evaluateJavaScript(script, completionHandler: nil) }
     }
 
+    fileprivate static func parseIconSpec(_ dict: [String: Any]) -> IconSpec {
+        IconSpec(
+            sfSymbol:  dict["sfSymbol"]  as? String,
+            pngBase64: dict["pngBase64"] as? String,
+            template:  dict["template"]  as? Bool ?? true
+        )
+    }
+
+    fileprivate static func parseStatusItemSpec(_ body: [String: Any]) -> StatusItemSpec {
+        var spec = StatusItemSpec()
+        if let icon = body["icon"] as? [String: Any] { spec.icon = parseIconSpec(icon) }
+        spec.title   = body["title"]   as? String
+        spec.menu    = body["menu"]    as? [[String: Any]]
+        spec.tooltip = body["tooltip"] as? String
+        return spec
+    }
+
     static func jsonify(_ obj: Any) -> String {
         // .fragmentsAllowed lets us serialize bare scalars (Bool/Int/String) at
         // the top level — required for imperative API responses like
@@ -1202,9 +899,10 @@ final class Bridge: NSObject, WKScriptMessageHandler {
     }
 
     deinit {
-        batteryTimer?.invalidate()
-        mouseTimer?.invalidate()
-        workspaceTimer?.invalidate()
+        // scope.drain() is called by StackHost.unloadStack BEFORE Bridge is
+        // dropped. deinit is just a safety net for the never-attached-to-host
+        // path and the daemon-shutdown case.
+        scope.drain()
         for w in fsWatches.values { w.stop() }
         axHandles.releaseAll()
     }

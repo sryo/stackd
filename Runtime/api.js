@@ -47,6 +47,25 @@ window.__sd_fs_event = (watchId, events) => {
     for (const ev of events) fn(ev);
   }
 };
+// NSStatusItem callbacks routed by mint id. Populated by sd.menubar.addItem,
+// drained on item.remove(). Native fires:
+//   window.__sd_menubar_event(itemId, "click", null)
+//   window.__sd_menubar_event(itemId, "pick",  pickedItemIdString)
+const menubarHandlers = new Map();
+window.__sd_menubar_event = (itemId, type, payload) => {
+  const cb = menubarHandlers.get(itemId);
+  if (!cb) return;
+  if (type === "click" && cb.onClick)    cb.onClick();
+  if (type === "pick"  && cb.onMenuPick) cb.onMenuPick(payload);
+};
+// JS-bound Carbon hotkeys: id → callback fn. Native mints the id on bind,
+// fires window.__sd_hotkey_fire(id) on Carbon callback. Unbind removes here
+// and on the Swift side. Stack unload drops the map naturally with the page.
+const hotkeyHandlers = new Map();
+window.__sd_hotkey_fire = (id) => {
+  const fn = hotkeyHandlers.get(id);
+  if (fn) fn();
+};
 function request(payload) {
   const requestId = nextRequestId++;
   return new Promise((resolve) => {
@@ -129,7 +148,46 @@ export const sd = {
     // Multiple stacks can suppress; the bar reappears only once every
     // suppressor has called restore().
     suppress() { return request({ type: "menubar.suppress" }); },
-    restore()  { return request({ type: "menubar.restore"  }); }
+    restore()  { return request({ type: "menubar.restore"  }); },
+
+    // Add an NSStatusItem to the system menu bar. Requires "menubar.item"
+    // permission (distinct from "menubar", which gates suppress/restore).
+    //
+    // spec: {
+    //   icon?:    { sfSymbol?, pngBase64?, template? }   // template defaults true
+    //   title?:   string
+    //   menu?:    [{ id, title, separator?, submenu?, enabled?, checked? }]
+    //   tooltip?: string
+    //   onClick?: () => void                             // ignored if `menu` set
+    //   onMenuPick?: (id: string) => void                // fires with menu-item.id
+    // }
+    //
+    // Returns a Promise<MenubarItem | null>. The handle's lifetime is bound
+    // to the stack — unload removes the item automatically.
+    async addItem(spec) {
+      const { onClick, onMenuPick, icon, title, menu, tooltip } = spec || {};
+      const id = await request({
+        type: "menubar.addItem",
+        icon, title, menu, tooltip
+      });
+      if (id == null || id === false) return null;
+      menubarHandlers.set(id, { onClick, onMenuPick });
+      return {
+        id,
+        setTitle(s)       { return request({ type: "menubar.item.setTitle",   id, title: s }); },
+        setIcon(iconSpec) { return request({ type: "menubar.item.setIcon",    id, icon: iconSpec }); },
+        setMenu(items)    { return request({ type: "menubar.item.setMenu",    id, items }); },
+        setTooltip(s)     { return request({ type: "menubar.item.setTooltip", id, tooltip: s }); },
+        remove() {
+          menubarHandlers.delete(id);
+          return request({ type: "menubar.item.remove", id });
+        },
+        // Re-assign callbacks after construction (e.g. once a dynamic menu
+        // is wired up). Map stays internal.
+        set onClick(fn)    { const e = menubarHandlers.get(id) || {}; e.onClick    = fn; menubarHandlers.set(id, e); },
+        set onMenuPick(fn) { const e = menubarHandlers.get(id) || {}; e.onMenuPick = fn; menubarHandlers.set(id, e); }
+      };
+    }
   },
   media: {
     // Covers Spotify / Apple Music / Podcasts / browser audio.
@@ -250,6 +308,25 @@ export const sd = {
     invoke()  { return request({ type: "window.invoke" }); },
     dismiss() { return request({ type: "window.dismiss" }); }
   },
+  hotkey: {
+    // Dynamically bind a Carbon hotkey from JS. Equivalent to the manifest
+    // `hotkeys` block but works after the stack starts — for transient chords
+    // like a Palette in verb mode or a chooser's number keys.
+    //   const h = await sd.hotkey.bind("ctrl+alt+l", () => doThing());
+    //   ...later...
+    //   await sd.hotkey.unbind(h);
+    // Returns null if the spec doesn't parse. Per-stack: unload cancels all.
+    async bind(spec, fn) {
+      const id = await request({ type: "hotkey.bind", spec });
+      if (id == null || id === false) return null;
+      hotkeyHandlers.set(id, fn);
+      return id;
+    },
+    async unbind(id) {
+      hotkeyHandlers.delete(id);
+      return request({ type: "hotkey.unbind", id });
+    }
+  },
   // Fire a bang to every stack whose manifest `handles` array contains `name`.
   // Returns the count of stacks that received it. Same dispatch as
   // system-fired bangs (sd.window.created, etc.) — JS handlers register via
@@ -271,6 +348,65 @@ export const sd = {
     popup(items) { return request({ type: "menu.popup", items: items || [] }); }
   }
 };
+
+// ── Reactive sugar: sd.bind + sd.tpl ────────────────────────────────────────
+// `sd.bind(target, signal, fmt?)` is the alternative to writing
+// `signal.subscribe(v => el.textContent = fmt(v))` by hand for every binding.
+// Target dispatch is by shape:
+//   Element                       → set textContent
+//   [Element, "html"]             → set innerHTML
+//   [Element, "value"]            → set .value (form inputs)
+//   [Element, "data-foo"]         → set dataset.foo
+//   [Element, "attr.foo"]         → setAttribute("foo", v)
+//   [Element, "style.--var"]      → style.setProperty("--var", v)
+//   [Element, "class.foo"]        → classList.toggle("foo", !!v)
+// `signal` can be a single sd.* channel/signal OR an array of them; the
+// formatter is called with each .peek() value spread as args.
+function applyToTarget(target, value) {
+  if (target instanceof Element) { target.textContent = value; return; }
+  if (Array.isArray(target)) {
+    const [el, kind] = target;
+    if (!(el instanceof Element)) return;
+    if (kind === "html")              el.innerHTML = value;
+    else if (kind === "value")        el.value = value;
+    else if (kind.startsWith("data-"))  el.dataset[kind.slice(5)] = value == null ? "" : String(value);
+    else if (kind.startsWith("attr."))  { value == null ? el.removeAttribute(kind.slice(5)) : el.setAttribute(kind.slice(5), String(value)); }
+    else if (kind.startsWith("style.")) el.style.setProperty(kind.slice(6), value == null ? "" : String(value));
+    else if (kind.startsWith("class.")) el.classList.toggle(kind.slice(6), !!value);
+  }
+}
+
+function sdBind(target, source, fmt) {
+  const sources = Array.isArray(source) ? source : [source];
+  const format  = fmt || ((v) => v);
+  const apply = () => applyToTarget(target, format(...sources.map(s => s.peek())));
+  const unsubs = sources.map(s => s.subscribe(apply));
+  return () => { for (const u of unsubs) u(); };
+}
+
+// `sd.tpl` — tagged-template helper. Returns a freshly-built Element from an
+// HTML string with `${signal}` interpolations auto-bound, and `${value}`
+// non-signal interpolations rendered as text. ~30 LOC, no diffing.
+let __sdTplCounter = 0;
+function sdTpl(strings, ...exprs) {
+  const slotAttr = `data-sd-slot-${__sdTplCounter++}`;
+  const placeholders = exprs.map((_, i) => `<span ${slotAttr}="${i}"></span>`);
+  const html = strings.reduce((acc, s, i) => acc + s + (placeholders[i] || ""), "");
+  const tmpl = document.createElement("template");
+  tmpl.innerHTML = html.trim();
+  const root = tmpl.content.firstElementChild;
+  if (!root) return document.createDocumentFragment();
+  root.querySelectorAll(`[${slotAttr}]`).forEach(slot => {
+    const idx = +slot.getAttribute(slotAttr);
+    const expr = exprs[idx];
+    if (expr && typeof expr.subscribe === "function") sdBind(slot, expr);
+    else slot.textContent = expr == null ? "" : String(expr);
+  });
+  return root;
+}
+
+sd.bind = sdBind;
+sd.tpl  = sdTpl;
 
 // Handshake: tell native we're ready so it can replay buffered state.
 try {
