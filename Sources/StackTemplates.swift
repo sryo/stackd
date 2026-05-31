@@ -10,6 +10,7 @@ import Foundation
 enum StackTemplates {
     static let all: [String: [String: String]] = [
         "hello":   helloTemplate,
+        "glass":   glassTemplate,
         "menubar": menubarTemplate,
         "hud":     hudTemplate
     ]
@@ -61,6 +62,51 @@ enum StackTemplates {
         }
         .title { font-size: 11px; opacity: 0.7; text-transform: uppercase; letter-spacing: 0.05em; }
         .value { font-size: 22px; font-weight: 600; margin-top: 2px; }
+
+        """
+    ]
+
+    // MARK: - glass (native LiquidGlass-style material panel)
+
+    private static let glassTemplate: [String: String] = [
+        "stack.json": """
+        {
+          "id": "{{name}}",
+          "name": "{{name}}",
+          "anchor": { "edge": "top-right", "inset": [16, 16] },
+          "size":   { "w": 240, "h": 100 },
+          "material": "glass",
+          "permissions": ["battery", "appearance"]
+        }
+
+        """,
+        "index.html": """
+        <!doctype html>
+        <html>
+        <head><meta charset="utf-8"><link rel="stylesheet" href="index.css"></head>
+        <body>
+          <div class="card">
+            <div class="title">{{name}}</div>
+            <div class="value" id="value">…</div>
+          </div>
+          <script type="module">
+            import { sd } from "sd://runtime/api.js";
+            sd.bind(value, sd.battery, b => b ? `${b.percent}% ${b.charging ? "⚡" : ""}` : "…");
+            sd.bind([document.body, "data-theme"], sd.appearance, a => a?.dark ? "dark" : "light");
+          </script>
+        </body>
+        </html>
+
+        """,
+        "index.css": """
+        /* No background on body — let the native NSVisualEffectView material
+           show through. CSS backdrop-filter would double-blur. */
+        html, body { margin: 0; padding: 0; background: transparent; height: 100%; }
+        body { font-family: -apple-system, "SF Pro Text", system-ui, sans-serif; color: #f5f5f7; }
+        body[data-theme="light"] { color: #1d1d1f; }
+        .card { padding: 14px 18px; }
+        .title { font-size: 11px; opacity: 0.7; text-transform: uppercase; letter-spacing: 0.05em; }
+        .value { font-size: 32px; font-weight: 600; margin-top: 6px; }
 
         """
     ]

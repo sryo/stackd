@@ -1,0 +1,16 @@
+<!doctype html>
+<html>
+<head><style>
+  html, body { margin: 0; padding: 0; background: transparent; height: 100%; }
+  body { font: 24px -apple-system, sans-serif; color: #fff;
+         display: flex; align-items: center; justify-content: center;
+         text-shadow: 0 1px 2px rgba(0,0,0,.3); }
+</style></head>
+<body>
+  <div id="msg">native glass</div>
+  <script type="module">
+    import { sd } from "sd://runtime/api.js";
+    sd.bind(msg, sd.battery, b => b ? `🔋 ${b.percent}%` : "native glass");
+  </script>
+</body>
+</html>

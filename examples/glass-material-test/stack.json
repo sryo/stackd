@@ -1,0 +1,8 @@
+{
+  "id": "glass-material-test",
+  "name": "Glass material demo",
+  "anchor": { "edge": "top-right", "inset": [60, 60] },
+  "size": { "w": 280, "h": 120 },
+  "material": "glass",
+  "permissions": ["battery"]
+}

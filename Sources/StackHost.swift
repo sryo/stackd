@@ -14,6 +14,7 @@ struct StackManifest: Decodable {
     let display: String?            // "primary" (default) | "all" | "<index>"
     let invocable: Bool?            // window starts hidden + can take key on .invoke()
     let level: String?              // "high" → above default .statusBar (for toasts on fullscreen stacks)
+    let material: String?           // "glass" | "sidebar" | "hud" | "popover" | "menu" | "titlebar" | "sheet" | "window" — native NSVisualEffectView under WebView (LiquidGlass via NSGlassEffectView on macOS 26+)
 
     struct Anchor: Decodable { let edge: String; let inset: [Int] }
     struct Size: Decodable { let w: Int?; let h: Int }
@@ -232,7 +233,8 @@ final class StackHost {
             clickThrough: invocable ? false : (manifest.clickThrough ?? true),
             schemeHandler: schemeHandler,
             level: level,
-            invocable: invocable
+            invocable: invocable,
+            material: manifest.material
         )
         let bridge = Bridge(webView: win.webView, screen: screen, screenIndex: screenIndex)
         bridge.start(manifest: manifest)
