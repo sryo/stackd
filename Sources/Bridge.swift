@@ -414,6 +414,17 @@ final class Bridge: NSObject, WKScriptMessageHandler {
             )
         },
 
+        // Sound — NSSound playback. Fire-and-forget; returns true if playback started.
+        .sync("sound.system", permission: "sound", denyValue: false) { body in
+            Sound.system(body["name"] as? String ?? "")
+        },
+        .sync("sound.file", permission: "sound", denyValue: false) { body in
+            Sound.file(body["path"] as? String ?? "")
+        },
+        .sync("sound.beep", permission: "sound", denyValue: false) { _ in
+            Sound.beep(); return true
+        },
+
         // Process exec — async; respond from the completion callback.
         .custom("proc.exec", permission: "proc") { bridge, body, requestId in
             Proc.exec(

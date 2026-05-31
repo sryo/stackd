@@ -42,6 +42,7 @@ SWIFT_SOURCES=(
   Sources/DataSources/Display.swift
   Sources/DataSources/Media.swift
   Sources/DataSources/Settings.swift
+  Sources/DataSources/Sound.swift
   Sources/DataSources/FS.swift
   Sources/DataSources/Pasteboard.swift
   Sources/DataSources/Proc.swift

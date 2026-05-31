@@ -405,6 +405,15 @@ export const sd = {
       });
     }
   },
+  // Play short sounds via NSSound. Fire-and-forget; no completion callback.
+  //   sd.sound.system("Glass")           // /System/Library/Sounds/Glass.aiff
+  //   sd.sound.file("~/Music/ding.mp3")  // arbitrary file (~ expanded)
+  //   sd.sound.beep()                    // NSBeep
+  sound: {
+    system(name) { return request({ type: "sound.system", name }); },
+    file(path)   { return request({ type: "sound.file",   path }); },
+    beep()       { return request({ type: "sound.beep" }); }
+  },
   // System sleep / screen-lock signal: { sleeping, locked }.
   // Sleeping flips true between willSleep and didWake; locked flips true
   // between com.apple.screenIs{Locked,Unlocked} distributed notifications.

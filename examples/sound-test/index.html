@@ -1,0 +1,14 @@
+<!doctype html>
+<html><head><meta charset="utf-8"></head><body>
+<script type="module">
+  import { sd } from "sd://runtime/api.js";
+  window.onHotkey_glass = async () => { console.log("glass:", await sd.sound.system("Glass")); };
+  window.onHotkey_ping  = async () => { console.log("ping:",  await sd.sound.system("Ping")); };
+  window.onHotkey_tink  = async () => { console.log("tink:",  await sd.sound.system("Tink")); };
+  window.onHotkey_beep  = async () => { console.log("beep:",  await sd.sound.beep()); };
+  window.onBang_sd_play_glass = async () => { console.log("bang glass:", await sd.sound.system("Glass")); };
+  window.onBang_sd_play_beep  = async () => { console.log("bang beep:",  await sd.sound.beep()); };
+  window.onBang_sd_play_file  = async () => { console.log("bang file:",  await sd.sound.file("/System/Library/Sounds/Hero.aiff")); };
+  console.log("sound-test loaded");
+</script>
+</body></html>

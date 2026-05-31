@@ -15,5 +15,6 @@ FSEvents picks it up; the panel appears within ~300ms.
 | [fs-watcher](fs-watcher) | `sd.fs.watch` + a banged message to other stacks |
 | [bang-pair](bang-pair) | Two stacks communicating via `sd.bang` |
 | [invocable-palette](invocable-palette) | `invocable: true`, hotkey-summoned overlay, `sd.ax.focused` |
+| [sound-test](sound-test) | `sd.sound.system`, `sd.sound.file`, `sd.sound.beep` on hotkeys |
 
 Once you've copied one, `stackd doctor` validates the manifest. `stackd new <name>` scaffolds a fresh `hello`-style stack from the same template.

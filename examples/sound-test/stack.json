@@ -1,0 +1,15 @@
+{
+  "id": "sound-test",
+  "name": "Sound Test",
+  "anchor": { "edge": "top-left", "inset": [16, 16] },
+  "size": { "w": 1, "h": 1 },
+  "clickThrough": true,
+  "permissions": ["sound"],
+  "handles": ["sd.play.glass", "sd.play.beep", "sd.play.file"],
+  "hotkeys": [
+    { "key": "ctrl+alt+1", "callback": "glass" },
+    { "key": "ctrl+alt+2", "callback": "ping" },
+    { "key": "ctrl+alt+3", "callback": "tink" },
+    { "key": "ctrl+alt+0", "callback": "beep" }
+  ]
+}
