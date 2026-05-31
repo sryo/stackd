@@ -1,0 +1,50 @@
+<!doctype html>
+<html><head><meta charset="utf-8">
+<style>
+  body { font: 12px -apple-system, sans-serif; color: #ddd; background: rgba(0,0,0,0.6);
+         margin: 0; padding: 10px; border-radius: 8px; }
+  h1   { font-size: 12px; margin: 0 0 6px; opacity: 0.7; }
+  .log { font-family: ui-monospace, Menlo, monospace; font-size: 10px;
+         max-height: 160px; overflow: auto; }
+  .row { white-space: nowrap; }
+  .t   { opacity: 0.5; }
+</style>
+</head><body>
+<h1>distributednotifications — lock/unlock to see events</h1>
+<div class="log" id="log"></div>
+<script type="module">
+  import { sd } from "sd://runtime/api.js";
+
+  const logEl = document.getElementById("log");
+  const append = (text) => {
+    const row = document.createElement("div");
+    row.className = "row";
+    const ts = new Date().toLocaleTimeString();
+    row.innerHTML = `<span class="t">${ts}</span> ${text}`;
+    logEl.insertBefore(row, logEl.firstChild);
+  };
+
+  // Lock-screen DN. Trigger via Cmd+Ctrl+Q.
+  await sd.distributednotifications.observe("com.apple.screenIsLocked", (p) => {
+    append(`<b>locked</b> ${JSON.stringify(p)}`);
+    console.log("locked", p);
+  });
+  await sd.distributednotifications.observe("com.apple.screenIsUnlocked", (p) => {
+    append(`<b>unlocked</b> ${JSON.stringify(p)}`);
+    console.log("unlocked", p);
+  });
+
+  // Custom DN: emit your own with
+  //   defaults write -g _dummy 1 (no — defaults doesn't post DN)
+  // The clean trigger from a shell is via NSDistributedNotificationCenter
+  // through a small swift/osascript shim. As a quick smoke test:
+  //   osascript -e 'use framework "Foundation"' \
+  //             -e 'current application''s NSDistributedNotificationCenter''s defaultCenter''s postNotificationName:"sd.test.ping" object:"hello"'
+  await sd.distributednotifications.observe("sd.test.ping", (p) => {
+    append(`<b>ping</b> ${JSON.stringify(p)}`);
+    console.log("ping", p);
+  });
+
+  append("observers installed — try Cmd+Ctrl+Q or post sd.test.ping");
+</script>
+</body></html>

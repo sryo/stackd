@@ -31,6 +31,7 @@ SWIFT_SOURCES=(
   Sources/DataSources/Input.swift
   Sources/DataSources/Location.swift
   Sources/DataSources/Defaults.swift
+  Sources/DataSources/DistributedNotifications.swift
   Sources/DataSources/Menubar.swift
 
   Sources/DataSources/Network.swift

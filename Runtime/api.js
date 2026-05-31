@@ -66,6 +66,12 @@ window.__sd_hotkey_fire = (id) => {
   const fn = hotkeyHandlers.get(id);
   if (fn) fn();
 };
+// DN callbacks routed by mint id. Populated by sd.distributednotifications.observe.
+const dnHandlers = new Map();
+window.__sd_dn_fire = (id, payload) => {
+  const fn = dnHandlers.get(id);
+  if (fn) fn(payload);
+};
 function request(payload) {
   const requestId = nextRequestId++;
   return new Promise((resolve) => {
@@ -337,6 +343,26 @@ export const sd = {
     async unbind(id) {
       hotkeyHandlers.delete(id);
       return request({ type: "hotkey.unbind", id });
+    }
+  },
+  // Generic NSDistributedNotificationCenter observer. The same machinery
+  // Caffeinate uses internally (com.apple.screenIsLocked, etc.) but exposed
+  // to any stack. Permission: "distributednotifications".
+  //   const id = await sd.distributednotifications.observe(
+  //     "com.apple.screenIsLocked",
+  //     (payload) => console.log("locked at", payload));
+  //   ...later...
+  //   await sd.distributednotifications.unobserve(id);
+  distributednotifications: {
+    async observe(name, fn) {
+      const id = await request({ type: "dn.observe", name });
+      if (id == null || id === false) return null;
+      dnHandlers.set(id, fn);
+      return id;
+    },
+    async unobserve(id) {
+      dnHandlers.delete(id);
+      return request({ type: "dn.unobserve", id });
     }
   },
   // Fire a bang to every stack whose manifest `handles` array contains `name`.
