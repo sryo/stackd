@@ -109,6 +109,12 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         self.permissions = manifest.permissions
         self.handlesBangs = Set(manifest.handles ?? [])
         self.settings = StackSettings(stackId: manifest.id)
+        // Keep WindowsLifecycleObserver's 1Hz CGWindowList poll alive only
+        // while at least one loaded stack declares it cares (handles a
+        // sd.window.* bang). Token drains with the scope on unload.
+        if handlesBangs.contains(where: { $0.hasPrefix("sd.window.") }) {
+            scope.adopt(WindowsLifecycleObserver.shared.subscribe())
+        }
         if manifest.permissions.contains("battery")    { startBattery() }
         if manifest.permissions.contains("mouse")      { startMouse() }
         if manifest.permissions.contains("appearance") { startAppearance() }
@@ -336,6 +342,18 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         .sync("fs.stat", permission: "fs") { body in FS.stat(path: body["path"] as? String ?? "") },
         .sync("fs.list", permission: "fs") { body in
             FS.list(dir: body["dir"] as? String ?? "", includeHidden: body["hidden"] as? Bool ?? false)
+        },
+        .sync("fs.write", permission: "fs", denyValue: false) { body in
+            FS.write(path: body["path"] as? String ?? "", contents: body["contents"] as? String ?? "")
+        },
+        .sync("fs.mkdir", permission: "fs", denyValue: false) { body in
+            FS.mkdir(path: body["path"] as? String ?? "")
+        },
+        .sync("fs.delete", permission: "fs", denyValue: false) { body in
+            FS.delete(path: body["path"] as? String ?? "")
+        },
+        .sync("fs.move", permission: "fs", denyValue: false) { body in
+            FS.move(from: body["from"] as? String ?? "", to: body["to"] as? String ?? "")
         },
         .custom("fs.watch.start", permission: "fs", denyValue: false) { bridge, body, requestId in
             let path = body["path"] as? String ?? ""

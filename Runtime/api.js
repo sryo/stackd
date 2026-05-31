@@ -209,6 +209,13 @@ export const sd = {
     read(path)      { return request({ type: "fs.read", path }); },
     stat(path)      { return request({ type: "fs.stat", path }); },
     list(dir, opts) { return request({ type: "fs.list", dir, hidden: !!(opts && opts.hidden) }); },
+    // Write is atomic (temp-file then rename) so half-written contents never
+    // appear to readers or to FSEvents-driven reloaders. mkdir is mkdir -p.
+    // delete is recursive. move is rename (fails if dst exists).
+    write(path, contents) { return request({ type: "fs.write", path, contents: String(contents ?? "") }); },
+    mkdir(path)           { return request({ type: "fs.mkdir", path }); },
+    delete(path)          { return request({ type: "fs.delete", path }); },
+    move(from, to)        { return request({ type: "fs.move", from, to }); },
     // Push — returns a watchId you pass to unwatch(). Callback receives
     // an array of { kind, path } events (coalesced by FSEvents at ~100ms).
     async watch(path, fn) {
