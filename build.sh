@@ -48,6 +48,7 @@ SWIFT_SOURCES=(
   Sources/DataSources/Spotlight.swift
   Sources/DataSources/Speech.swift
   Sources/DataSources/Thumbnails.swift
+  Sources/DataSources/Update.swift
   Sources/DataSources/Notify.swift
   Sources/DataSources/Devices.swift
 )

@@ -1,0 +1,57 @@
+<!doctype html><meta charset="utf-8">
+<style>
+  html, body { margin: 0; padding: 0; font: 12px -apple-system; color: #fff;
+               background: rgba(20,20,22,.92); border-radius: 12px;
+               padding: 12px; box-sizing: border-box; }
+  h1   { margin: 0 0 10px; font-size: 11px; letter-spacing: .1em;
+         text-transform: uppercase; opacity: .55; }
+  .row { padding: 6px 0; border-bottom: 1px solid rgba(255,255,255,.08); }
+  .row:last-child { border-bottom: none; }
+  .title { font-weight: 600; }
+  .meta  { opacity: .55; font-size: 11px; margin-top: 2px; }
+  .restart { display: inline-block; padding: 1px 5px; border-radius: 3px;
+             background: rgba(255,90,80,.25); color: #ffb5b0;
+             font-size: 10px; margin-left: 4px; }
+  .empty { opacity: .55; padding: 20px 0; text-align: center; }
+</style>
+<body>
+  <h1>Software updates</h1>
+  <div id="rows"><div class="empty">checking…</div></div>
+  <script type="module">
+    // softwareupdate -l is slow (5-10s) — first call shows "checking…",
+    // subsequent calls within 6h hit the daemon-side cache. Pass
+    // { force: true } to bypass on demand.
+    import { sd } from "sd://runtime/api.js";
+
+    async function render() {
+      const updates = await sd.update.list();
+      const root = document.getElementById("rows");
+      if (!updates || updates.length === 0) {
+        root.innerHTML = `<div class="empty">no updates pending</div>`;
+        return;
+      }
+      root.innerHTML = updates.map(u => `
+        <div class="row">
+          <div class="title">
+            ${escapeHtml(u.title || u.label)}
+            ${u.requiresRestart ? `<span class="restart">restart</span>` : ""}
+          </div>
+          <div class="meta">
+            ${u.version ? `v${escapeHtml(u.version)}` : ""}
+            ${u.sizeKiB ? ` · ${(u.sizeKiB / 1024).toFixed(0)} MB` : ""}
+            ${u.recommended ? " · recommended" : ""}
+          </div>
+        </div>
+      `).join("");
+    }
+
+    function escapeHtml(s) {
+      return String(s).replace(/[&<>"']/g, c => ({
+        "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"
+      }[c]));
+    }
+
+    render();
+  </script>
+</body>
+</html>

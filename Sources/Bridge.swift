@@ -725,6 +725,18 @@ final class Bridge: NSObject, WKScriptMessageHandler {
             }
         },
 
+        // Update — pending macOS software updates via `softwareupdate -l`.
+        // No TCC; the list verb runs without escalation. The subprocess is
+        // slow (5-10s, network round-trip), so the primitive caches the
+        // result for ~6h by default. `force: true` busts the cache.
+        .custom("update.list", permission: "update") { bridge, body, requestId in
+            let force = body["force"] as? Bool ?? false
+            let ttl   = body["ttlSeconds"] as? Double
+            Update.list(force: force, ttlSeconds: ttl) { [weak bridge] result in
+                bridge?.respond(requestId: requestId, value: result as Any)
+            }
+        },
+
         // Thumbnails — QLThumbnailGenerator one-shot. Renders the same
         // preview Finder/Quick Look show (PDF first page, video poster,
         // app icon, source highlight) for any file the user can read. No

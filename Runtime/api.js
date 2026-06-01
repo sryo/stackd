@@ -1113,6 +1113,29 @@ export const sd = {
       });
     }
   },
+  // Pending macOS software updates via `softwareupdate -l`. No TCC; the
+  // list verb doesn't need escalation. The shell-out is slow (5-10s —
+  // contacts Apple's update catalog), so results are cached process-wide
+  // for ~6 hours. Pass `force: true` to refresh now.
+  //   const updates = await sd.update.list()
+  //   // → [{ label: "macOS Sonoma 14.5-23F79",
+  //   //      title: "macOS Sonoma 14.5",
+  //   //      version: "14.5",
+  //   //      sizeKiB: 7159564,
+  //   //      recommended: true,
+  //   //      requiresRestart: true }, ...]
+  // Empty array = no updates pending. `title`, `version`, `sizeKiB` may be
+  // omitted if Apple's output line for that update lacked the field.
+  update: {
+    list(opts) {
+      const o = opts || {};
+      return request({
+        type: "update.list",
+        force: !!o.force,
+        ttlSeconds: o.ttlSeconds
+      });
+    }
+  },
   // QLThumbnailGenerator one-shot — same preview Finder/Quick Look render
   // for the file at `path` (PDF first page, video poster, audio waveform,
   // app icon, source-code thumbnail). No TCC; file accessibility is the
