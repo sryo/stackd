@@ -2,6 +2,50 @@ import AppKit
 import ApplicationServices
 import CoreGraphics
 
+// SLSTransaction* used by sd.windows.batch (Bridge sets the batchSink and an
+// opaque tx ref; WindowsByID.setFrame enqueues position moves into the tx
+// instead of dispatching directly through AX). The shared declarations live
+// in Sources/Private/SkyLight.swift (SkyLight.Transaction); per the audit
+// they are also consumed by Overlay.swift.
+//
+// Position moves go through SLSTransactionMoveWindowWithGroup (CGPoint); size
+// has to stay on AX (no SLSTransactionSetWindowSize exists) which is what
+// actually constrains the window's frame anyway.
+
+// SLSCopyWindowsWithOptionsAndTags — yabai's authoritative window enumeration.
+// CGWindowListCopyWindowInfo([.optionOnScreenOnly]) misses minimized + other-space
+// + offscreen windows; this SLS call returns the full inventory and we then ask
+// CGWindowListCreateDescriptionFromArray (public) for the attribute dicts.
+// 6-arg signature matches shipping macOS (verified against yabai/window_manager.c).
+// Falls back to CGWindowListCopyWindowInfo(.optionAll) if the symbol is missing.
+private enum SkyLightWindowsEnum {
+    typealias CopyWindowsFn = @convention(c) (
+        Int32,                                // cid
+        UInt32,                               // owner (0 = all owners)
+        CFArray?,                             // spaces (nil = all spaces)
+        UInt32,                               // options (0x2 includes minimized/offscreen)
+        UnsafeMutablePointer<UInt64>,         // set_tags filter (0 = no filter)
+        UnsafeMutablePointer<UInt64>          // clear_tags filter (0 = no filter)
+    ) -> Unmanaged<CFArray>?
+
+    static let copyWindows: CopyWindowsFn? = SkyLight.sym("SLSCopyWindowsWithOptionsAndTags")
+
+    /// Authoritative window-id enumeration. Returns every window known to
+    /// WindowServer matching `options` (0x2 = include minimized + offscreen).
+    /// Returns nil if the SPI is unavailable so callers can take their own
+    /// public-API fallback path.
+    static func allWindowIDs(options: UInt32 = 0x2) -> [CGWindowID]? {
+        guard let fn = copyWindows else { return nil }
+        var setTags: UInt64 = 0
+        var clearTags: UInt64 = 0
+        guard let cfRef = fn(SkyLight.cid, 0, nil, options, &setTags, &clearTags)?.takeRetainedValue() else {
+            return nil
+        }
+        let nums = (cfRef as? [NSNumber]) ?? []
+        return nums.map { CGWindowID($0.uint32Value) }
+    }
+}
+
 // Everything window-related, by source-of-truth:
 //
 //   Windows                  — CGWindowList enumeration (.all), AX-focused
@@ -95,6 +139,8 @@ enum Windows {
         var size = CGSize(width: w, height: h)
         guard let posVal  = AXValueCreate(.cgPoint, &pos),
               let sizeVal = AXValueCreate(.cgSize,  &size) else { return false }
+        // Size → position → size; see WindowsByID.setFrame for the why.
+        _ = AXUIElementSetAttributeValue(win, kAXSizeAttribute     as CFString, sizeVal)
         let posOK  = AXUIElementSetAttributeValue(win, kAXPositionAttribute as CFString, posVal)
         let sizeOK = AXUIElementSetAttributeValue(win, kAXSizeAttribute     as CFString, sizeVal)
         return posOK == .success && sizeOK == .success
@@ -118,14 +164,27 @@ enum Windows {
         return AXUIElementPerformAction(win, kAXRaiseAction as CFString) == .success
     }
 
-    // All on-screen normal windows from CGWindowList.
+    // All normal windows known to WindowServer, including minimized / other-space
+    // / offscreen. Prefers SLSCopyWindowsWithOptionsAndTags (yabai's route) for
+    // authority + completeness; falls back to CGWindowListCopyWindowInfo(.optionAll)
+    // if the SPI symbol fails to resolve. Each entry carries `onscreen: Bool` so
+    // consumers that want only visible windows can filter without losing the
+    // option to see the full inventory.
     static func all() -> [[String: Any]] {
+        // SLSCopyWindowsWithOptionsAndTags is the yabai-style "authoritative"
+        // path but crashes inside SkyLight on macOS 26 (Tahoe) — repro: any
+        // stack with `windows` permission segfaults at startWorkspace's
+        // first push. Until the SPI signature is re-verified on Tahoe we
+        // route through the public CGWindowListCopyWindowInfo only.
         guard let raw = CGWindowListCopyWindowInfo(
-            [.optionOnScreenOnly, .excludeDesktopElements],
+            [.optionAll, .excludeDesktopElements],
             kCGNullWindowID
         ) else { return [] }
-        let list = raw as! [[String: Any]]
-        return list.compactMap { info -> [String: Any]? in
+        return decode(raw as! [[String: Any]])
+    }
+
+    private static func decode(_ list: [[String: Any]]) -> [[String: Any]] {
+        list.compactMap { info -> [String: Any]? in
             guard let num   = info[kCGWindowNumber as String]    as? Int,
                   let layer = info[kCGWindowLayer  as String]    as? Int,
                   layer == 0,
@@ -133,11 +192,13 @@ enum Windows {
                   let pid   = info[kCGWindowOwnerPID  as String] as? Int,
                   let bounds = info[kCGWindowBounds as String]   as? [String: CGFloat]
             else { return nil }
+            let onscreen = (info[kCGWindowIsOnscreen as String] as? Int) ?? 0
             return [
                 "id": num,
                 "app": owner,
                 "pid": pid,
                 "title": info[kCGWindowName as String] as? String ?? "",
+                "onscreen": onscreen != 0,
                 "frame": [
                     "x": Int(bounds["X"] ?? 0),
                     "y": Int(bounds["Y"] ?? 0),
@@ -168,6 +229,51 @@ enum AXShim {
 // MARK: - WindowsByID: per-window actions targeting a CGWindowID
 
 enum WindowsByID {
+    // Batch-mode mutation enum. When sd.windows.batch is active Bridge installs
+    // a sink that funnels these into a live SLSTransaction; setFrame/raise on a
+    // specific id route here instead of taking the direct AX path. Process-wide
+    // because the sink + tx ref live on the static var below (one batch at a
+    // time, serialized by Bridge.batch.begin refusing if one is already open).
+    enum WindowMutation {
+        case moveWithGroup(id: CGWindowID, point: CGPoint)
+        case orderAbove(id: CGWindowID, relativeTo: CGWindowID)
+    }
+
+    static var batchSink: ((WindowMutation) -> Void)?
+    private static var activeTransaction: CFTypeRef?
+
+    // Opens a fresh SLSTransaction and installs a sink that funnels mutations
+    // into it. Process-global — returns false if a batch is already open. Must
+    // run on the WindowServer/main thread (same as AX). Pairs with commitBatch.
+    @discardableResult
+    static func beginBatch() -> Bool {
+        if batchSink != nil { return false }
+        guard let create = SkyLight.Transaction.create,
+              let move = SkyLight.Transaction.moveWithGroup,
+              let txRef = create(SkyLight.cid)?.takeRetainedValue() else {
+            return false
+        }
+        activeTransaction = txRef
+        batchSink = { mutation in
+            switch mutation {
+            case .moveWithGroup(let id, let point):
+                _ = move(txRef, UInt32(id), point)
+            case .orderAbove(let id, let rel):
+                _ = SkyLight.Transaction.orderWindow?(txRef, UInt32(id), 1, UInt32(rel))
+            }
+        }
+        return true
+    }
+
+    @discardableResult
+    static func commitBatch() -> Bool {
+        guard let tx = activeTransaction else { return false }
+        _ = SkyLight.Transaction.commit?(tx, 0)
+        batchSink = nil
+        activeTransaction = nil
+        return true
+    }
+
     // pid → (CGWindowID → AXUIElement). Repopulated lazily on lookup miss.
     private static var axCache: [pid_t: [CGWindowID: AXUIElement]] = [:]
     private static let cacheLock = NSLock()
@@ -234,11 +340,33 @@ enum WindowsByID {
 
     @discardableResult
     static func setFrame(windowID: CGWindowID, x: Double, y: Double, w: Double, h: Double) -> Bool {
+        // Batch mode: AX still owns size (no SLS size symbol exists), but the
+        // visible position pop is deferred until SLSTransactionCommit so every
+        // window queued in this batch snaps to its new origin on a single
+        // compositor flip. Size changes still cascade per-app (apps repaint at
+        // their own pace) — that's the v1 tradeoff documented in the plan.
+        if let sink = batchSink {
+            guard let el = elementFor(windowID: windowID) else { return false }
+            var sz = CGSize(width: w, height: h)
+            guard let szVal = AXValueCreate(.cgSize, &sz) else { return false }
+            _ = AXUIElementSetAttributeValue(el, kAXSizeAttribute as CFString, szVal)
+            sink(.moveWithGroup(id: windowID, point: CGPoint(x: x, y: y)))
+            return true
+        }
         guard let el = elementFor(windowID: windowID) else { return false }
         var pos = CGPoint(x: x, y: y)
         var sz  = CGSize(width: w, height: h)
         guard let posVal = AXValueCreate(.cgPoint, &pos),
               let szVal  = AXValueCreate(.cgSize,  &sz) else { return false }
+        // Size → position → size. Position-first lands the window relative
+        // to the OLD size, which on horizontal tiles means apps that
+        // discrete-round their dimensions (Terminal: 11.36 px/col, Xcode,
+        // Finder list view) end up positioned for the wrong width and the
+        // size set afterwards anchors to whatever AX picked. Doing size
+        // first lets AX honor the new dimensions; the second size set is
+        // the standard hs.window:setFrame belt-and-suspenders for apps
+        // that clamped the first size against the still-old position.
+        _ = AXUIElementSetAttributeValue(el, kAXSizeAttribute     as CFString, szVal)
         let pOK = AXUIElementSetAttributeValue(el, kAXPositionAttribute as CFString, posVal)
         let sOK = AXUIElementSetAttributeValue(el, kAXSizeAttribute     as CFString, szVal)
         return pOK == .success && sOK == .success

@@ -125,11 +125,8 @@ private enum SkyLightOverlay {
     typealias SetWindowResolutionFn = @convention(c) (Int32, UInt32, Double) -> Int32
 
     // SLSTransaction* — atomic move/level/order in one server commit.
-    typealias TransactionCreateFn          = @convention(c) (Int32) -> Unmanaged<CFTypeRef>?
-    typealias TransactionCommitFn          = @convention(c) (CFTypeRef, Int32) -> Int32
-    typealias TransactionMoveFn            = @convention(c) (CFTypeRef, UInt32, CGPoint) -> Int32
-    typealias TransactionOrderWindowFn     = @convention(c) (CFTypeRef, UInt32, Int32, UInt32) -> Int32
-    typealias TransactionSetWindowLevelFn  = @convention(c) (CFTypeRef, UInt32, Int32) -> Int32
+    // Shared declarations live in Sources/Private/SkyLight.swift
+    // (SkyLight.Transaction); also consumed by Windows.swift / sd.windows.batch.
 
     // Geometry primitive used by SLSSetWindowShape. The yabai/JankyBorders
     // call site builds a region whose extent is `frame` (origin treated as
@@ -151,11 +148,6 @@ private enum SkyLightOverlay {
     static let setWindowTags:            SetWindowTagsFn?            = SkyLight.sym("SLSSetWindowTags")
     static let clearWindowTags:          ClearWindowTagsFn?          = SkyLight.sym("SLSClearWindowTags")
     static let setWindowResolution:      SetWindowResolutionFn?      = SkyLight.sym("SLSSetWindowResolution")
-    static let transactionCreate:        TransactionCreateFn?        = SkyLight.sym("SLSTransactionCreate")
-    static let transactionCommit:        TransactionCommitFn?        = SkyLight.sym("SLSTransactionCommit")
-    static let transactionMove:          TransactionMoveFn?          = SkyLight.sym("SLSTransactionMoveWindowWithGroup")
-    static let transactionOrderWindow:   TransactionOrderWindowFn?   = SkyLight.sym("SLSTransactionOrderWindow")
-    static let transactionSetLevel:      TransactionSetWindowLevelFn? = SkyLight.sym("SLSTransactionSetWindowLevel")
     static let newRegionWithRect:        NewRegionWithRectFn?        = SkyLight.sym("CGSNewRegionWithRect")
 }
 
@@ -359,10 +351,10 @@ final class OverlayHandle {
         // SLSTransactionMoveWindowWithGroup (not SLSMoveWindow) to keep the
         // overlay snapped to the target through live drags. Order = 1
         // (above target) with reference wid = targetWID.
-        guard let txCreate  = SkyLightOverlay.transactionCreate,
-              let txMove    = SkyLightOverlay.transactionMove,
-              let txOrder   = SkyLightOverlay.transactionOrderWindow,
-              let txCommit  = SkyLightOverlay.transactionCommit else { return }
+        guard let txCreate  = SkyLight.Transaction.create,
+              let txMove    = SkyLight.Transaction.moveWithGroup,
+              let txOrder   = SkyLight.Transaction.orderWindow,
+              let txCommit  = SkyLight.Transaction.commit else { return }
         guard let txRef = txCreate(cid)?.takeRetainedValue() else { return }
         _ = txMove(txRef, overlayWID, overlayFrame.origin)
         _ = txOrder(txRef, overlayWID, 1, targetWID)
