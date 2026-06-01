@@ -101,7 +101,8 @@ enum ChannelInference {
         "spaces.all":        "spaces",
         "host.load":         "host",
         "host.info":         "host",
-        "host.diskIO":       "host"
+        "host.diskIO":       "host",
+        "calendar.observe":  "calendar"
     ]
 
     /// Scan `text` (an HTML/JS/CSS source blob) for sd-channel references

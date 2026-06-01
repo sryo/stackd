@@ -1,0 +1,110 @@
+<!doctype html>
+<html><head><meta charset="utf-8">
+<style>
+  body { font: 12px -apple-system, sans-serif; color: #ddd; background: rgba(0,0,0,0.72);
+         margin: 0; padding: 12px; border-radius: 10px; }
+  h1   { font-size: 11px; margin: 0 0 4px; opacity: 0.6; text-transform: uppercase; letter-spacing: 0.06em; }
+  h2   { font-size: 11px; margin: 12px 0 4px; opacity: 0.6; text-transform: uppercase; letter-spacing: 0.06em; }
+  ul   { margin: 0; padding: 0; list-style: none; }
+  li   { padding: 3px 0; border-bottom: 1px solid rgba(255,255,255,0.06);
+         display: flex; justify-content: space-between; gap: 8px; }
+  .t   { opacity: 0.55; font-variant-numeric: tabular-nums; flex-shrink: 0; }
+  .empty { opacity: 0.4; font-style: italic; padding: 3px 0; }
+  button { font: inherit; color: #ddd; background: rgba(255,255,255,0.08);
+           border: 1px solid rgba(255,255,255,0.14); border-radius: 6px;
+           padding: 6px 10px; cursor: pointer; margin-top: 10px; }
+  button:hover { background: rgba(255,255,255,0.14); }
+  .status { font-size: 10px; opacity: 0.5; margin-top: 6px; min-height: 1.2em; }
+</style>
+</head><body>
+<h1>Next 5 events</h1>
+<ul id="events"></ul>
+
+<h2>Next 5 reminders</h2>
+<ul id="reminders"></ul>
+
+<button id="create">Create test event (30 min, 1 h from now)</button>
+<div class="status" id="status"></div>
+
+<script type="module">
+  import { sd } from "sd://runtime/api.js";
+
+  const eventsEl    = document.getElementById("events");
+  const remindersEl = document.getElementById("reminders");
+  const statusEl    = document.getElementById("status");
+  const createBtn   = document.getElementById("create");
+
+  function fmtTime(epochSec) {
+    const d = new Date(epochSec * 1000);
+    const today = new Date();
+    const sameDay = d.toDateString() === today.toDateString();
+    const time = d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+    return sameDay ? time : `${d.toLocaleDateString([], { month: "short", day: "numeric" })} ${time}`;
+  }
+
+  async function refresh() {
+    const nowSec = Math.floor(Date.now() / 1000);
+    const horizon = nowSec + 60 * 60 * 24 * 14;  // two weeks out
+    const [events, reminders] = await Promise.all([
+      sd.calendar.events({ from: nowSec, to: horizon }),
+      sd.calendar.reminders({ completed: false })
+    ]);
+
+    // Events — sort, take 5.
+    events.sort((a, b) => a.start - b.start);
+    eventsEl.innerHTML = "";
+    if (events.length === 0) {
+      eventsEl.innerHTML = `<li class="empty">No upcoming events</li>`;
+    } else {
+      for (const e of events.slice(0, 5)) {
+        const li = document.createElement("li");
+        const title = document.createElement("span");
+        title.textContent = e.title || "(untitled)";
+        const time = document.createElement("span");
+        time.className = "t";
+        time.textContent = e.allDay ? "all-day" : fmtTime(e.start);
+        li.append(title, time);
+        eventsEl.appendChild(li);
+      }
+    }
+
+    // Reminders — sort by due (no-due last), take 5.
+    reminders.sort((a, b) => (a.due ?? Infinity) - (b.due ?? Infinity));
+    remindersEl.innerHTML = "";
+    if (reminders.length === 0) {
+      remindersEl.innerHTML = `<li class="empty">No open reminders</li>`;
+    } else {
+      for (const r of reminders.slice(0, 5)) {
+        const li = document.createElement("li");
+        const title = document.createElement("span");
+        title.textContent = r.title || "(untitled)";
+        const due = document.createElement("span");
+        due.className = "t";
+        due.textContent = r.due ? fmtTime(r.due) : "—";
+        li.append(title, due);
+        remindersEl.appendChild(li);
+      }
+    }
+  }
+
+  // Re-fetch on every EKEventStoreChanged ping — adds + edits + deletes in
+  // any app (Calendar.app, Reminders, the createEvent below) trigger this.
+  sd.calendar.observe.subscribe(() => {
+    refresh();
+  });
+
+  createBtn.addEventListener("click", async () => {
+    statusEl.textContent = "Creating…";
+    const start = Math.floor(Date.now() / 1000) + 3600;          // 1 h from now
+    const end   = start + 30 * 60;                                // +30 min
+    const id = await sd.calendar.createEvent({
+      title: "stackd test event",
+      start, end,
+      notes: "Created via sd.calendar.createEvent from the calendar-extended-test stack."
+    });
+    statusEl.textContent = id
+      ? `Created event ${id} — the observer above will re-fetch automatically.`
+      : "Create failed (denied access? no default calendar?). See daemon log.";
+  });
+</script>
+</body></html>

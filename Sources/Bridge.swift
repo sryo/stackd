@@ -226,6 +226,7 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         if manifest.permissions.contains("audio")      { startAudio() }
         if manifest.permissions.contains("display")    { startDisplay() }
         if manifest.permissions.contains("media")      { startMedia() }
+        if manifest.permissions.contains("calendar")   { startCalendar() }
         if manifest.permissions.contains("pasteboard") { startPasteboard() }
         if manifest.permissions.contains("apps")       { startApps() }
         if manifest.permissions.contains("spaces")     { startSpaces() }
@@ -842,6 +843,45 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         .custom("calendar.list", permission: "calendar") { bridge, _, requestId in
             Calendar.calendars { [weak bridge] result in
                 bridge?.respond(requestId: requestId, value: result as Any? ?? [[String: Any]]())
+            }
+        },
+        // Reminders — first call triggers the Reminders TCC prompt (separate
+        // bucket from Calendar's). `list` filters to specific reminder-list
+        // identifiers (EKCalendar.calendarIdentifier from sd.calendar.list
+        // returns event calendars only — reminder lists need their own
+        // future surface; for now pass nil to search all). `completed`:
+        // nil → both, false → only incomplete, true → only completed.
+        // Returns [] on denial, never nil.
+        .custom("calendar.reminders", permission: "calendar") { bridge, body, requestId in
+            let listIds   = body["list"]      as? [String]
+            let completed = body["completed"] as? Bool
+            Calendar.reminders(listIds: listIds, completed: completed) { [weak bridge] result in
+                bridge?.respond(requestId: requestId, value: result as Any? ?? [[String: Any]]())
+            }
+        },
+        // Create an event in `calendarId` (nil → default calendar for new
+        // events). Returns the new event's identifier on success, null on
+        // failure (denied access, missing calendar, save error). No new TCC
+        // prompt — the Calendar full-access tier already granted via events()
+        // covers writes too.
+        .custom("calendar.createEvent", permission: "calendar") { bridge, body, requestId in
+            let calId    = body["calendarId"] as? String
+            let title    = body["title"]      as? String ?? ""
+            let start    = (body["start"]     as? Double) ?? 0
+            let end      = (body["end"]       as? Double) ?? 0
+            let location = body["location"]   as? String
+            let notes    = body["notes"]      as? String
+            let allDay   = (body["allDay"]    as? Bool) ?? false
+            Calendar.createEvent(
+                calendarId: calId,
+                title:      title,
+                start:      start,
+                end:        end,
+                location:   location,
+                notes:      notes,
+                allDay:     allDay
+            ) { [weak bridge] id in
+                bridge?.respond(requestId: requestId, value: id as Any? ?? NSNull())
             }
         },
 
@@ -1800,6 +1840,7 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         ("audio",       "audioInput"),
         ("display",     "displays"),
         ("media",       "media"),
+        ("calendar",    "calendarChanged"),
         ("pasteboard",  "pasteboard"),
         ("apps",        "apps"),
         ("spaces",      "spaces"),
@@ -1982,6 +2023,23 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         }
         pushFn()
         scope.adopt(MediaObserver.shared.subscribe(pushFn))
+    }
+
+    // Store-change ping channel: EKEventStoreChanged fires when any app
+    // (Calendar.app, Reminders, an MDM sync, this daemon's own createEvent)
+    // writes to the EventKit database. Apple's docs note the notification's
+    // userInfo dict is always empty — there's no delta to ship. We push a
+    // monotonic timestamp so the channel's dedupe (lastState string compare)
+    // doesn't suppress repeat changes; JS subscribers re-fetch on every
+    // signal. Cheap fire-and-forget for stacks that want to keep an agenda
+    // view live without polling.
+    private func startCalendar() {
+        startChannel(name: "calendarChanged", observer: CalendarObserver.shared) {
+            // Payload is just a fresh timestamp so re-emission dedupe never
+            // suppresses a real store change. JS doesn't read the value —
+            // the channel is treated as a bell, not a snapshot.
+            ["ts": Date().timeIntervalSince1970]
+        }
     }
 
     private func startPasteboard() {

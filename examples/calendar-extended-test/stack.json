@@ -1,0 +1,7 @@
+{
+  "id": "calendar-extended-test",
+  "name": "Calendar — events + reminders + create + observe",
+  "anchor": { "edge": "top-right", "inset": [16, 16] },
+  "size": { "w": 360, "h": 420 },
+  "permissions": ["calendar"]
+}

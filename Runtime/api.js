@@ -1265,16 +1265,34 @@ export const sd = {
       });
     }
   },
-  // Calendar events via EventKit. First call triggers the Calendar TCC
-  // prompt (macOS 14+ asks for "Full Access"). Denial yields [], never null.
+  // Calendar events via EventKit. First call to events()/createEvent()
+  // triggers the Calendar TCC prompt (macOS 14+ asks for "Full Access" —
+  // covers both reads + writes). reminders() triggers a SEPARATE Reminders
+  // TCC prompt the first time it's called. Denial yields [] / null, never
+  // throws.
   //   await sd.calendar.events({ from: nowSec, to: nowSec + 86400 })
   //   await sd.calendar.events({ from, to, calendarIds: ["UUID..."] })
   //   // → [{ identifier, title, start, end, allDay, calendar,
   //   //      location?, notes?, url? }, ...]
   //   await sd.calendar.list()
   //   // → [{ identifier, title, source, type, allowsModify, color? }, ...]
-  // Times are UNIX epoch seconds (Number). Reminders + event creation +
-  // store-change observers are not yet shipped.
+  //   await sd.calendar.reminders()
+  //   await sd.calendar.reminders({ completed: false })   // only incomplete
+  //   await sd.calendar.reminders({ completed: true })    // only completed
+  //   await sd.calendar.reminders({ list: ["UUID..."] })  // specific list(s)
+  //   // → [{ identifier, title, priority, completed, list,
+  //   //      due?, notes? }, ...]
+  //   const id = await sd.calendar.createEvent({
+  //     calendarId: null,                  // null = default calendar
+  //     title: "Standup", start: nowSec, end: nowSec + 1800,
+  //     location: "Room 4", notes: "...", allDay: false
+  //   });
+  //   // → newEventId | null on failure
+  //   sd.calendar.observe.subscribe(() => refetch());
+  //   // Fires on every store change (this daemon, Calendar.app, Reminders,
+  //   // MDM sync, …). Payload is `{ ts: epoch }` — re-fetch on signal.
+  // Times are UNIX epoch seconds (Number). Reminders WRITE (createReminder)
+  // is not yet shipped.
   calendar: {
     events(opts) {
       const o = opts || {};
@@ -1284,7 +1302,35 @@ export const sd = {
         calendarIds: o.calendarIds
       });
     },
-    list() { return request({ type: "calendar.list" }); }
+    list() { return request({ type: "calendar.list" }); },
+    reminders(opts) {
+      const o = opts || {};
+      return request({
+        type:      "calendar.reminders",
+        list:      o.list,
+        completed: o.completed
+      });
+    },
+    createEvent(opts) {
+      const o = opts || {};
+      return request({
+        type:       "calendar.createEvent",
+        calendarId: o.calendarId,
+        title:      String(o.title ?? ""),
+        start:      o.start,
+        end:        o.end,
+        location:   o.location,
+        notes:      o.notes,
+        allDay:     !!o.allDay
+      });
+    },
+    // Subscribable signal. Fires every time EventKit posts
+    // EKEventStoreChanged — any app adding/editing/deleting an event or
+    // reminder triggers it. Payload is a fresh `{ ts }` so the signal's
+    // dedupe doesn't suppress repeat changes; subscribers re-fetch.
+    //   const unsub = sd.calendar.observe.subscribe(() => refetch());
+    //   // later: unsub();
+    observe: channel("calendarChanged")
   },
   // Paired Bluetooth peripherals via IOBluetooth. Triggers the Bluetooth
   // TCC prompt on first use.
@@ -1634,6 +1680,7 @@ const __sdSignalPaths = {
   "location":           sd.location,
   "usb":                sd.usb,
   "camera":             sd.camera,
+  "calendar.observe":   sd.calendar.observe,
 };
 
 // Sort once, longer-first, so "windows.focused" matches before "windows" —
