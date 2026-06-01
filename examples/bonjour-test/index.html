@@ -1,0 +1,80 @@
+<!doctype html>
+<html><head><meta charset="utf-8">
+<style>
+  body {
+    margin: 0; padding: 10px 12px;
+    font: 11px -apple-system, system-ui, sans-serif;
+    color: #fff;
+    background: rgba(20, 20, 22, 0.78);
+    border-radius: 10px;
+    -webkit-backdrop-filter: blur(20px);
+  }
+  h1 { font-size: 10px; margin: 0 0 6px; opacity: 0.55; text-transform: uppercase; letter-spacing: 0.08em; }
+  #status { font: 10px ui-monospace, Menlo, monospace; opacity: 0.7; margin-bottom: 6px; }
+  ul { margin: 0; padding: 0; list-style: none; }
+  li { padding: 3px 0; border-top: 1px solid rgba(255,255,255,0.08); font: 11px ui-monospace, Menlo, monospace; }
+  li:first-child { border-top: none; }
+  .name { color: #fff; }
+  .meta { opacity: 0.5; font-size: 10px; }
+  .empty { opacity: 0.4; padding: 6px 0; }
+</style>
+</head><body>
+<h1>bonjour — browsing _http._tcp on the LAN</h1>
+<div id="status">starting…</div>
+<ul id="list"></ul>
+<script type="module">
+  import { sd } from "sd://runtime/api.js";
+
+  // sd.bonjour — Network.framework / NWBrowser + NWListener wrapper.
+  //
+  // browse(type) returns a handle with subscribe(fn). The callback fires
+  // with the full current result set each time a service appears or
+  // disappears — render directly, no diffing needed.
+  //
+  // First call on macOS 15+ triggers the Local Network privacy prompt
+  // (granted system-wide for the stackd process). Network.framework
+  // raises it; we don't preflight.
+  //
+  // Pairs with sd.httpserver: publish your local listener so another Mac
+  // can discover it. Example below is browse-only to keep the demo
+  // single-machine-safe; uncomment the publish block to advertise too.
+
+  const list = document.getElementById("list");
+  const status = document.getElementById("status");
+
+  // Browse _http._tcp — the registry of every HTTP-shaped Bonjour
+  // service on the LAN (printers, AirPlay receivers, dev servers,
+  // other stackd instances using sd.httpserver with bonjour: {...}).
+  const browser = sd.bonjour.browse("_http._tcp");
+
+  browser.subscribe(services => {
+    status.textContent = `${services.length} service${services.length === 1 ? "" : "s"}`;
+    list.innerHTML = "";
+    if (services.length === 0) {
+      const empty = document.createElement("li");
+      empty.className = "empty";
+      empty.textContent = "no _http._tcp services visible";
+      list.appendChild(empty);
+      return;
+    }
+    for (const s of services) {
+      const li = document.createElement("li");
+      const where = s.host && s.port ? `${s.host}:${s.port}` : "(unresolved)";
+      const txt = s.txt && Object.keys(s.txt).length
+        ? ` · ${Object.entries(s.txt).map(([k,v]) => `${k}=${v}`).join(" ")}`
+        : "";
+      li.innerHTML = `<span class="name">${s.name || "?"}</span> <span class="meta">${where}${txt}</span>`;
+      list.appendChild(li);
+    }
+  });
+
+  // ── optional: publish a sibling service so a second Mac can find this one
+  // const ad = await sd.bonjour.publish({
+  //   name: "stackd-bonjour-demo",
+  //   type: "_http._tcp",
+  //   port: 8765,
+  //   txt:  { source: "stackd", demo: "1" }
+  // });
+  // if (!ad) console.warn("bonjour publish failed (port in use?)");
+</script>
+</body></html>

@@ -43,6 +43,7 @@ SWIFT_SOURCES=(
   Sources/DataSources/AX.swift
   Sources/DataSources/Overlay.swift
   Sources/DataSources/HTTPServer.swift
+  Sources/DataSources/Bonjour.swift
   Sources/DataSources/Vision.swift
   Sources/DataSources/NLP.swift
   Sources/DataSources/Spotlight.swift

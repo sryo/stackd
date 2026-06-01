@@ -26,6 +26,7 @@ TEST_SOURCES=(
   Tests/StackDoctorTests.swift
   Tests/UpdateParserTests.swift
   Tests/HostDiskIOTests.swift
+  Tests/BonjourTests.swift
   Tests/TemplateEngineTests.swift
   Tests/main.swift
 )

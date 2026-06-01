@@ -1121,6 +1121,96 @@ export const sd = {
       });
     }
   },
+  // Bonjour / mDNS — publish a service on the LAN, or browse for one.
+  // Backed by Network.framework (NWListener + NWBrowser). On macOS 15+ the
+  // first publish/browse triggers a Local Network privacy prompt; the
+  // framework raises it — we don't preflight.
+  //
+  //   const ad = await sd.bonjour.publish({
+  //     name: "My Stack",
+  //     type: "_http._tcp",
+  //     port: 7373,
+  //     txt:  { path: "/", role: "primary" }   // optional
+  //   });
+  //   // ...later...
+  //   await ad.stop();
+  //
+  //   const b = sd.bonjour.browse("_http._tcp");
+  //   const unsub = b.subscribe(services => {
+  //     // services = [{ name, type, host?, port?, txt }, ...]
+  //     // host/port may be absent until a follow-up NWConnection resolves
+  //     // the .service endpoint; subscribe yields the full set each time.
+  //     render(services);
+  //   });
+  //   // ...later...
+  //   unsub();          // stop receiving updates (JS-side only)
+  //   await b.stop();   // tear down the underlying NWBrowser
+  //
+  // Pairs with sd.httpserver: publish your listener's port and another Mac's
+  // stack can find it via browse(). Or browse `_ipp._tcp` for the office
+  // printer, `_mqtt._tcp` for an MQTT broker, etc.
+  // Permission: "bonjour".
+  bonjour: {
+    // Note on the wire shape: the IPC envelope's `type` key is reserved for
+    // primitive dispatch ("bonjour.publish" / "bonjour.browse.start"), so
+    // the bonjour service type ("_http._tcp", etc.) travels under
+    // `serviceType`. Same workaround as caffeinate.assert/assertionType.
+    async publish(opts) {
+      const o = opts || {};
+      const id = await request({
+        type:        "bonjour.publish",
+        name:        String(o.name ?? ""),
+        serviceType: String(o.type ?? ""),
+        port:        o.port | 0,
+        txt:         o.txt || null
+      });
+      if (id == null) return null;
+      return {
+        id,
+        stop() { return request({ type: "bonjour.publish.stop", id }); }
+      };
+    },
+    browse(type) {
+      // The handle id arrives async, so subscribers attached before the
+      // id resolves get buffered locally and re-bound to the synthesized
+      // channel ("bonjour:browse:<id>") once we have it. After that,
+      // subscribe() goes straight to the underlying channel signal.
+      const localSubs = new Set();
+      let realCh = null;
+      let realId = null;
+      let stopped = false;
+      const start = request({
+        type:        "bonjour.browse.start",
+        serviceType: String(type ?? "")
+      }).then((id) => {
+        if (id == null || stopped) return null;
+        realId = id;
+        realCh = channel("bonjour:browse:" + id);
+        for (const fn of localSubs) realCh.subscribe(fn);
+        localSubs.clear();
+        return id;
+      });
+      return {
+        get id() { return realId; },
+        subscribe(fn) {
+          if (realCh) return realCh.subscribe(fn);
+          localSubs.add(fn);
+          // Pre-bind unsubscribe: drop from the local set if the start
+          // request hasn't resolved yet. Post-bind unsubscribes are
+          // best-effort (the channel signal doesn't expose an unbind hook
+          // once we lose the inner unsubscribe ref) — process-lifetime
+          // channels mean the cost is one callback ref until stack unload.
+          return () => { localSubs.delete(fn); };
+        },
+        async stop() {
+          stopped = true;
+          const id = await start;
+          if (id == null) return false;
+          return request({ type: "bonjour.browse.stop", id });
+        }
+      };
+    }
+  },
   // Pending macOS software updates via `softwareupdate -l`. No TCC; the
   // list verb doesn't need escalation. The shell-out is slow (5-10s —
   // contacts Apple's update catalog), so results are cached process-wide

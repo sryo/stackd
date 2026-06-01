@@ -57,6 +57,16 @@ final class Bridge: NSObject, WKScriptMessageHandler {
     fileprivate var httpServerTokens: [Int: Token] = [:]
     fileprivate var pendingHttpResponses: [Int: (HTTPResponse) -> Void] = [:]
     fileprivate var nextHttpId: Int = 1
+    // Bonjour publish + browse handles. Both are long-lived Network.framework
+    // primitives; the publish side owns an NWListener, the browse side an
+    // NWBrowser. Stack unload drains both via scope (mirrors httpServerTokens).
+    // Per-handle channel push for browse uses the synthesized name
+    // "bonjour:browse:<id>" — JS sd.bonjour.browse() builds the same name
+    // from the returned handle id and subscribes via the standard channel()
+    // signal machinery.
+    fileprivate var bonjourPublishHandles: [Int: Token] = [:]
+    fileprivate var bonjourBrowseHandles: [Int: Token] = [:]
+    fileprivate var nextBonjourId: Int = 1
     // SQLite handles minted via sd.sqlite.open(). Tracked per-Bridge so the
     // scope drain on stack unload closes every connection — the underlying
     // SQLite.HandleStore is process-wide but the *ownership* is stack-scoped.
@@ -334,6 +344,15 @@ final class Bridge: NSObject, WKScriptMessageHandler {
                 complete(HTTPResponse(status: 503, headers: [:], body: "stack unloaded"))
             }
             self.pendingHttpResponses.removeAll()
+        })
+        // Bonjour — stop every NWListener / NWBrowser owned by this stack
+        // so reload doesn't leak advertisements or browse sockets.
+        scope.adopt(Token { [weak self] in
+            guard let self = self else { return }
+            for (_, t) in self.bonjourPublishHandles { t.cancel() }
+            self.bonjourPublishHandles.removeAll()
+            for (_, t) in self.bonjourBrowseHandles { t.cancel() }
+            self.bonjourBrowseHandles.removeAll()
         })
         // SQLite — sqlite3_close_v2 every connection minted by this stack.
         // No-ops if the JS code already called db.close() explicitly.
@@ -1632,6 +1651,65 @@ final class Bridge: NSObject, WKScriptMessageHandler {
                 response.body = raw
             }
             complete(response)
+            return true
+        },
+
+        // ── Bonjour / mDNS ──────────────────────────────────────────────────
+        // Publish: long-lived NWListener that advertises {name, type, port}
+        // over mDNS. Returns a handle id; JS wraps it as { id, stop() }.
+        // Browse: long-lived NWBrowser that fires per-handle channel pushes
+        // ("bonjour:browse:<id>") with the full current result-set on every
+        // change. JS sd.bonjour.browse(type) returns { id, subscribe(fn),
+        // stop() } that wires the same channel name to the standard signal
+        // machinery. Permission: "bonjour". macOS 15+ surfaces a Local
+        // Network privacy prompt on first publish/browse; Network.framework
+        // raises it — we don't preflight.
+        .custom("bonjour.publish", permission: "bonjour") { bridge, body, requestId in
+            // IPC envelope's `type` key is reserved for primitive dispatch
+            // ("bonjour.publish"), so the service type travels under
+            // `serviceType` — matches the caffeinate.assert/assertionType
+            // workaround elsewhere in this file.
+            let name = body["name"] as? String ?? ""
+            let type = body["serviceType"] as? String ?? ""
+            let port = UInt16((body["port"] as? Int) ?? 0)
+            let txt  = body["txt"] as? [String: String]
+            guard !name.isEmpty, !type.isEmpty, port > 0,
+                  let handle = Bonjour.publish(name: name, type: type, port: port, txt: txt) else {
+                bridge.respond(requestId: requestId, value: NSNull()); return
+            }
+            let id = bridge.nextBonjourId
+            bridge.nextBonjourId += 1
+            bridge.bonjourPublishHandles[id] = Token { handle.stop() }
+            bridge.respond(requestId: requestId, value: id)
+        },
+        .syncBridge("bonjour.publish.stop", permission: "bonjour", denyValue: false) { b, body in
+            guard let id = body["id"] as? Int,
+                  let t  = b.bonjourPublishHandles.removeValue(forKey: id) else { return false }
+            t.cancel()
+            return true
+        },
+        .custom("bonjour.browse.start", permission: "bonjour") { bridge, body, requestId in
+            // serviceType (not `type`) for the same envelope-collision reason
+            // documented on bonjour.publish above.
+            let type = body["serviceType"] as? String ?? ""
+            guard !type.isEmpty else {
+                bridge.respond(requestId: requestId, value: NSNull()); return
+            }
+            let id = bridge.nextBonjourId
+            bridge.nextBonjourId += 1
+            let channel = "bonjour:browse:\(id)"
+            let browser = Bonjour.Browser(type: type) { [weak bridge] entries in
+                guard let bridge = bridge else { return }
+                let json = Bridge.jsonify(entries)
+                bridge.push(channel: channel, json: json)
+            }
+            bridge.bonjourBrowseHandles[id] = Token { browser.stop() }
+            bridge.respond(requestId: requestId, value: id)
+        },
+        .syncBridge("bonjour.browse.stop", permission: "bonjour", denyValue: false) { b, body in
+            guard let id = body["id"] as? Int,
+                  let t  = b.bonjourBrowseHandles.removeValue(forKey: id) else { return false }
+            t.cancel()
             return true
         },
 
