@@ -30,6 +30,11 @@ struct HTTPResponse {
     var status: Int = 200
     var headers: [String: String] = [:]
     var body: String = ""
+    // Optional raw bytes. When non-nil, takes precedence over `body` and is
+    // written verbatim to the connection. Set by the bridge when the JS
+    // response dict carries `bodyEncoding: "base64"` — the daemon decodes
+    // the base64 string here so the wire write path stays bytes-only.
+    var bodyBytes: Data? = nil
 }
 
 final class HTTPServer {
@@ -166,7 +171,11 @@ final class HTTPServer {
     private func send(conn: NWConnection, response: HTTPResponse) {
         var head = "HTTP/1.1 \(response.status) \(HTTPServer.reasonPhrase(response.status))\r\n"
         var headers = response.headers
-        let bodyData = response.body.data(using: .utf8) ?? Data()
+        // Prefer raw bytes when the bridge handed us a pre-decoded base64 payload;
+        // otherwise UTF-8 encode the string body. Either way, the wire write is
+        // bytes-only — Content-Length reflects the actual byte count, not the
+        // encoded-string length.
+        let bodyData: Data = response.bodyBytes ?? (response.body.data(using: .utf8) ?? Data())
         headers["Content-Length"] = "\(bodyData.count)"
         headers["Connection"] = "close"
         for (k, v) in headers { head += "\(k): \(v)\r\n" }
