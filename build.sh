@@ -21,18 +21,10 @@ SWIFT_SOURCES=(
   Sources/CLI.swift
   Sources/StackTemplates.swift
   Sources/FileWatcher.swift
-  Sources/DataSources/Camera.swift
-  Sources/DataSources/CameraCapture.swift
   Sources/DataSources/Calendar.swift
-  Sources/DataSources/Mouse.swift
-  Sources/DataSources/Cursor.swift
-  Sources/DataSources/Hotkey.swift
-  Sources/DataSources/Events.swift
-  Sources/DataSources/EventsSynth.swift
 
   Sources/DataSources/Windows.swift
 
-  Sources/DataSources/Gesture.swift
   Sources/DataSources/Input.swift
   Sources/DataSources/Location.swift
   Sources/DataSources/Broadcasts.swift
@@ -43,7 +35,6 @@ SWIFT_SOURCES=(
 
   Sources/DataSources/Network.swift
   Sources/DataSources/Audio.swift
-  Sources/DataSources/Bluetooth.swift
   Sources/DataSources/Display.swift
   Sources/DataSources/Sensors.swift
 
@@ -51,7 +42,6 @@ SWIFT_SOURCES=(
   Sources/DataSources/Proc.swift
   Sources/DataSources/Apps.swift
   Sources/DataSources/AX.swift
-  Sources/DataSources/Disks.swift
   Sources/DataSources/Overlay.swift
   Sources/DataSources/HTTPServer.swift
   Sources/DataSources/Vision.swift
@@ -59,8 +49,7 @@ SWIFT_SOURCES=(
   Sources/DataSources/Spotlight.swift
   Sources/DataSources/Speech.swift
   Sources/DataSources/Notify.swift
-  Sources/DataSources/TouchDevice.swift
-  Sources/DataSources/USB.swift
+  Sources/DataSources/Devices.swift
 )
 
 C_SOURCES=(
