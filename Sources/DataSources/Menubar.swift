@@ -1,12 +1,16 @@
 import AppKit
+import ApplicationServices
 
-// Three menu-related subsystems folded into one domain file:
+// Four menu-related subsystems folded into one domain file:
 //
 //   - StatusItemHandle / Menubar  — NSStatusBar items (sd.menubar.addItem)
 //   - MenuBarVisibility          — system menu-bar suppress/restore via
 //                                  CGSSetMenuBarVisibility (sd.menubar.suppress)
 //   - PopupMenu                  — transient cursor-position context menu
 //                                  (sd.menu.popup)
+//   - MenubarItems               — read-only enumeration of every visible
+//                                  menu-bar status item (sd.menubar.items /
+//                                  sd.menubar.observe). Ice-style AX walk.
 //
 // They share the AppKit menu surface but otherwise have distinct APIs and
 // SPIs. Kept under one roof so stack authors thinking "I want menu stuff"
@@ -305,5 +309,228 @@ enum PopupMenu {
         @objc func picked(_ sender: NSMenuItem) {
             fire(sender.representedObject as? String)
         }
+    }
+}
+
+// MARK: - Menubar items (sd.menubar.items / sd.menubar.observe)
+
+// Read-only enumeration of every visible status item in the system menubar.
+// Walks the AX tree from the system-wide AXUIElement: each running app with
+// status items exposes them as AXMenuBarItem children of an AXMenuBar.
+// Ice (https://github.com/jordanbaird/Ice) proves this is doable without
+// private API; we use the same path.
+//
+// macOS 14+ quirks:
+//   - Apple's Control Center group (Wi-Fi / Bluetooth / AirDrop / Sound /
+//     Focus / Screen Mirroring / etc.) lives in a separate AXSystemUIServer
+//     process and is NOT enumerable via the standard menubar walk. We
+//     surface third-party menubar items + Apple's Spotlight + clock; the
+//     Control Center cluster is documented as a limitation rather than
+//     special-cased.
+//   - Items pushed past the system's chevron (notch-induced overflow on
+//     MacBook Pro 14"/16", or just too many items for the bar width) live
+//     off-screen at negative X or beyond the right edge. The hidden field
+//     surfaces this so a menubar-manager UI can show "hidden" items
+//     separately.
+//
+// Performance: the AX walk happens on every poll (2s default). NSRunning-
+// Application lookup is the slow part of the per-item cost (per-PID dict
+// walk inside AppKit); we cache resolved owner names by PID for the life
+// of the observer to keep each tick cheap.
+
+enum MenubarItems {
+    /// Pure helper: classify whether a status-item rect falls outside the
+    /// visible menubar. Items pushed past the system's chevron sit at
+    /// negative X or beyond the screen's right edge. Tested directly.
+    ///
+    /// `screenLeft` and `screenRight` are the visible menubar's left and
+    /// right X coordinates (screen frame in points, AX coordinate space).
+    /// `itemX` is the item's left edge, `itemWidth` its width.
+    static func isHidden(itemX: Double, itemWidth: Double, screenLeft: Double, screenRight: Double) -> Bool {
+        // Past the chevron: item is entirely left of the screen's leftmost
+        // pixel, or its left edge is past the right edge (no visible portion
+        // remains). The chevron itself is a status item that the system
+        // owns, so we don't have a precise "before the chevron" threshold —
+        // off-screen is the only signal that's reliable cross-version.
+        if itemX + itemWidth <= screenLeft { return true }
+        if itemX >= screenRight            { return true }
+        return false
+    }
+
+    /// Pure helper: resolve a PID to a human-readable owner name. Prefers
+    /// the bundle identifier (stable, app-suite-aware), falls back to the
+    /// localized process name, then to a "pid:NNNN" sentinel so callers
+    /// always get a non-empty string. The `cache` dict is read-then-written
+    /// to amortize NSRunningApplication's per-PID lookup across a poll cycle.
+    /// Tested directly with an injected resolver to keep the helper pure.
+    static func resolveOwner(pid: pid_t, cache: inout [pid_t: String],
+                             resolver: (pid_t) -> (bundleId: String?, name: String?)?) -> String {
+        if let hit = cache[pid] { return hit }
+        let resolved = resolver(pid)
+        let owner: String
+        if let bid = resolved?.bundleId, !bid.isEmpty {
+            owner = bid
+        } else if let name = resolved?.name, !name.isEmpty {
+            owner = name
+        } else {
+            owner = "pid:\(pid)"
+        }
+        cache[pid] = owner
+        return owner
+    }
+
+    /// One-shot snapshot of every menubar status item visible to the AX
+    /// tree. Returns one dict per item:
+    ///   { owner: String, title: String, x: Double, width: Double, hidden: Bool }
+    /// `owner` is the bundle identifier (or localized name) of the app that
+    /// owns the item. `title` is the displayed text (empty for icon-only
+    /// items — most apps). `x` is the absolute screen-X of the item's
+    /// left edge, `width` its width in points. `hidden` flags items
+    /// pushed past the system's chevron / off-screen.
+    ///
+    /// Requires Accessibility. Returns [] if not granted. macOS 14+
+    /// Control Center cluster is NOT included — that lives in a separate
+    /// AXSystemUIServer process not walkable from systemWide.
+    static func items() -> [[String: Any]] {
+        var cache: [pid_t: String] = [:]
+        return items(ownerCache: &cache)
+    }
+
+    /// Internal entry-point that accepts an external cache. The observer
+    /// keeps the cache alive across polls so NSRunningApplication lookups
+    /// don't repeat for the same PID every tick.
+    static func items(ownerCache: inout [pid_t: String]) -> [[String: Any]] {
+        let systemWide = AXUIElementCreateSystemWide()
+        AXUIElementSetMessagingTimeout(systemWide, 0.5)
+
+        var menuBarRef: AnyObject?
+        // kAXExtrasMenuBarAttribute carries the "status items" menubar
+        // (right-hand side: clock, Spotlight, Control Center entry,
+        // third-party icons). The vanilla kAXMenuBarAttribute on the
+        // system-wide element returns the active app's app-menubar
+        // (Apple/File/Edit/...) which is NOT what we want here.
+        let extrasErr = AXUIElementCopyAttributeValue(
+            systemWide, "AXExtrasMenuBar" as CFString, &menuBarRef
+        )
+        guard extrasErr == .success, let menuBar = menuBarRef else {
+            // Accessibility denied or the extras attribute isn't exposed
+            // (rare; older macOS). Empty array beats throwing — stacks see
+            // "no items" and can render the empty state.
+            return []
+        }
+        let menuBarEl = menuBar as! AXUIElement
+        AXUIElementSetMessagingTimeout(menuBarEl, 0.5)
+
+        var childrenRef: AnyObject?
+        guard AXUIElementCopyAttributeValue(menuBarEl, kAXChildrenAttribute as CFString, &childrenRef) == .success,
+              let children = childrenRef as? [AXUIElement] else {
+            return []
+        }
+
+        // Visible menubar bounds. Use the main screen's frame in AX
+        // coordinate space (top-left origin, same as AXPosition values).
+        // Items past the screen's left/right edges are flagged hidden.
+        let screen = NSScreen.main
+        let screenLeft  = Double(screen?.frame.minX ?? 0)
+        let screenRight = Double(screen?.frame.maxX ?? 1)
+
+        var out: [[String: Any]] = []
+        for child in children {
+            AXUIElementSetMessagingTimeout(child, 0.1)
+
+            // Owner: AXUIElementGetPid returns the PID of the app that
+            // created the status item (third-party app, SystemUIServer for
+            // Apple-owned items like Spotlight / clock).
+            var pid: pid_t = 0
+            guard AXUIElementGetPid(child, &pid) == .success else { continue }
+            let owner = resolveOwner(pid: pid, cache: &ownerCache) { p in
+                guard let app = NSRunningApplication(processIdentifier: p) else { return nil }
+                return (app.bundleIdentifier, app.localizedName)
+            }
+
+            let title = axStringAttr(child, kAXTitleAttribute as String) ?? ""
+            let position = axPointAttr(child, kAXPositionAttribute as String) ?? .zero
+            let size     = axSizeAttr(child,  kAXSizeAttribute     as String) ?? .zero
+            let x        = Double(position.x)
+            let width    = Double(size.width)
+            let hidden   = isHidden(itemX: x, itemWidth: width,
+                                    screenLeft: screenLeft, screenRight: screenRight)
+
+            out.append([
+                "owner":  owner,
+                "title":  title,
+                "x":      x,
+                "width":  width,
+                "hidden": hidden
+            ])
+        }
+        // Sort by x — gives JS consumers a left-to-right order that matches
+        // what the user sees in the menubar.
+        out.sort { (Double(($0["x"] as? Double) ?? 0)) < (Double(($1["x"] as? Double) ?? 0)) }
+        return out
+    }
+
+    // MARK: - AX attribute helpers (file-local)
+
+    private static func axStringAttr(_ el: AXUIElement, _ key: String) -> String? {
+        var ref: AnyObject?
+        guard AXUIElementCopyAttributeValue(el, key as CFString, &ref) == .success else { return nil }
+        return ref as? String
+    }
+
+    private static func axPointAttr(_ el: AXUIElement, _ key: String) -> CGPoint? {
+        var ref: AnyObject?
+        guard AXUIElementCopyAttributeValue(el, key as CFString, &ref) == .success,
+              let value = ref else { return nil }
+        let axVal = value as! AXValue
+        var point = CGPoint.zero
+        guard AXValueGetValue(axVal, .cgPoint, &point) else { return nil }
+        return point
+    }
+
+    private static func axSizeAttr(_ el: AXUIElement, _ key: String) -> CGSize? {
+        var ref: AnyObject?
+        guard AXUIElementCopyAttributeValue(el, key as CFString, &ref) == .success,
+              let value = ref else { return nil }
+        let axVal = value as! AXValue
+        var size = CGSize.zero
+        guard AXValueGetValue(axVal, .cgSize, &size) else { return nil }
+        return size
+    }
+}
+
+/// 2s poll for menubar items. AX has no push notification for status-item
+/// add/remove (the AXLayoutChanged / AXCreated events fire only for window-
+/// scoped trees), so we pull on a timer and let `startChannel`'s dedupe
+/// suppress unchanged ticks. Tunable per-stack via `sd.channel.setInterval`
+/// (`sd.menubar.observe.subscribe(fn, { interval: 10 })`); the native poll
+/// itself stays at 2s because other subscribers may want it.
+///
+/// Per the file-header notes: NSRunningApplication lookups are the slow
+/// part of each tick. Owner cache lives on the observer so successive polls
+/// don't repeat the per-PID walk for steady-state items (third-party
+/// menubar icons don't change PID across their app's lifetime).
+final class MenubarItemsObserver: RefCountedObserver {
+    static let shared = MenubarItemsObserver()
+    private override init() { super.init() }
+
+    /// Owner-name cache keyed by PID. Reset when an app quits (the PID
+    /// drops from the AX tree on its own; we don't proactively prune
+    /// because stale entries are harmless — they're overwritten the next
+    /// time the same PID is reused, which is rare).
+    fileprivate var ownerCache: [pid_t: String] = [:]
+
+    /// Snapshot used by Bridge.startMenubarItems. Calls items() with the
+    /// shared cache so repeated polls stay cheap.
+    func snapshot() -> [[String: Any]] {
+        MenubarItems.items(ownerCache: &ownerCache)
+    }
+
+    override func install() -> Token {
+        let t = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
+            self?.fire()
+        }
+        RunLoop.main.add(t, forMode: .common)
+        return Token { t.invalidate() }
     }
 }

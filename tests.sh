@@ -31,6 +31,7 @@ TEST_SOURCES=(
   Tests/SpotlightLiveTests.swift
   Tests/CameraStreamTests.swift
   Tests/SpeechSTTTests.swift
+  Tests/MenubarItemsTests.swift
   Tests/TemplateEngineTests.swift
   Tests/main.swift
 )

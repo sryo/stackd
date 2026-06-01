@@ -269,6 +269,7 @@ final class Bridge: NSObject, WKScriptMessageHandler {
             startWorkspace(includeApp: manifest.permissions.contains("app"),
                            includeWindows: manifest.permissions.contains("windows"))
         }
+        if manifest.permissions.contains("menubar") { startMenubarItems() }
         if let hks = manifest.hotkeys {
             for hk in hks {
                 let cb = hk.callback
@@ -1604,6 +1605,17 @@ final class Bridge: NSObject, WKScriptMessageHandler {
             return true
         },
 
+        // Read-only AX walk of every visible menubar status item. Used by
+        // menubar-manager stacks to enumerate what's in the bar — third-
+        // party app icons + Apple's Spotlight + clock. macOS 14+ Control
+        // Center cluster lives in a separate AXSystemUIServer process and
+        // is not enumerable from systemWide; documented as a limitation.
+        // Folded under the existing "menubar" permission (same gate as
+        // suppress/restore + the menubar.observe channel).
+        .sync("menubar.items", permission: "menubar", denyValue: [[String: Any]]()) { _ in
+            MenubarItems.items()
+        },
+
         // ── Dynamic hotkey bind/unbind from JS ───────────────────────────────
         // Static manifest hotkeys cover the common case; this lets palettes /
         // modal stacks register transient chords on demand (Palette verb mode,
@@ -2049,6 +2061,7 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         ("display",     "displays"),
         ("media",       "media"),
         ("calendar",    "calendarChanged"),
+        ("menubar",     "menubarItems"),
         ("pasteboard",  "pasteboard"),
         ("apps",        "apps"),
         ("spaces",      "spaces"),
@@ -2247,6 +2260,19 @@ final class Bridge: NSObject, WKScriptMessageHandler {
             // suppresses a real store change. JS doesn't read the value —
             // the channel is treated as a bell, not a snapshot.
             ["ts": Date().timeIntervalSince1970]
+        }
+    }
+
+    // sd.menubar.observe — AX-walk the menubar every 2s, diff against the
+    // last push, fire on change. AX has no reliable push notification for
+    // status-item add/remove, so this is poll-and-diff via startChannel's
+    // built-in lastState dedupe. Cadence is tunable per-stack via
+    // sd.channel.setInterval. The MenubarItemsObserver keeps a per-PID
+    // owner-name cache alive across polls so the NSRunningApplication
+    // lookup (the slow part) doesn't repeat for steady-state items.
+    private func startMenubarItems() {
+        startChannel(name: "menubarItems", observer: MenubarItemsObserver.shared) {
+            MenubarItemsObserver.shared.snapshot()
         }
     }
 

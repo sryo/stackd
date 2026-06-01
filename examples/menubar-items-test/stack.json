@@ -1,0 +1,7 @@
+{
+  "id": "menubar-items-test",
+  "name": "Menubar items — read every visible status item",
+  "anchor": { "edge": "top-right", "inset": [16, 60] },
+  "size": { "w": 380, "h": 420 },
+  "permissions": ["menubar"]
+}

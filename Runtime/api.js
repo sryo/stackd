@@ -424,6 +424,28 @@ export const sd = {
     suppress() { return request({ type: "menubar.suppress" }); },
     restore()  { return request({ type: "menubar.restore"  }); },
 
+    // Read-only AX walk of every visible menubar status item — third-party
+    // app icons + Apple's Spotlight + clock. Returns an array of
+    //   { owner, title, x, width, hidden }
+    // sorted left-to-right by x. `owner` is the bundle identifier (or
+    // localized name) of the app that owns the item. `hidden` flags items
+    // pushed past the system's chevron / off-screen (notch overflow on
+    // MacBook Pro 14"/16", or too many items for the bar width).
+    //
+    // Requires the "menubar" permission (same gate as suppress/restore +
+    // observe). macOS 14+ Control Center group (Wi-Fi / Bluetooth / Focus
+    // / etc.) lives in a separate AXSystemUIServer process and is NOT
+    // included — documented limitation, not a bug.
+    items() { return request({ type: "menubar.items" }); },
+
+    // Subscribable signal that fires whenever the menubar item set changes
+    // (item added / removed / repositioned). Backed by a 2s poll-and-diff
+    // — AX has no reliable push for status-item add/remove. Payload is the
+    // same shape as items(). Tunable cadence per-stack:
+    //   sd.menubar.observe.subscribe(items => render(items), { interval: 5 });
+    // Same "menubar" permission gate as items() / suppress / restore.
+    observe: channel("menubarItems"),
+
     // Add an NSStatusItem to the system menu bar. Requires "menubar.item"
     // permission (distinct from "menubar", which gates suppress/restore).
     //

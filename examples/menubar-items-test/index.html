@@ -1,0 +1,74 @@
+<!doctype html>
+<html><head><meta charset="utf-8">
+<style>
+  body { font: 12px -apple-system, sans-serif; color: #ddd; background: rgba(0,0,0,0.72);
+         margin: 0; padding: 12px; border-radius: 10px; }
+  h1   { font-size: 11px; margin: 0 0 6px; opacity: 0.6; text-transform: uppercase; letter-spacing: 0.06em; }
+  .meta { font-size: 10px; opacity: 0.5; margin-bottom: 8px; }
+  ul   { margin: 0; padding: 0; list-style: none; }
+  li   { padding: 4px 0; border-bottom: 1px solid rgba(255,255,255,0.06);
+         display: grid; grid-template-columns: 1fr auto auto; gap: 8px; align-items: baseline; }
+  .owner { font-weight: 600; }
+  .title { opacity: 0.75; }
+  .x     { font-variant-numeric: tabular-nums; opacity: 0.55; font-size: 10px; }
+  .hidden { opacity: 0.4; font-style: italic; }
+  .empty { opacity: 0.4; font-style: italic; padding: 4px 0; }
+  .badge { display: inline-block; font-size: 9px; padding: 1px 5px; border-radius: 3px;
+           background: rgba(255,255,255,0.1); margin-left: 4px; }
+</style>
+</head><body>
+<h1>Menubar items</h1>
+<div class="meta" id="meta">Loading…</div>
+<ul id="items"></ul>
+
+<script type="module">
+  import { sd } from "sd://runtime/api.js";
+
+  const itemsEl = document.getElementById("items");
+  const metaEl  = document.getElementById("meta");
+
+  function render(items) {
+    if (!items || items.length === 0) {
+      itemsEl.innerHTML = `<li class="empty">No items reachable (Accessibility?)</li>`;
+      metaEl.textContent = "0 items";
+      return;
+    }
+    const visible = items.filter(i => !i.hidden).length;
+    const hidden  = items.length - visible;
+    metaEl.textContent = `${items.length} total — ${visible} visible, ${hidden} hidden`;
+
+    itemsEl.innerHTML = "";
+    for (const item of items) {
+      const li = document.createElement("li");
+      if (item.hidden) li.classList.add("hidden");
+
+      const owner = document.createElement("span");
+      owner.className = "owner";
+      // Trim "com.apple." for brevity in the demo display.
+      owner.textContent = (item.owner || "?").replace(/^com\.apple\./, "");
+      if (item.hidden) {
+        const badge = document.createElement("span");
+        badge.className = "badge";
+        badge.textContent = "hidden";
+        owner.appendChild(badge);
+      }
+
+      const title = document.createElement("span");
+      title.className = "title";
+      title.textContent = item.title || "—";
+
+      const x = document.createElement("span");
+      x.className = "x";
+      x.textContent = `x=${Math.round(item.x)}`;
+
+      li.append(owner, title, x);
+      itemsEl.appendChild(li);
+    }
+  }
+
+  // The signal primes immediately on subscribe with the current snapshot,
+  // then re-fires whenever the menubar item set changes (2s poll-and-diff
+  // on the daemon side — change `interval` to throttle this stack further).
+  sd.menubar.observe.subscribe(render);
+</script>
+</body></html>
