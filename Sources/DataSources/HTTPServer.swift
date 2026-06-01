@@ -1,9 +1,9 @@
 import Foundation
 import Network
 
-// Long-running HTTP server via Network.framework. NWListener handles TCP +
-// TLS for free; HTTP/1.1 parsing lives in this file because the surface we
-// need (request line, headers, body up to Content-Length) is ~80 lines and
+// Long-running HTTP server via Network.framework. NWListener handles TCP for
+// free; HTTP/1.1 parsing lives in this file because the surface we need
+// (request line, headers, body up to Content-Length) is ~50 lines and
 // vendoring a third-party server would dwarf the daemon's only-system-deps
 // posture.
 //
@@ -12,32 +12,11 @@ import Network
 // advertisement is optional and follows the same shape as the rest of the
 // daemon's network-discovery code (NWListener.service).
 //
-// Static assets ride on assetsDir; routes are matched first, then a path
-// inside assetsDir is served verbatim. No directory traversal — paths are
-// resolved against assetsDir and rejected if the resolved file falls outside.
-
-enum HTTPServerStore {
-    private static var lock = NSLock()
-    private static var servers: [Int: HTTPServer] = [:]
-    private static var nextId: Int = 1
-
-    static func register(_ server: HTTPServer) -> Int {
-        lock.lock(); defer { lock.unlock() }
-        let id = nextId; nextId += 1
-        servers[id] = server
-        return id
-    }
-
-    static func unregister(_ id: Int) -> HTTPServer? {
-        lock.lock(); defer { lock.unlock() }
-        return servers.removeValue(forKey: id)
-    }
-
-    static func get(_ id: Int) -> HTTPServer? {
-        lock.lock(); defer { lock.unlock() }
-        return servers[id]
-    }
-}
+// Matches hs.httpserver's minimal shape: a single callback handles every
+// request and returns a full response. No CORS layer, no route-pattern
+// matching, no MIME guessing, no static-asset directory — stacks compose
+// those behaviors in JS (string comparison on req.path, explicit response
+// headers including Content-Type).
 
 struct HTTPRequest {
     let method: String
@@ -56,23 +35,17 @@ struct HTTPResponse {
 final class HTTPServer {
     let port: UInt16
     let bindHost: String
-    private let assetsDir: String?
-    private let routes: [(method: String, path: String)]
     private let onRequest: (HTTPRequest, @escaping (HTTPResponse) -> Void) -> Void
     private var listener: NWListener?
     private let queue = DispatchQueue(label: "stackd.httpserver")
 
     init(port: UInt16,
          bindHost: String,
-         assetsDir: String?,
-         routes: [(String, String)],
          bonjourType: String?,
          bonjourName: String?,
          onRequest: @escaping (HTTPRequest, @escaping (HTTPResponse) -> Void) -> Void) throws {
         self.port = port
         self.bindHost = bindHost
-        self.assetsDir = assetsDir
-        self.routes = routes
         self.onRequest = onRequest
 
         let params = NWParameters.tcp
@@ -126,21 +99,20 @@ final class HTTPServer {
         return false
     }
 
-    // Naive incremental read until either the request line + headers + body
-    // are complete, or 1 MiB cap is hit. Keep-alive is not implemented —
-    // every connection serves one request and closes.
+    // Naive incremental read until the request line + headers + body
+    // are complete. Keep-alive is not implemented — every connection
+    // serves one request and closes.
     private func receive(connection conn: NWConnection, buffer: Data) {
         conn.receive(minimumIncompleteLength: 1, maximumLength: 65_536) { [weak self] data, _, isComplete, error in
             guard let self = self else { return }
-            if let error = error {
-                _ = error; conn.cancel(); return
-            }
+            if error != nil { conn.cancel(); return }
             var buf = buffer
             if let data = data { buf.append(data) }
-            if buf.count > 1_048_576 { self.send(conn: conn, response: HTTPResponse(status: 413)); return }
 
             if let req = self.tryParse(buf) {
-                self.dispatch(connection: conn, request: req)
+                self.onRequest(req) { [weak self] response in
+                    self?.send(conn: conn, response: response)
+                }
             } else if isComplete {
                 conn.cancel()
             } else {
@@ -191,48 +163,9 @@ final class HTTPServer {
         return (path, dict)
     }
 
-    private func dispatch(connection conn: NWConnection, request req: HTTPRequest) {
-        // Routes win first; on miss, fall through to assetsDir; on miss there,
-        // 404. Method+path exact match (no patterns yet — callers can branch
-        // on req.path inside their handler if they want prefix matching).
-        let match = routes.first(where: { r in
-            (r.method == "*" || r.method == req.method) && r.path == req.path
-        })
-        if match != nil {
-            onRequest(req) { [weak self] response in
-                self?.send(conn: conn, response: response)
-            }
-            return
-        }
-        if let dir = assetsDir, let asset = resolveAsset(dir: dir, path: req.path) {
-            send(conn: conn, response: asset)
-            return
-        }
-        send(conn: conn, response: HTTPResponse(status: 404, headers: [:], body: "not found"))
-    }
-
-    private func resolveAsset(dir: String, path: String) -> HTTPResponse? {
-        let expanded = (dir as NSString).expandingTildeInPath
-        let rel = path == "/" ? "index.html" : String(path.drop(while: { $0 == "/" }))
-        let candidate = URL(fileURLWithPath: expanded).appendingPathComponent(rel).standardized
-        let root = URL(fileURLWithPath: expanded).standardized
-        guard candidate.path.hasPrefix(root.path) else { return nil }
-        guard let data = try? Data(contentsOf: candidate),
-              let body = String(data: data, encoding: .utf8) ?? String(data: Data([0]), encoding: .utf8) else {
-            return nil
-        }
-        _ = body
-        let mime = HTTPServer.mimeType(for: candidate.pathExtension)
-        var headers = ["Content-Type": mime, "Content-Length": "\(data.count)"]
-        // Allow JS-side fetch from anywhere on the LAN we already chose to listen on.
-        headers["Access-Control-Allow-Origin"] = "*"
-        return HTTPResponse(status: 200, headers: headers, body: String(data: data, encoding: .utf8) ?? "")
-    }
-
     private func send(conn: NWConnection, response: HTTPResponse) {
         var head = "HTTP/1.1 \(response.status) \(HTTPServer.reasonPhrase(response.status))\r\n"
         var headers = response.headers
-        if headers["Content-Type"] == nil { headers["Content-Type"] = "text/plain; charset=utf-8" }
         let bodyData = response.body.data(using: .utf8) ?? Data()
         headers["Content-Length"] = "\(bodyData.count)"
         headers["Connection"] = "close"
@@ -253,25 +186,8 @@ final class HTTPServer {
         case 401: return "Unauthorized"
         case 403: return "Forbidden"
         case 404: return "Not Found"
-        case 413: return "Payload Too Large"
         case 500: return "Internal Server Error"
         default:  return "OK"
-        }
-    }
-
-    static func mimeType(for ext: String) -> String {
-        switch ext.lowercased() {
-        case "html", "htm":  return "text/html; charset=utf-8"
-        case "js", "mjs":    return "text/javascript; charset=utf-8"
-        case "css":          return "text/css; charset=utf-8"
-        case "json":         return "application/json; charset=utf-8"
-        case "svg":          return "image/svg+xml"
-        case "png":          return "image/png"
-        case "jpg", "jpeg":  return "image/jpeg"
-        case "gif":          return "image/gif"
-        case "woff2":        return "font/woff2"
-        case "txt":          return "text/plain; charset=utf-8"
-        default:             return "application/octet-stream"
         }
     }
 }

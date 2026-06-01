@@ -1,7 +1,7 @@
 // sd://runtime/api.js
 // The `sd.*` namespace exposed to every stack.
 
-function signal(initial) {
+function signal(initial, name) {
   let value = initial;
   const subs = new Set();
   return {
@@ -11,9 +11,25 @@ function signal(initial) {
       value = next;
       for (const s of subs) s(value);
     },
-    subscribe(fn) {
+    // subscribe(fn) — fire `fn` on every channel value change (default).
+    // subscribe(fn, { interval: 5 }) — additionally ask native to throttle
+    //   its push for this stack on this channel to one every 5 seconds.
+    //   Backed by the `channel.setInterval` IPC; only honored by
+    //   poll-driven channels (sensors / host.load / display.all). Event-
+    //   driven channels (mouse, frontApp, audio…) ignore the interval but
+    //   the JS-side subscribe still works.
+    //
+    // The interval is per-stack (not per-callback) because the IPC sets a
+    // single cadence on the bridge's channel push. If a stack subscribes
+    // twice on the same channel with different intervals, the last call
+    // wins. Stacks that need divergent cadences should multiplex from a
+    // single subscriber.
+    subscribe(fn, opts) {
       subs.add(fn);
       fn(value);
+      if (opts && typeof opts.interval === "number" && name) {
+        request({ type: "channel.setInterval", name, interval: opts.interval });
+      }
       return () => subs.delete(fn);
     },
     peek() { return value; },
@@ -22,7 +38,7 @@ function signal(initial) {
 
 const channels = Object.create(null);
 function channel(name, initial = null) {
-  if (!channels[name]) channels[name] = signal(initial);
+  if (!channels[name]) channels[name] = signal(initial, name);
   return channels[name];
 }
 
@@ -72,35 +88,23 @@ window.__sd_broadcast_fire = (id, payload) => {
   const fn = broadcastHandlers.get(id);
   if (fn) fn(payload);
 };
-// sd.overlay draw callbacks routed by mint id. Native calls
-// __sd_overlay_draw(id, geometry) on every vsync tick and expects a
-// declarative spec back ({ rects, lines, circles, clear? }). Returning
-// null skips the draw for that tick (cheaper than returning {} with
-// clear:true). Native JSON-stringifies the return value to bridge it
-// back to Swift — keep specs JSON-serializable.
-const overlayHandlers = new Map();
-window.__sd_overlay_draw = (id, geometry) => {
-  const fn = overlayHandlers.get(id);
-  return fn ? fn(geometry) : null;
-};
-// HTTP servers: serverId → { routes: { "POST /events": fn }, ... }.
-// Native fires window.__sd_http_request(serverId, reqId, req) on every match.
-// JS resolves with sd.httpserver.respond(reqId, response).
+// sd.overlay no longer round-trips JS draw callbacks. The daemon hosts a
+// per-overlay WKWebView and pushes `window.sd.target = {x,y,w,h}` into it
+// each vsync; the overlay's own HTML/CSS/JS handles rendering. attach()
+// mints an id and returns a thin handle whose `.detach()` closes the panel.
+// HTTP servers: serverId → callback(req). One callback per server; the
+// stack handles route dispatch, CORS, Content-Type, and static-asset
+// lookup itself. Native fires window.__sd_http_request(serverId, reqId, req)
+// on every request; JS resolves with sd.httpserver.respond(reqId, response).
 const httpServers = new Map();
 window.__sd_http_request = async (serverId, reqId, req) => {
-  const server = httpServers.get(serverId);
-  if (!server) {
+  const callback = httpServers.get(serverId);
+  if (!callback) {
     await request({ type: "httpserver.respond", reqId, status: 503, headers: {}, body: "no server" });
     return;
   }
-  const key = `${req.method} ${req.path}`;
-  const handler = server.routes[key] || server.routes[`* ${req.path}`];
-  if (!handler) {
-    await request({ type: "httpserver.respond", reqId, status: 404, headers: {}, body: "no route" });
-    return;
-  }
   let resp;
-  try { resp = await handler(req); }
+  try { resp = await callback(req); }
   catch (e) { resp = { status: 500, body: String(e) }; }
   resp = resp || {};
   await request({
@@ -125,15 +129,15 @@ function request(payload) {
 }
 
 // Handler-registry helper for the native-mints-an-id pattern shared by
-// sd.hotkey.bind, sd.broadcasts.observe, sd.overlay.attach, and the bind
-// portion of sd.menubar.addItem / sd.httpserver.serve. Native returns the
-// id from `request(bindPayload)`; we stash `callback` under it so the
-// matching `__sd_<name>_fire` dispatcher can route by id. Returns null on
-// failure so callers can early-out without registering a stale entry.
+// sd.hotkey.bind, sd.broadcasts.observe, sd.httpserver.serve, and the bind
+// portion of sd.menubar.addItem. Native returns the id from
+// `request(bindPayload)`; we stash `callback` under it so the matching
+// `__sd_<name>_fire` dispatcher can route by id. Returns null on failure so
+// callers can early-out without registering a stale entry.
 //
 // Not used by sd.fs.watch (JS mints the watchId before the request) or by
-// the menubar/httpserver handlers (which store structured callback shapes —
-// see those sites for inline registration).
+// the menubar handler (which stores a structured callback shape — see
+// that site for inline registration).
 async function registerHandler(map, bindPayload, callback) {
   const id = await request(bindPayload);
   if (id == null || id === false) return null;
@@ -159,10 +163,27 @@ export const sd = {
     warp(x, y) { return request({ type: "mouse.warp", x, y }); }
   }),
   appearance: channel("appearance"),
-  app:        { frontmost: channel("frontApp") },
+  app:        {
+    frontmost: channel("frontApp"),
+    // Fires when the frontmost app changes (F15 split of the legacy
+    // sd.windows.focused union). Payload matches sd.app.frontmost — same
+    // { app, pid, bundleId, ... } dict shape. Permission: "app".
+    activated: channel("appActivated")
+  },
   windows:    {
     focused: channel("focusedWindow"),
     all:     channel("windowsAll"),
+    // F15 split — granular per-event-type channels alongside the legacy
+    // union `focused` channel. Each fires the moment AX reports the matching
+    // notification, so stacks can subscribe to exactly what they need.
+    //   sd.windows.focusedChanged — focused window of frontmost app changed
+    //     (same payload as sd.windows.focused: { id, app, pid, title, frame })
+    //   sd.windows.titleChanged — title of the focused window changed
+    //     (small payload: { id, app, title, pid } — no frame to keep it cheap)
+    // sd.windows.focused still fires as the union of both for back-compat.
+    // Permission: "windows" (same as the union channel).
+    focusedChanged: channel("focusedChanged"),
+    titleChanged:   channel("titleChanged"),
     // Actions with no id operate on the AX focused window of the frontmost app.
     // Pass an id (CGWindowID from sd.windows.all / sd.windows.focused) to
     // target a specific window via the _AXUIElementGetWindow SPI.
@@ -193,11 +214,16 @@ export const sd = {
     focus(id)  { return request({ type: "windows.byId.focus", id }); },
     close(id)  { return request({ type: "windows.byId.close", id }); },
     frame(id)  { return request({ type: "windows.byId.frame", id }); },
-    // Per-window corner radius (pt). 26 for windows with a toolbar (Finder,
-    // Safari, …), 16 for plain titled windows (Terminal, …), 0 for system
-    // dialogs / borderless. Overlay-style stacks pass this into their draw
-    // spec so the border hugs the real window shape on Tahoe.
-    cornerRadius(id) { return request({ type: "windows.byId.cornerRadius", id }); },
+    // Raw AX hints for picking a corner radius in stack code. Returns
+    //   { toolbarPresent: bool, role: string|null, subrole: string|null }
+    // Stacks compose their own 26/16/0 mapping — e.g. an outline stack writes
+    //   const h = await sd.windows.cornerHints(id);
+    //   const r = h.subrole === "AXSystemDialog" || h.role === "AXScrollArea"
+    //             ? 0 : h.toolbarPresent ? 26 : 16;
+    // matching Tahoe's WindowServer rounding. Older `sd.windows.cornerRadius`
+    // was a daemon-side heuristic — removed in R1b per the "push to stacks"
+    // rule (F3).
+    cornerHints(id) { return request({ type: "windows.byId.cornerHints", id }); },
     // Synchronous SPI snapshot via CGSHWCaptureWindowList. Works for
     // hidden / minimized / off-space windows (the AltTab trick) — distinct
     // from sd.display.snapshot which uses ScreenCaptureKit and gates on
@@ -209,7 +235,9 @@ export const sd = {
       const o = opts || {};
       return request({
         type: "windows.byId.snapshot",
-        id, format: o.format || "png", quality: o.quality
+        id,
+        format:  o.format  || "png",
+        quality: o.quality ?? 0.85   // canonical default lives here, not in Swift
       });
     },
     // Atomic multi-window transaction. setFrame calls with an explicit id
@@ -256,6 +284,11 @@ export const sd = {
     setMuted(m)  { return request({ type: "audio.setMuted",  value: !!m }); }
   },
   display: {
+    // Per-display info + brightness. Re-fires on screen arrangement changes
+    // (NSApplication.didChangeScreenParameters) and every 2s as a brightness
+    // poll. Tunable cadence — pass `{ interval }` (seconds) to slow this
+    // stack's fanout (event-driven re-fires still arrive):
+    //   sd.display.all.subscribe(d => updateUI(d), { interval: 10 });
     all:        channel("displays"),
     setBrightness(displayID, value) {
       return request({ type: "display.setBrightness", displayID, value });
@@ -384,9 +417,13 @@ export const sd = {
   // every call (NSAppleScript runs in-process). Use for: scripting other apps
   // via Apple Events, querying System Events for window/UI info, anything
   // `tell application X to ...` shaped.
-  //   const r = await sd.applescript.run(`return 1 + 1`);
+  //   const r = await sd.applescript.run(`return 1 + 1`);            // r.result === 2
   //   const r = await sd.applescript.run(`return Math.PI`, { language: "javascript" });
-  // Returns: { ok: boolean, result: string, error?: string }.
+  //   const r = await sd.applescript.run(`return {1, 2, "three"}`);  // r.result === [1, 2, "three"]
+  // Returns: { ok: boolean, result: any, error?: string }.
+  // `result` preserves the script's return type — numbers stay numbers, lists
+  // become arrays, records become objects, strings stay strings, booleans stay
+  // booleans. Void returns are "" so a no-`return` script lands on a string.
   applescript: {
     run(source, opts) {
       return request({
@@ -517,9 +554,14 @@ export const sd = {
     //   { excludeApps: ["com.apple.Terminal"] }   // blacklist: suppress while listed bundleID is frontmost
     // apps + excludeApps compose (both must pass). Returns null if the spec doesn't parse. Per-stack: unload cancels all.
     bind(spec, fn, opts = {}) {
+      // skhd composite-modifier aliases — expanded in JS so the daemon only
+      // ever sees literal modifier names (cmd / ctrl / alt / shift / fn).
+      // Whole-token match, case-insensitive, run before IPC.
+      const expanded = String(spec).replace(/\bhyper\b/gi, "cmd+alt+ctrl+shift")
+                                   .replace(/\bmeh\b/gi,   "alt+ctrl+shift");
       return registerHandler(hotkeyHandlers, {
         type: "hotkey.bind",
-        spec,
+        spec: expanded,
         mode:        opts.mode        ?? null,
         apps:        opts.apps        ?? null,
         excludeApps: opts.excludeApps ?? null
@@ -557,72 +599,69 @@ export const sd = {
       return unregisterHandler(broadcastHandlers, id, { type: "broadcasts.unobserve", id });
     }
   },
-  // CG-context overlay pinned to a target window the stack doesn't own
-  // (JankyBorders pattern). Lets you render focused-window accent borders,
-  // debug highlights, or pixel-accurate annotations without spawning an
-  // NSWindow per overlay.
+  // WebKit overlay pinned to a target window the stack doesn't own. The
+  // daemon hosts a borderless click-through NSPanel + WKWebView whose
+  // frame tracks SLSGetWindowBounds(targetId) every vsync; inside that
+  // WebView, the stack-supplied {html, css, js} renders normally. The
+  // daemon pushes `window.sd.target = {x, y, w, h}` into the overlay's
+  // WebView each tick (and fires a `sd:target` CustomEvent) so spec
+  // authors can position their elements off the current target geometry.
   //
-  //   const h = await sd.overlay.attach(windowId, (geo) => ({
-  //     rects: [{ x: 0, y: 0, w: geo.window.w, h: geo.window.h,
-  //               stroke: "#7c8cff", strokeWidth: 2, radius: 8 }]
-  //   }));
+  //   const h = await sd.overlay.attach(targetId, {
+  //     html: `<div class="border"></div>`,
+  //     css:  `.border { position: absolute; inset: 1px;
+  //                      border: 2px solid #7c8cff; border-radius: 16px;
+  //                      pointer-events: none; }`,
+  //     js:   `/* optional — runs inside the overlay's WebView */`
+  //   });
   //   ...later...
   //   await h.detach();
   //
-  // The draw callback runs every vsync (sd.displayLink rate — 60 or 120Hz
-  // on ProMotion). Keep it short: a single declarative spec dict beats N
-  // CGContext calls across the JS↔Swift boundary.
-  //
-  // Spec shape (v1):
-  //   { clear?: true,
-  //     rects:   [{ x, y, w, h, fill?, stroke?, strokeWidth?, radius? }],
-  //     lines:   [{ x1, y1, x2, y2, stroke, width? }],
-  //     circles: [{ cx, cy, r, fill?, stroke?, strokeWidth? }] }
-  //
-  // Colors are "#RGB" / "#RRGGBB" / "#RRGGBBAA". Coordinates use a
-  // top-left origin where (0,0) is the top-left of the TARGET window — the
-  // surrounding padding band stackd allocates for spill-over strokes is
-  // invisible to spec authors. Permission: "overlay".
+  // Inside the overlay's WebView, `window.sd.target = {x:0, y:0, w, h}`
+  // is updated each vsync (x/y are relative to the panel's own origin —
+  // always 0,0). Permission: "overlay".
   overlay: {
-    async attach(windowId, draw) {
-      const id = await registerHandler(overlayHandlers, { type: "overlay.attach", windowId }, draw);
-      if (id == null) return null;
+    async attach(targetId, spec) {
+      const s = spec || {};
+      const handleId = await request({
+        type: "overlay.attach",
+        targetId,
+        html: s.html != null ? String(s.html) : "",
+        css:  s.css  != null ? String(s.css)  : "",
+        js:   s.js   != null ? String(s.js)   : ""
+      });
+      if (handleId == null) return null;
       return {
-        id,
-        update() { return request({ type: "overlay.update", id }); },
-        detach()  { return unregisterHandler(overlayHandlers, id, { type: "overlay.detach", id }); }
+        id: handleId,
+        detach() { return request({ type: "overlay.detach", id: handleId }); }
       };
     }
   },
   // Long-running HTTP server. Loopback-only by default; pass
-  // bindHost: "0.0.0.0" to expose on the LAN. Routes are method+path keys
-  // pointing to async handlers that return { status?, headers?, body? }.
-  // Static assets ride on assetsDir (relative paths under it served as-is).
-  //   const srv = await sd.httpserver.serve({
-  //     port: 7373,
-  //     routes: {
-  //       "GET /hello":  async (req) => ({ body: "hello" }),
-  //       "POST /event": async (req) => { handle(req.body); return { status: 204 }; }
-  //     },
-  //     assetsDir: "~/stackd/stacks/cloudpad/public",  // optional
-  //     bonjour: { type: "_http._tcp.", name: "cloudpad" } // optional
+  // bindHost: "0.0.0.0" to expose on the LAN. A single callback receives every
+  // request and returns { status?, headers?, body? }. The stack owns route
+  // dispatch (string compare on req.path), CORS headers, Content-Type, and
+  // static-asset lookup — the daemon is just listener + parser + writer.
+  //   const srv = await sd.httpserver.serve({ port: 7373 }, async (req) => {
+  //     if (req.path === "/hello") {
+  //       return { status: 200, headers: { "Content-Type": "text/plain" }, body: "hello" };
+  //     }
+  //     return { status: 404, body: "not found" };
   //   });
   //   ...later...
   //   await srv.stop();
   // Consumers: CloudPad (serves snapshot + bang surface to phones on the LAN);
   // any webhook receiver or local API dashboard stack.
   httpserver: {
-    async serve(opts) {
+    async serve(opts, callback) {
       const o = opts || {};
-      const routes = o.routes || {};
+      if (typeof callback !== "function") return null;
       const id = await registerHandler(httpServers, {
         type: "httpserver.serve",
         port: o.port || 0,
         bindHost: o.bindHost || "127.0.0.1",
-        assetsDir: o.assetsDir,
-        routes: Object.keys(routes),
         bonjour: o.bonjour
-      }, { routes });
+      }, callback);
       if (id == null) return null;
       return {
         id,
@@ -684,8 +723,8 @@ export const sd = {
   caffeinate: channel("caffeinate"),
   // Vsync-locked frame tick. Refresh rate matches the display (60 Hz on
   // standard, 120 Hz on ProMotion). Cheaper + smoother than rAF inside a
-  // heavy WebView, and aligned to the compositor's flip cadence — required
-  // by sd.overlay's CG context flushes.
+  // heavy WebView, and aligned to the compositor's flip cadence —
+  // sd.overlay uses the same observer to reposition the overlay panel.
   //   sd.displayLink.subscribe(({ timestamp, frame, refreshRate }) => { ... })
   displayLink: channel("displayLink"),
   // System info (one-shot) + load signal (polled 2s):
@@ -702,6 +741,9 @@ export const sd = {
   // moves the mouse or types. gpu / swap / memoryPressure may be absent on
   // hardware where the underlying sysctl or IOAccelerator query fails — treat
   // each as optional in stack code.
+  // Tunable cadence — pass `{ interval }` (seconds) to slow this stack's
+  // fanout for the channel:
+  //   sd.host.load.subscribe(load => render(load), { interval: 10 });
   host: {
     info() { return request({ type: "host.info" }); },
     load:  channel("hostLoad")
@@ -710,6 +752,9 @@ export const sd = {
   // per-rail voltage/current, fan RPM). Polled at 2s. Intel SMC sensors deferred.
   //   sd.sensors → { temperatures: [{name,value,unit}, ...], voltages: [...],
   //                  currents: [...], fans: [{name, rpm}, ...] }
+  // Tunable cadence — pass `{ interval }` (seconds) to slow this stack's
+  // fanout:
+  //   sd.sensors.subscribe(s => updateTempUI(s), { interval: 5 });
   sensors: channel("sensors"),
   // Raw per-finger trackpad frames via MultitouchSupport (private framework).
   // ~30 Hz coalesced from the underlying ~80 Hz callback. Frames arrive
@@ -911,12 +956,15 @@ export const sd = {
     // VNDetectHumanBodyPoseRequest. Returns
     //   { bodies: [{ joints: { nose, leftEye, rightShoulder, ... :
     //                         { x, y, confidence } }, confidence }] }
-    // Joint positions are normalized 0..1, top-left origin. Joints with
-    // confidence < 0.1 are dropped to avoid noise. Multiple bodies per
-    // frame. Each named joint: nose, leftEye, rightEye, leftEar, rightEar,
-    // leftShoulder, rightShoulder, neck, leftElbow, rightElbow, leftWrist,
-    // rightWrist, leftHip, rightHip, root, leftKnee, rightKnee, leftAnkle,
-    // rightAnkle.
+    // Joint positions are normalized 0..1, top-left origin. Every joint
+    // Vision reports is included — including low-confidence ones — so
+    // stacks pick their own threshold:
+    //   const usable = Object.fromEntries(
+    //     Object.entries(body.joints).filter(([_, j]) => j.confidence >= 0.1));
+    // Multiple bodies per frame. Each named joint: nose, leftEye, rightEye,
+    // leftEar, rightEar, leftShoulder, rightShoulder, neck, leftElbow,
+    // rightElbow, leftWrist, rightWrist, leftHip, rightHip, root, leftKnee,
+    // rightKnee, leftAnkle, rightAnkle.
     bodyPose(opts) {
       const o = opts || {};
       return request({ type: "vision.bodyPose", image: o.image });
@@ -1106,7 +1154,10 @@ const __sdSignalPaths = {
   "mouse":              sd.mouse,
   "appearance":         sd.appearance,
   "app.frontmost":      sd.app.frontmost,
+  "app.activated":      sd.app.activated,
   "windows.focused":    sd.windows.focused,
+  "windows.focusedChanged": sd.windows.focusedChanged,
+  "windows.titleChanged":   sd.windows.titleChanged,
   "windows.all":        sd.windows.all,
   "input.layout":       sd.input.layout,
   "net.wifi":           sd.net.wifi,

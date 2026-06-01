@@ -160,9 +160,14 @@ enum Host {
     }
 }
 
-/// 2s poll for CPU + idle + memory. The CPU fractions are computed by diffing
-/// the previous tick, so the first fire returns nil (Bridge skips the push)
-/// and the second fire — 2s later — pushes the first real value.
+/// 2s base poll for CPU + idle + memory. The CPU fractions are computed by
+/// diffing the previous tick, so the first fire returns nil (Bridge skips the
+/// push) and the second fire — 2s later — pushes the first real value.
+/// Per-stack fanout can be slowed further via
+/// `sd.host.load.subscribe(fn, { interval })`: the bridge gates the JSON +
+/// evaluateJavaScript hop per stack (see Bridge.channelIntervals); the
+/// native poll itself stays at 2s because the CPU diff depends on a steady
+/// sampling baseline regardless of how often any one stack listens.
 final class HostObserver: RefCountedObserver {
     static let shared = HostObserver()
     private override init() { super.init() }

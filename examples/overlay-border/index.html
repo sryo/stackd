@@ -5,32 +5,17 @@
 <script type="module">
   // Draws a 2px accent border around whichever window is focused. Re-attaches
   // every time sd.windows.focused changes; the previous overlay is detached
-  // before the next attach so we always own at most one SLS window.
+  // before the next attach so we always own at most one overlay panel.
+  //
+  // Rendering is now plain WebKit — the overlay's WebView hosts a <div> with
+  // `position: absolute; inset: 1px; border: …; border-radius: …`. The
+  // daemon pins the overlay's NSPanel to the target window's frame each
+  // vsync, so the border just inherits the panel's size — no per-frame draw
+  // callback, no JS round-trip.
   import { sd } from "sd://runtime/api.js";
 
   let current = null;          // { id, detach } from the last attach
   let currentWid = null;       // CGWindowID we're decorating
-  let currentRadius = 16;      // Per-window corner radius, fetched at attach time
-
-  const STROKE = "#7c8cff";
-  const WIDTH  = 2;
-
-  function draw(geo) {
-    const w = geo.window.w, h = geo.window.h;
-    if (w <= 0 || h <= 0) return null;
-    // Inset by half the stroke so the border sits ON the window edge.
-    // Spec (0,0) is the target's top-left.
-    const half = WIDTH / 2;
-    return {
-      rects: [{
-        x: half, y: half,
-        w: w - WIDTH, h: h - WIDTH,
-        stroke: STROKE,
-        strokeWidth: WIDTH,
-        radius: currentRadius
-      }]
-    };
-  }
 
   sd.windows.focused.subscribe(async (win) => {
     if (!win || typeof win.id !== "number") {
@@ -44,11 +29,19 @@
     if (currentWid === win.id) return;
     if (current) await current.detach();
     currentWid = win.id;
-    // Corner-radius detection is now a stack-side choice — ask the daemon
-    // for the per-window value once at attach time. 26 / 16 / 0 mirror
-    // WindowScape/outline.lua's heuristics (toolbar / no toolbar / system).
-    currentRadius = (await sd.windows.cornerRadius(win.id)) ?? 16;
-    current = await sd.overlay.attach(win.id, draw);
+    // Per-window corner radius. R1b will return raw AX hints via
+    // sd.windows.cornerHints(id); until that ships, fall back through the
+    // current heuristic-based sd.windows.cornerRadius(id) or 16. Use
+    // defensively so this stack doesn't block on R1b.
+    const radius = (await sd.windows.cornerRadius?.(win.id)) ?? 16;
+    current = await sd.overlay.attach(win.id, {
+      css: `
+        html, body { margin: 0; padding: 0; background: transparent; overflow: hidden; }
+        .border { position: absolute; inset: 1px; border: 2px solid #7c8cff;
+                  border-radius: ${radius}px; pointer-events: none; }
+      `,
+      html: `<div class="border"></div>`
+    });
   });
 </script>
 </body>
