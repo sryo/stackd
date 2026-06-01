@@ -1025,6 +1025,26 @@ final class Bridge: NSObject, WKScriptMessageHandler {
             Apps.isHidden(pid: pid_t((body["pid"] as? Int) ?? 0))
         },
 
+        // Curated AX surface for the system-wide focused text element.
+        // Replaces the five-call sd.ax.{focused,attribute,parameterizedAttribute,
+        // release} dance muse / palette / text-expander stacks used to do for
+        // every transformation tick. `.ax` (main-hop) because AX traffic
+        // deadlocks under cross-thread access — same constraint that put
+        // apps.menu behind `.ax`. Reader returns nil when no AX-text element
+        // has focus; setters return false on the same condition.
+        .ax("input.focusedText", permission: "input") { _, _ in
+            InputAX.focusedText() as Any? ?? NSNull()
+        },
+        .ax("input.setSelectedText", permission: "input", denyValue: false) { _, body in
+            InputAX.setSelectedText(body["value"] as? String ?? "")
+        },
+        .ax("input.setSelectedRange", permission: "input", denyValue: false) { _, body in
+            InputAX.setSelectedRange(
+                location: (body["location"] as? Int) ?? 0,
+                length:   (body["length"]   as? Int) ?? 0
+            )
+        },
+
         // Icons
         .sync("icons.app",  permission: "icons") { body in
             Icons.forApp( bundleId: body["bundleId"] as? String ?? "", size: body["size"] as? Int ?? 64)

@@ -299,7 +299,37 @@ export const sd = {
       }
     }
   },
-  input:      { layout:    channel("inputLayout") },
+  // sd.input — keyboard layout signal + curated AX surface for the
+  // system-wide focused text element. Replaces the five-call sd.ax.*
+  // dance (focused → attribute → parameterizedAttribute → release) muse,
+  // palette, and text-expander stacks were doing for every transformation
+  // tick.
+  //
+  //   const f = await sd.input.focusedText();
+  //   // → { text, selectedText,
+  //   //     selectedRange: { location, length },
+  //   //     caretRect: { x, y, w, h } | null,
+  //   //     role, subrole, value, pid, app }  | null when no AX-text focus
+  //
+  //   await sd.input.setSelectedText("hello");        // replace current selection
+  //   await sd.input.setSelectedRange(loc, len);      // change selection / move caret
+  //
+  // Known limitation: Safari / Mail / Firefox WebViews leave
+  // kAXSelectedTextAttribute empty even when there's text in the field —
+  // selectedText comes back as "" in those cases (the rest of the dict
+  // is still populated).
+  input: {
+    layout:    channel("inputLayout"),
+    focusedText()           { return request({ type: "input.focusedText" }); },
+    setSelectedText(value)  { return request({ type: "input.setSelectedText", value: String(value ?? "") }); },
+    setSelectedRange(location, length) {
+      return request({
+        type: "input.setSelectedRange",
+        location: location | 0,
+        length:   length   | 0
+      });
+    }
+  },
   net:        {
     wifi: channel("netWifi"),
     lan:  channel("netLan"),
