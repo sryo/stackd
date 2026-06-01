@@ -303,6 +303,86 @@ enum Apps {
         guard let app = NSRunningApplication(processIdentifier: pid) else { return false }
         return app.unhide()
     }
+
+    // MARK: - Per-pid window-set surface (AX)
+    //
+    // Completes the curated window-set surface around `visibleWindows(pid)`.
+    // Each method walks the app's AX tree, maps AXUIElement → CGWindowID via
+    // the shim in Windows.swift, and returns ids only — JS chains into
+    // `sd.windows.byId.*` for any per-window action it wants. AX messaging
+    // timeout capped at 100ms (same as `menu`/`visibleWindows`) so an
+    // unresponsive app can't stall the daemon.
+
+    /// CGWindowID of the AX focused window for `pid`, or nil if the app has
+    /// no focused window (background-only, all minimized, etc.) or the SPI
+    /// shim is unavailable. Mirrors hs.application:focusedWindow.
+    static func focusedWindow(pid: pid_t) -> Int? {
+        guard let getWindow = AXShim.getWindow else { return nil }
+        let appEl = AXUIElementCreateApplication(pid)
+        AXUIElementSetMessagingTimeout(appEl, 0.1)
+        var ref: AnyObject?
+        guard AXUIElementCopyAttributeValue(appEl, kAXFocusedWindowAttribute as CFString, &ref) == .success,
+              let win = ref else { return nil }
+        // swiftlint:disable:next force_cast
+        let el = win as! AXUIElement
+        var wid: CGWindowID = 0
+        guard getWindow(el, &wid) == .success else { return nil }
+        return Int(wid)
+    }
+
+    /// CGWindowID of the AX main window for `pid`, or nil. The main window
+    /// is the app's primary document/UI window; it may or may not be the
+    /// focused window (e.g. a focused inspector/palette atop a main doc).
+    /// Mirrors hs.application:mainWindow.
+    static func mainWindow(pid: pid_t) -> Int? {
+        guard let getWindow = AXShim.getWindow else { return nil }
+        let appEl = AXUIElementCreateApplication(pid)
+        AXUIElementSetMessagingTimeout(appEl, 0.1)
+        var ref: AnyObject?
+        guard AXUIElementCopyAttributeValue(appEl, kAXMainWindowAttribute as CFString, &ref) == .success,
+              let win = ref else { return nil }
+        // swiftlint:disable:next force_cast
+        let el = win as! AXUIElement
+        var wid: CGWindowID = 0
+        guard getWindow(el, &wid) == .success else { return nil }
+        return Int(wid)
+    }
+
+    /// All CGWindowIDs owned by `pid` as reported by AX (`kAXWindows`).
+    /// Includes minimized windows. Empty array if the app has none or the
+    /// SPI shim is unavailable. Mirrors hs.application:allWindows but
+    /// returns ids only.
+    static func allWindows(pid: pid_t) -> [Int] {
+        guard let getWindow = AXShim.getWindow else { return [] }
+        let appEl = AXUIElementCreateApplication(pid)
+        AXUIElementSetMessagingTimeout(appEl, 0.1)
+        var ref: AnyObject?
+        guard AXUIElementCopyAttributeValue(appEl, kAXWindowsAttribute as CFString, &ref) == .success,
+              let arr = ref as? [AXUIElement] else { return [] }
+        var out: [Int] = []
+        out.reserveCapacity(arr.count)
+        for el in arr {
+            var wid: CGWindowID = 0
+            if getWindow(el, &wid) == .success {
+                out.append(Int(wid))
+            }
+        }
+        return out
+    }
+
+    // MARK: - Per-pid app state (AppKit)
+    //
+    // Cheap NSWorkspace / NSRunningApplication queries — no AX gate, no
+    // main-hop required (dispatched via `.sync` in Bridge). Mirrors
+    // hs.application:isFrontmost / :isHidden.
+
+    static func isFrontmost(pid: pid_t) -> Bool {
+        NSWorkspace.shared.frontmostApplication?.processIdentifier == pid
+    }
+
+    static func isHidden(pid: pid_t) -> Bool {
+        NSRunningApplication(processIdentifier: pid)?.isHidden ?? false
+    }
 }
 
 final class AppsObserver: RefCountedObserver {

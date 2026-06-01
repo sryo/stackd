@@ -1003,6 +1003,27 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         .ax("apps.unhideByPid", permission: "apps", denyValue: false) { _, body in
             Apps.unhide(pid: pid_t((body["pid"] as? Int) ?? 0))
         },
+        // Per-pid window-set readers. Return CGWindowID(s); JS chains into
+        // sd.windows.byId.* from there. `.ax` (main-hop) because they walk
+        // the AX tree, same constraint as `visibleWindows` above.
+        .ax("apps.focusedWindow", permission: "apps") { _, body in
+            Apps.focusedWindow(pid: pid_t((body["pid"] as? Int) ?? 0)) as Any? ?? NSNull()
+        },
+        .ax("apps.mainWindow", permission: "apps") { _, body in
+            Apps.mainWindow(pid: pid_t((body["pid"] as? Int) ?? 0)) as Any? ?? NSNull()
+        },
+        .ax("apps.allWindows", permission: "apps", denyValue: [Int]()) { _, body in
+            Apps.allWindows(pid: pid_t((body["pid"] as? Int) ?? 0))
+        },
+        // Per-pid app state. Pure AppKit — `.sync` (no main-hop) because
+        // NSWorkspace.frontmostApplication / NSRunningApplication.isHidden
+        // are thread-safe AppKit reads with no AX gate.
+        .sync("apps.isFrontmost", permission: "apps", denyValue: false) { body in
+            Apps.isFrontmost(pid: pid_t((body["pid"] as? Int) ?? 0))
+        },
+        .sync("apps.isHidden", permission: "apps", denyValue: false) { body in
+            Apps.isHidden(pid: pid_t((body["pid"] as? Int) ?? 0))
+        },
 
         // Icons
         .sync("icons.app",  permission: "icons") { body in
@@ -1073,6 +1094,21 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         },
         .ax("windows.byId.hasToolbar",   permission: "windows") { _, body in
             WindowsByID.hasToolbar(windowID: CGWindowID((body["id"] as? Int) ?? 0))
+        },
+        .ax("windows.byId.isStandard",   permission: "windows") { _, body in
+            WindowsByID.isStandard(windowID: CGWindowID((body["id"] as? Int) ?? 0))
+        },
+        // Per-window tab list — walks the AXTabGroup child once. Returns
+        // [{title, selected}] when a tab group exists, [] if it has no
+        // children, NSNull (→ JSON null) when the window has no AXTabGroup.
+        .ax("windows.byId.tabs",         permission: "windows") { _, body in
+            WindowsByID.tabs(windowID: CGWindowID((body["id"] as? Int) ?? 0)) as Any? ?? NSNull()
+        },
+        .ax("windows.byId.focusTab",     permission: "windows", denyValue: false) { _, body in
+            WindowsByID.focusTab(
+                windowID: CGWindowID((body["id"] as? Int) ?? 0),
+                index: (body["index"] as? Int) ?? 0
+            )
         },
         // Per-window snapshot via CGSHWCaptureWindowList (AltTab's trick).
         // Synchronous, no TCC, works for hidden / minimized / off-space

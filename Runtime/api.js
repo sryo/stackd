@@ -250,6 +250,20 @@ export const sd = {
     isMinimized(id)   { return request({ type: "windows.byId.isMinimized", id }); },
     isFullscreen(id)  { return request({ type: "windows.byId.isFullscreen", id }); },
     hasToolbar(id)    { return request({ type: "windows.byId.hasToolbar", id }); },
+    // Subrole === "AXStandardWindow". The single most common AX gate tilers
+    // and overlays make; saves stacks from baking the comparison into JS.
+    //   if (await sd.windows.isStandard(id)) { /* tile / outline / etc */ }
+    isStandard(id)    { return request({ type: "windows.byId.isStandard", id }); },
+    // Per-window tab list — walks the window's AXTabGroup child (browsers,
+    // Finder, terminals). Returns [{ title, selected }, ...] or null when the
+    // window has no AXTabGroup. Empty array if the tab group exists but
+    // contains no children. Pair with focusTab(id, n) to activate a tab.
+    //   const tabs = await sd.windows.tabs(id);
+    //   if (tabs) await sd.windows.focusTab(id, tabs.findIndex(t => !t.selected));
+    tabs(id)          { return request({ type: "windows.byId.tabs", id }); },
+    focusTab(id, index) {
+      return request({ type: "windows.byId.focusTab", id, index: index | 0 });
+    },
     // Synchronous SPI snapshot via CGSHWCaptureWindowList. Works for
     // hidden / minimized / off-space windows (the AltTab trick) — distinct
     // from sd.display.snapshot which uses ScreenCaptureKit and gates on
@@ -635,7 +649,22 @@ export const sd = {
     menu(pid)                  { return request({ type: "apps.menu", pid }); },
     findMenuItem(pid, path)    { return request({ type: "apps.findMenuItem", pid, path }); },
     selectMenuItem(pid, path)  { return request({ type: "apps.selectMenuItem", pid, path }); },
-    visibleWindows(pid)        { return request({ type: "apps.visibleWindows", pid }); }
+    visibleWindows(pid)        { return request({ type: "apps.visibleWindows", pid }); },
+    // Per-pid window-set readers. Each returns CGWindowID(s) — chain into
+    // sd.windows.byId.* (frame, title, focus, raise, snapshot, …) from JS.
+    //   await sd.apps.focusedWindow(pid)  // → number | null  (AX focused)
+    //   await sd.apps.mainWindow(pid)     // → number | null  (AX main)
+    //   await sd.apps.allWindows(pid)     // → number[]       (all AX windows, includes minimized)
+    // Mirrors hs.application:focusedWindow / :mainWindow / :allWindows.
+    focusedWindow(pid)         { return request({ type: "apps.focusedWindow", pid }); },
+    mainWindow(pid)            { return request({ type: "apps.mainWindow", pid }); },
+    allWindows(pid)            { return request({ type: "apps.allWindows", pid }); },
+    // Per-pid app state. Cheap NSWorkspace / NSRunningApplication reads —
+    // no AX gate.
+    //   await sd.apps.isFrontmost(pid)  // → boolean
+    //   await sd.apps.isHidden(pid)     // → boolean
+    isFrontmost(pid)           { return request({ type: "apps.isFrontmost", pid }); },
+    isHidden(pid)              { return request({ type: "apps.isHidden", pid }); }
   },
   icons: {
     // Returns a `data:image/png;base64,...` URL you can drop into <img src="">.
