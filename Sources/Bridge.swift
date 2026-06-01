@@ -1432,7 +1432,26 @@ final class Bridge: NSObject, WKScriptMessageHandler {
 
     private func startBattery() {
         startChannel(name: "battery", observer: BatteryObserver.shared) {
-            ["percent": Battery.percent(), "charging": Battery.isCharging()]
+            // Additive: existing `percent` / `charging` keys keep their shape
+            // and position; the deep IOKit readings (IOPS dict + AppleSmart-
+            // Battery IORegistry) follow as optional fields. Each nil-able
+            // value goes through `?? NSNull()` so the JSON serializer emits
+            // `null` rather than dropping the key — stack authors see the
+            // same field shape on desktops (no battery) and on MacBooks
+            // alike.
+            [
+                "percent": Battery.percent(),
+                "charging": Battery.isCharging(),
+                "cycles": Battery.cycles() as Any? ?? NSNull(),
+                "health": Battery.health() as Any? ?? NSNull(),
+                "designCapacity": Battery.designCapacity() as Any? ?? NSNull(),
+                "maxCapacity": Battery.maxCapacity() as Any? ?? NSNull(),
+                "currentCapacity": Battery.currentCapacity() as Any? ?? NSNull(),
+                "amperage": Battery.amperage() as Any? ?? NSNull(),
+                "voltage": Battery.voltage() as Any? ?? NSNull(),
+                "timeRemaining": Battery.timeRemaining() as Any? ?? NSNull(),
+                "isFinishingCharge": Battery.isFinishingCharge() as Any? ?? NSNull(),
+            ]
         }
     }
 
