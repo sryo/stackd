@@ -2,15 +2,33 @@ import AppKit
 import ApplicationServices
 import CoreGraphics
 
-// SLSTransaction* used by sd.windows.batch (Bridge sets the batchSink and an
-// opaque tx ref; WindowsByID.setFrame enqueues position moves into the tx
-// instead of dispatching directly through AX). The shared declarations live
-// in Sources/Private/SkyLight.swift (SkyLight.Transaction); per the audit
-// they are also consumed by Overlay.swift.
+// SLSTransaction* — atomic batch of window geometry/order mutations committed
+// to WindowServer in one round-trip. Used internally by sd.windows.batch
+// (Bridge sets the batchSink and an opaque tx ref; WindowsByID.setFrame
+// enqueues position moves into the tx instead of dispatching directly through
+// AX) and consumed externally by Overlay.swift's per-tick reshape+order.
 //
-// Position moves go through SLSTransactionMoveWindowWithGroup (CGPoint); size
-// has to stay on AX (no SLSTransactionSetWindowSize exists) which is what
-// actually constrains the window's frame anyway.
+// Lives here (not in Sources/Private/SkyLight.swift) because the primary
+// domain is windows; Overlay imports as `Windows.Transaction.*`. Mirrors
+// Hammerspoon's per-extension SPI ownership.
+//
+// Signatures verified against yabai/src/misc/extern.h and JankyBorders/
+// src/misc/extern.h. Position moves go through SLSTransactionMoveWindowWithGroup
+// (CGPoint); size has to stay on AX (no SLSTransactionSetWindowSize exists)
+// which is what actually constrains the window's frame anyway.
+enum WindowTransaction {
+    typealias CreateFn          = @convention(c) (Int32) -> Unmanaged<CFTypeRef>?
+    typealias CommitFn          = @convention(c) (CFTypeRef, Int32) -> Int32
+    typealias MoveWithGroupFn   = @convention(c) (CFTypeRef, UInt32, CGPoint) -> Int32
+    typealias OrderWindowFn     = @convention(c) (CFTypeRef, UInt32, Int32, UInt32) -> Int32
+    typealias SetWindowLevelFn  = @convention(c) (CFTypeRef, UInt32, Int32) -> Int32
+
+    static let create:         CreateFn?         = SkyLight.sym("SLSTransactionCreate")
+    static let commit:         CommitFn?         = SkyLight.sym("SLSTransactionCommit")
+    static let moveWithGroup:  MoveWithGroupFn?  = SkyLight.sym("SLSTransactionMoveWindowWithGroup")
+    static let orderWindow:    OrderWindowFn?    = SkyLight.sym("SLSTransactionOrderWindow")
+    static let setWindowLevel: SetWindowLevelFn? = SkyLight.sym("SLSTransactionSetWindowLevel")
+}
 
 // SLSCopyWindowsWithOptionsAndTags — yabai's authoritative window enumeration.
 // CGWindowListCopyWindowInfo([.optionOnScreenOnly]) misses minimized + other-space
@@ -248,8 +266,8 @@ enum WindowsByID {
     @discardableResult
     static func beginBatch() -> Bool {
         if batchSink != nil { return false }
-        guard let create = SkyLight.Transaction.create,
-              let move = SkyLight.Transaction.moveWithGroup,
+        guard let create = WindowTransaction.create,
+              let move = WindowTransaction.moveWithGroup,
               let txRef = create(SkyLight.cid)?.takeRetainedValue() else {
             return false
         }
@@ -259,7 +277,7 @@ enum WindowsByID {
             case .moveWithGroup(let id, let point):
                 _ = move(txRef, UInt32(id), point)
             case .orderAbove(let id, let rel):
-                _ = SkyLight.Transaction.orderWindow?(txRef, UInt32(id), 1, UInt32(rel))
+                _ = WindowTransaction.orderWindow?(txRef, UInt32(id), 1, UInt32(rel))
             }
         }
         return true
@@ -268,7 +286,7 @@ enum WindowsByID {
     @discardableResult
     static func commitBatch() -> Bool {
         guard let tx = activeTransaction else { return false }
-        _ = SkyLight.Transaction.commit?(tx, 0)
+        _ = WindowTransaction.commit?(tx, 0)
         batchSink = nil
         activeTransaction = nil
         return true
@@ -452,6 +470,44 @@ enum WindowsByID {
         var ref: AnyObject?
         AXUIElementCopyAttributeValue(el, "AXFullScreen" as CFString, &ref)
         return (ref as? Bool) ?? false
+    }
+
+    /// Per-window corner radius (in pt) that the WindowServer rounds with.
+    /// Used by overlay/outline stacks so a stroke hugs the actual window
+    /// shape on Tahoe. Mirrors `~/.hammerspoon/WindowScape/outline.lua`:
+    ///
+    ///   - 26 for titled windows WITH a toolbar (Finder, Safari, etc.)
+    ///   - 16 for titled windows WITHOUT a toolbar (Terminal, etc.)
+    ///   -  0 for borderless / system / non-standard windows
+    ///
+    /// Detection is via AX: a child `AXRole == "AXToolbar"` → 26, else 16,
+    /// with role/subrole overrides for system dialogs and scroll-areas. No
+    /// public WindowServer API returns this; `SLSWindowIteratorGetCornerRadii`
+    /// exists but is availability-gated and doesn't return the toolbar-aware
+    /// value on Tahoe.
+    ///
+    /// AX timeout capped at 100ms so one unresponsive app can't stall a
+    /// per-tick overlay loop.
+    static func cornerRadius(windowID: CGWindowID) -> Int {
+        guard let el = elementFor(windowID: windowID) else { return 16 }
+        AXUIElementSetMessagingTimeout(el, 0.1)
+        // System dialogs / scroll-areas render without rounded corners.
+        if axStringAttribute(el, kAXSubroleAttribute) == "AXSystemDialog" { return 0 }
+        if axStringAttribute(el, kAXRoleAttribute)    == "AXScrollArea"   { return 0 }
+        var childrenRef: AnyObject?
+        let err = AXUIElementCopyAttributeValue(el, kAXChildrenAttribute as CFString, &childrenRef)
+        if err == .success, let children = childrenRef as? [AXUIElement] {
+            for child in children where axStringAttribute(child, kAXRoleAttribute) == "AXToolbar" {
+                return 26
+            }
+        }
+        return 16
+    }
+
+    private static func axStringAttribute(_ el: AXUIElement, _ attr: String) -> String? {
+        var ref: AnyObject?
+        guard AXUIElementCopyAttributeValue(el, attr as CFString, &ref) == .success else { return nil }
+        return ref as? String
     }
 }
 

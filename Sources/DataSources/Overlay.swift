@@ -125,8 +125,8 @@ private enum SkyLightOverlay {
     typealias SetWindowResolutionFn = @convention(c) (Int32, UInt32, Double) -> Int32
 
     // SLSTransaction* — atomic move/level/order in one server commit.
-    // Shared declarations live in Sources/Private/SkyLight.swift
-    // (SkyLight.Transaction); also consumed by Windows.swift / sd.windows.batch.
+    // Declarations live in Windows.swift (WindowTransaction) since the
+    // primary consumer is sd.windows.batch.
 
     // Geometry primitive used by SLSSetWindowShape. The yabai/JankyBorders
     // call site builds a region whose extent is `frame` (origin treated as
@@ -192,18 +192,11 @@ final class OverlayHandle {
     // clipped. Borders are typically 1-2px so 16px is plenty of headroom.
     static let padding: CGFloat = 16
 
-    // Resolved once at attach (AX walk to detect toolbar presence). Exposed
-    // to JS via the geometry dict's window.radius field — spec authors round
-    // their stroke rect with this so the border hugs the actual window
-    // shape on Tahoe (Finder=26, Terminal=16, etc.).
-    let cachedCornerRadius: Int
-
-    init(id: Int, targetWID: CGWindowID, overlayWID: UInt32, context: CGContext, cornerRadius: Int) {
+    init(id: Int, targetWID: CGWindowID, overlayWID: UInt32, context: CGContext) {
         self.id = id
         self.targetWID = targetWID
         self.overlayWID = overlayWID
         self.context = context
-        self.cachedCornerRadius = cornerRadius
     }
 
     /// Per-tick redraw. `targetFrame` is the current SLSGetWindowBounds of
@@ -351,10 +344,10 @@ final class OverlayHandle {
         // SLSTransactionMoveWindowWithGroup (not SLSMoveWindow) to keep the
         // overlay snapped to the target through live drags. Order = 1
         // (above target) with reference wid = targetWID.
-        guard let txCreate  = SkyLight.Transaction.create,
-              let txMove    = SkyLight.Transaction.moveWithGroup,
-              let txOrder   = SkyLight.Transaction.orderWindow,
-              let txCommit  = SkyLight.Transaction.commit else { return }
+        guard let txCreate  = WindowTransaction.create,
+              let txMove    = WindowTransaction.moveWithGroup,
+              let txOrder   = WindowTransaction.orderWindow,
+              let txCommit  = WindowTransaction.commit else { return }
         guard let txRef = txCreate(cid)?.takeRetainedValue() else { return }
         _ = txMove(txRef, overlayWID, overlayFrame.origin)
         _ = txOrder(txRef, overlayWID, 1, targetWID)
@@ -580,70 +573,17 @@ enum Overlay {
         let context = ctxRef.takeRetainedValue()
         context.interpolationQuality = .none
 
-        // Resolve the per-window corner radius once. The AX walk traverses
-        // the target's children looking for a toolbar — costs a few ms on
-        // first call per app (AX warm-up) and is too expensive to repeat
-        // every vsync. Recompute happens only when the stack re-attaches
-        // (focus change → new overlay handle), which naturally tracks
-        // window-level UI changes.
-        let radius = Int(cornerRadius(of: targetID))
-
+        // Per-window corner radius is now stack-side policy — the stack
+        // can call sd.windows.byId.cornerRadius(id) and pass the result
+        // back through the draw spec. Removed the AX walk from attach;
+        // the corner-radius primitive lives in Windows.swift where the
+        // domain belongs.
         return OverlayHandle(
             id: id,
             targetWID: targetID,
             overlayWID: overlayWID,
-            context: context,
-            cornerRadius: radius
+            context: context
         )
-    }
-
-    /// Per-window corner radius the WindowServer rounds with. Mirrors
-    /// `~/.hammerspoon/WindowScape/outline.lua:getCornerRadius` — the
-    /// reference implementation the user wants this overlay to match.
-    ///
-    /// macOS 26 (Tahoe) uses per-style corner radii:
-    ///   - 26pt for titled windows WITH a toolbar (Finder, Safari, etc.)
-    ///   - 16pt for titled windows WITHOUT a toolbar (Terminal, etc.)
-    ///   -  0pt for borderless / system / non-standard windows
-    ///
-    /// Detection: AX `AXChildren` walked for an `AXRole == "AXToolbar"`
-    /// descendant. We don't have a public WindowServer API that returns
-    /// the actual server-side rounding radius — SLSWindowIteratorGetCornerRadii
-    /// exists but is availability-gated, undocumented, and doesn't return
-    /// the toolbar-aware value on Tahoe. The AX-walk path is what the
-    /// Hammerspoon outline ships in production.
-    ///
-    /// Capped at 100ms via AXUIElementSetMessagingTimeout to keep one
-    /// unresponsive app from stalling the per-tick overlay loop.
-    static func cornerRadius(of wid: CGWindowID) -> CGFloat {
-        guard let axEl = WindowsByID.elementFor(windowID: wid) else { return 16 }
-        AXUIElementSetMessagingTimeout(axEl, 0.1)
-
-        // Bail early on non-standard / system windows — the Hammerspoon
-        // script returns 0 for these (matches Tahoe's borderless rendering).
-        if let subrole = axStringAttribute(axEl, kAXSubroleAttribute) {
-            if subrole == "AXSystemDialog" { return 0 }
-        }
-        if let role = axStringAttribute(axEl, kAXRoleAttribute) {
-            if role == "AXScrollArea" { return 0 }
-        }
-
-        var childrenRef: AnyObject?
-        let err = AXUIElementCopyAttributeValue(axEl, kAXChildrenAttribute as CFString, &childrenRef)
-        if err == .success, let children = childrenRef as? [AXUIElement] {
-            for child in children {
-                if axStringAttribute(child, kAXRoleAttribute) == "AXToolbar" {
-                    return 26
-                }
-            }
-        }
-        return 16
-    }
-
-    private static func axStringAttribute(_ el: AXUIElement, _ attr: String) -> String? {
-        var ref: AnyObject?
-        guard AXUIElementCopyAttributeValue(el, attr as CFString, &ref) == .success else { return nil }
-        return ref as? String
     }
 
     /// Read the current bounds of a window we don't own. Top-left origin,

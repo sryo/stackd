@@ -193,6 +193,11 @@ export const sd = {
     focus(id)  { return request({ type: "windows.byId.focus", id }); },
     close(id)  { return request({ type: "windows.byId.close", id }); },
     frame(id)  { return request({ type: "windows.byId.frame", id }); },
+    // Per-window corner radius (pt). 26 for windows with a toolbar (Finder,
+    // Safari, …), 16 for plain titled windows (Terminal, …), 0 for system
+    // dialogs / borderless. Overlay-style stacks pass this into their draw
+    // spec so the border hugs the real window shape on Tahoe.
+    cornerRadius(id) { return request({ type: "windows.byId.cornerRadius", id }); },
     // Synchronous SPI snapshot via CGSHWCaptureWindowList. Works for
     // hidden / minimized / off-space windows (the AltTab trick) — distinct
     // from sd.display.snapshot which uses ScreenCaptureKit and gates on

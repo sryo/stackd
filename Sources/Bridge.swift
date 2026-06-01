@@ -894,6 +894,9 @@ final class Bridge: NSObject, WKScriptMessageHandler {
                 "w": Int(r.size.width), "h": Int(r.size.height)
             ] as [String: Any]
         },
+        .ax("windows.byId.cornerRadius", permission: "windows") { _, body in
+            WindowsByID.cornerRadius(windowID: CGWindowID((body["id"] as? Int) ?? 0))
+        },
         // Per-window snapshot via CGSHWCaptureWindowList (AltTab's trick).
         // Synchronous, no TCC, works for hidden / minimized / off-space
         // windows. Distinct from sd.display.snapshot (ScreenCaptureKit).
@@ -1171,16 +1174,7 @@ final class Bridge: NSObject, WKScriptMessageHandler {
                             "x": Int(frame.origin.x),
                             "y": Int(frame.origin.y),
                             "w": Int(frame.size.width),
-                            "h": Int(frame.size.height),
-                            // Per-window corner radius (AX-derived, mirrors
-                            // WindowScape/outline.lua getCornerRadius):
-                            // 26 for windows with a toolbar, 16 otherwise,
-                            // 0 for system/borderless. Cached on the handle
-                            // — the AX walk runs once at attach, not every
-                            // tick. Spec authors should round their border
-                            // rects with THIS value to match the actual
-                            // window shape (Finder=26, Terminal=16, etc.).
-                            "radius": h.cachedCornerRadius
+                            "h": Int(frame.size.height)
                         ],
                         "id": Int(h.targetWID)
                     ]

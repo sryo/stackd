@@ -46,29 +46,4 @@ enum SkyLight {
         return fn?() ?? 0
     }()
 
-    /// SLSTransaction* family — atomic batch of geometry/order/level mutations
-    /// committed to WindowServer in one server round-trip. Used by:
-    ///   - Windows.swift / WindowsByID.beginBatch — sd.windows.batch
-    ///   - Overlay.swift / OverlayHandle.applyGeometry — per-tick reshape+order
-    ///
-    /// Signatures verified against yabai/src/misc/extern.h and JankyBorders/
-    /// src/misc/extern.h. The transaction ref returned by `create` is an
-    /// opaque CF type (CFTypeRef == AnyObject); callers retain via
-    /// `takeRetainedValue()` and pass back into commit/move/order/setLevel.
-    ///
-    /// Each typed symbol degrades to nil when dlsym misses — every consumer
-    /// already guards on optional unwrap before calling.
-    enum Transaction {
-        typealias CreateFn          = @convention(c) (Int32) -> Unmanaged<CFTypeRef>?
-        typealias CommitFn          = @convention(c) (CFTypeRef, Int32) -> Int32
-        typealias MoveWithGroupFn   = @convention(c) (CFTypeRef, UInt32, CGPoint) -> Int32
-        typealias OrderWindowFn     = @convention(c) (CFTypeRef, UInt32, Int32, UInt32) -> Int32
-        typealias SetWindowLevelFn  = @convention(c) (CFTypeRef, UInt32, Int32) -> Int32
-
-        static let create:         CreateFn?         = SkyLight.sym("SLSTransactionCreate")
-        static let commit:         CommitFn?         = SkyLight.sym("SLSTransactionCommit")
-        static let moveWithGroup:  MoveWithGroupFn?  = SkyLight.sym("SLSTransactionMoveWindowWithGroup")
-        static let orderWindow:    OrderWindowFn?    = SkyLight.sym("SLSTransactionOrderWindow")
-        static let setWindowLevel: SetWindowLevelFn? = SkyLight.sym("SLSTransactionSetWindowLevel")
-    }
 }
