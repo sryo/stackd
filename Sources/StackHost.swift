@@ -86,16 +86,11 @@ final class StackHost {
         for entry in entries.sorted() where !entry.hasPrefix(".") {
             let path = stacksDir + "/" + entry
             var isDir: ObjCBool = false
-            guard FileManager.default.fileExists(atPath: path, isDirectory: &isDir) else { continue }
-            let src: StackSource?
-            if isDir.boolValue {
-                src = StackSource.loadFolder(at: path, defaults: defaults)
-            } else if entry.hasSuffix(".stack") {
-                src = StackSource.loadSingleFile(at: path, defaults: defaults)
-            } else {
-                src = nil
+            guard FileManager.default.fileExists(atPath: path, isDirectory: &isDir),
+                  isDir.boolValue else { continue }
+            if let src = StackSource.loadFolder(at: path, defaults: defaults) {
+                loadStack(source: src)
             }
-            if let src = src { loadStack(source: src) }
         }
     }
 
@@ -157,18 +152,11 @@ final class StackHost {
             return "disabled \(id) (was multi-display)\n"
         }
         let folder = rootPath + "/stacks/\(id)"
-        let single = rootPath + "/stacks/\(id).stack"
         var isDir: ObjCBool = false
-        let src: StackSource? = {
-            if FileManager.default.fileExists(atPath: folder, isDirectory: &isDir), isDir.boolValue {
-                return StackSource.loadFolder(at: folder, defaults: defaults)
-            }
-            if FileManager.default.fileExists(atPath: single) {
-                return StackSource.loadSingleFile(at: single, defaults: defaults)
-            }
-            return nil
-        }()
-        guard let src = src else { return "error: no stack named '\(id)'\n" }
+        guard FileManager.default.fileExists(atPath: folder, isDirectory: &isDir),
+              isDir.boolValue,
+              let src = StackSource.loadFolder(at: folder, defaults: defaults)
+        else { return "error: no stack named '\(id)'\n" }
         loadStack(source: src)
         return "enabled \(id)\n"
     }
@@ -236,11 +224,7 @@ final class StackHost {
             log("stack \(manifest.id) — inferred channels: \(added.joined(separator: ", "))")
         }
 
-        if let root = source.rootURL {
-            schemeHandler.register(stackId: manifest.id, rootURL: root)
-        } else if let body = source.bodyHTML {
-            schemeHandler.registerInline(stackId: manifest.id, body: body)
-        }
+        schemeHandler.register(stackId: manifest.id, rootURL: source.rootURL)
 
         let targets = StackHost.screensFor(displaySpec: manifest.display ?? "primary")
         guard !targets.isEmpty else {

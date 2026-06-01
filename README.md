@@ -52,7 +52,7 @@ That's a complete stack body. The runtime walks the DOM at load time, finds ever
 
 ## Concepts
 
-- **stack** — a loadable folder (`~/stackd/stacks/<id>/`) or single file (`~/stackd/stacks/<id>.stack`). Has a manifest (`stack.json` or frontmatter), a rendered surface (`index.html` + `index.css`), and optional permissions.
+- **stack** — a loadable folder (`~/stackd/stacks/<id>/`) with a manifest (`stack.json`), a rendered surface (`index.html` + `index.css`), and optional permissions.
 - **signal** — reactive system state. `sd.battery`, `sd.mouse`, `sd.windows.focused`. Subscribe or drop into `{{ }}`; the panel re-renders on change.
 - **bang** — a message any stack can fire and any stack can handle. CLI: `stackd bang my.event key=value`. JS: `window.onBang_my_event = (detail) => {…}`.
 - **verb** — a CLI command (`list`, `reload`, `toggle`, `set`, `bang`, `new`, `doctor`, `help`). The `stackd` binary is both the daemon and the client; arguments mean "send to the running daemon."
@@ -70,14 +70,6 @@ A stack is `stack.json` + `index.html` + `index.css`. The manifest says where th
 ```
 
 Anchor edges are the eight standard corners + sides (`top-right`, `top-left`, `top`, `bottom`, `left`, `right`, …). Manifest also takes `region` (`fullscreen` for overlays), `clickThrough`, `invocable` (for hotkey-summoned panels), `hotkeys`, `handles`, and `material` (NSVisualEffectView under the WebView). See `Sources/StackTemplates.swift` for the full schema.
-
-The single-file form drops the folder for trivial stacks:
-
-```
-~/stackd/stacks/hello.stack
-```
-
-Frontmatter on top (YAML or JSON), HTML body underneath. Same manifest fields, same runtime.
 
 ### Templates: `{{ }}` and `sd-each`
 
@@ -281,11 +273,10 @@ Open items: STT (`sd.speech.listen`), AirPods battery, camera stream, calendar w
   defaults.json               ← global manifest defaults
   Runtime/api.js              ← (symlinked from .build/Runtime/ in dev; bundled in prod)
   stacks/
-    <id>/                     ← folder format
+    <id>/
       stack.json
       index.html
       index.css
-    <id>.stack                ← single-file format (frontmatter + body)
 
 ~/Documents/stackd/           ← project source (this repo)
   Sources/                    ← Swift host + data sources

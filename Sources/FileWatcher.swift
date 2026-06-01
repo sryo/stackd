@@ -14,7 +14,7 @@ final class FileWatcher {
     // every commit. See digup.db-wal regression: 17 spurious reloads in one
     // idle session of a stack using SQLite.
     private static let reloadExtensions: Set<String> = [
-        "js", "mjs", "html", "htm", "css", "json", "svg", "wasm", "stack"
+        "js", "mjs", "html", "htm", "css", "json", "svg", "wasm"
     ]
 
     init(paths: [String], debounceMs: Int = 300, callback: @escaping () -> Void) {

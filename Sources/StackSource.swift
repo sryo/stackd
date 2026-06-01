@@ -1,25 +1,20 @@
 import Foundation
 
-/// Unifies the two on-disk stack shapes the host can load:
-///   • Folder format: `~/stackd/stacks/<id>/stack.json` + index.html + assets.
-///     `rootURL` is the folder; `bodyHTML` is nil; URLSchemeHandler serves
-///     files directly off disk.
-///   • Single-file format: `~/stackd/stacks/<id>.stack` — frontmatter +
-///     inline HTML/CSS. `rootURL` is nil; `bodyHTML` is the body (possibly
-///     auto-wrapped); URLSchemeHandler serves it from memory for index.html.
+/// On-disk stack loaded from `~/stackd/stacks/<id>/`: a folder containing
+/// `stack.json` + `index.html` + assets. URLSchemeHandler serves files
+/// directly off `rootURL`.
 ///
 /// `sourceText` is the concatenation of every text asset the stack ships
-/// (HTML + CSS + JS for folder stacks, body for .stack files). Used by
-/// `inferChannelPermissions` to scan for `sd.<channel>` references so the
-/// manifest's `permissions` list can be auto-augmented — channels-only;
-/// RPC permissions still require explicit declaration.
+/// (HTML + CSS + JS). Used by `ChannelInference.infer` to scan for
+/// `sd.<channel>` references so the manifest's `permissions` list can be
+/// auto-augmented — channels-only; RPC permissions still require explicit
+/// declaration.
 struct StackSource {
     let manifest: StackManifest
-    let rootURL: URL?       // nil for in-memory .stack files
-    let bodyHTML: String?   // nil for folder stacks
+    let rootURL: URL
     let sourceText: String  // everything we scan for sd.<channel> references
 
-    /// Load `~/stackd/stacks/<id>/` (folder format). Returns nil on bad manifest.
+    /// Load `~/stackd/stacks/<id>/`. Returns nil on bad manifest.
     static func loadFolder(at path: String, defaults: [String: Any]) -> StackSource? {
         let url = URL(fileURLWithPath: path)
         let manifestURL = url.appendingPathComponent("stack.json")
@@ -56,128 +51,8 @@ struct StackSource {
         return StackSource(
             manifest: manifest,
             rootURL: url,
-            bodyHTML: nil,
             sourceText: combined
         )
-    }
-
-    /// Load `~/stackd/stacks/<id>.stack` (single-file format). The id is
-    /// derived from the filename so the frontmatter doesn't need to declare
-    /// it; `name` defaults to the id; everything else is the same as folder
-    /// manifests.
-    static func loadSingleFile(at path: String, defaults: [String: Any]) -> StackSource? {
-        let url = URL(fileURLWithPath: path)
-        let filename = url.lastPathComponent
-        let id = (filename as NSString).deletingPathExtension
-        guard let raw = try? String(contentsOf: url, encoding: .utf8) else {
-            log("can't read \(path)"); return nil
-        }
-        let (fmDict, body) = parseFrontmatter(raw)
-        // Auto-populate id (always) and name (if absent) so a minimal .stack
-        // file is literally frontmatter:[size, anchor] + body. The whole
-        // point is that the filename should suffice.
-        var merged = defaults
-        for (k, v) in fmDict { merged[k] = v }
-        merged["id"] = id
-        if merged["name"] == nil { merged["name"] = id }
-        // permissions defaults to [] so manifests without explicit perms
-        // still decode — task 1's inference layer will augment afterwards.
-        if merged["permissions"] == nil { merged["permissions"] = [] as [String] }
-
-        let manifest: StackManifest
-        do {
-            let mergedData = try JSONSerialization.data(withJSONObject: merged)
-            manifest = try JSONDecoder().decode(StackManifest.self, from: mergedData)
-        } catch {
-            log("bad .stack frontmatter in \(path): \(error)"); return nil
-        }
-
-        let html = wrapHTMLIfNeeded(body)
-        return StackSource(
-            manifest: manifest,
-            rootURL: nil,
-            bodyHTML: html,
-            sourceText: body
-        )
-    }
-
-    /// Split a `.stack` file into (frontmatter dict, body). The frontmatter
-    /// is everything between the first two `---` lines at the start of the
-    /// file; the body is everything after. Returns ({}, raw) if no
-    /// frontmatter delimiters are present (so a body-only .stack file is
-    /// still loadable — handy for proof-of-concept stacks).
-    private static func parseFrontmatter(_ raw: String) -> ([String: Any], String) {
-        var lines = raw.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
-        guard lines.first?.trimmingCharacters(in: .whitespaces) == "---" else {
-            return ([:], raw)
-        }
-        lines.removeFirst()
-        var fmLines: [String] = []
-        var bodyStart = -1
-        for (i, line) in lines.enumerated() {
-            if line.trimmingCharacters(in: .whitespaces) == "---" {
-                bodyStart = i + 1
-                break
-            }
-            fmLines.append(line)
-        }
-        let body = (bodyStart >= 0) ? lines[bodyStart...].joined(separator: "\n") : ""
-        let dict = parseFrontmatterBody(fmLines.joined(separator: "\n"))
-        return (dict, body)
-    }
-
-    /// Parse the frontmatter body. Format is JSON-superset: each top-level
-    /// `key: value` line where value is JSON (string, number, bool, array,
-    /// object). Keys are unquoted, values are quoted as JSON. This sidesteps
-    /// a full YAML parser while keeping the manifest expressible — the same
-    /// JSON shapes that work in stack.json (`anchor: { edge: "top-right",
-    /// inset: [16, 16] }`, `permissions: ["battery"]`) all work here.
-    /// Lines starting with `#` are comments; blank lines are skipped.
-    private static func parseFrontmatterBody(_ text: String) -> [String: Any] {
-        var out: [String: Any] = [:]
-        for line in text.split(separator: "\n", omittingEmptySubsequences: false) {
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
-            if trimmed.isEmpty || trimmed.hasPrefix("#") { continue }
-            guard let colon = line.firstIndex(of: ":") else { continue }
-            let key = String(line[..<colon]).trimmingCharacters(in: .whitespaces)
-            let rest = String(line[line.index(after: colon)...]).trimmingCharacters(in: .whitespaces)
-            if key.isEmpty || rest.isEmpty { continue }
-            out[key] = decodeFrontmatterValue(rest)
-        }
-        return out
-    }
-
-    /// Decode a single frontmatter value. JSON literal first (covers
-    /// `{...}`, `[...]`, `"..."`, numbers, booleans); fall back to treating
-    /// it as a bare string so `name: My Widget` (the obvious shape) works
-    /// without quotes — same affordance every frontmatter syntax provides.
-    private static func decodeFrontmatterValue(_ raw: String) -> Any {
-        if let data = raw.data(using: .utf8),
-           let v = try? JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed]) {
-            return v
-        }
-        return raw
-    }
-
-    /// If the body looks like a fragment (no <html>/<body>), wrap it in a
-    /// minimal HTML5 shell so the WebView has a real document. The runtime
-    /// loader script + sd:// scheme handler still work either way; this is
-    /// purely so authors can write `<div>{{ sd.battery.percent }}%</div>`
-    /// without ceremony.
-    private static func wrapHTMLIfNeeded(_ body: String) -> String {
-        let lower = body.lowercased()
-        if lower.contains("<!doctype") || lower.contains("<html") {
-            return body
-        }
-        return """
-        <!doctype html>
-        <html>
-        <head><meta charset="utf-8"></head>
-        <body>
-        \(body)
-        </body>
-        </html>
-        """
     }
 }
 
