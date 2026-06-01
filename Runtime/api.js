@@ -1039,17 +1039,25 @@ export const sd = {
   //                              memoryPressure,                    // "normal"|"warning"|"critical"
   //                              swap: {totalMB,usedMB},
   //                              gpu: {usagePercent} }              // Apple Silicon / iGPU
+  //   await sd.host.diskIO() → [{ name, bytesRead, bytesWritten,
+  //                                opsRead, opsWritten,
+  //                                bytesReadPerSecond?, bytesWrittenPerSecond? }, ...]
   // First load tick fires ~2s after subscribe (CPU fractions need a prior
   // sample to diff against). idleSeconds resets to ~0 the instant the user
   // moves the mouse or types. gpu / swap / memoryPressure may be absent on
   // hardware where the underlying sysctl or IOAccelerator query fails — treat
   // each as optional in stack code.
+  // diskIO() is pulled (not pushed) — call it on whatever cadence you want.
+  // Per-second rates are only emitted from the SECOND call onward (the first
+  // call seeds the per-device baseline). `name` is the BSD identifier
+  // ("disk0", "disk1s2", ...). Stats.app-style IOBlockStorageDriver walk.
   // Tunable cadence — pass `{ interval }` (seconds) to slow this stack's
   // fanout for the channel:
   //   sd.host.load.subscribe(load => render(load), { interval: 10 });
   host: {
-    info() { return request({ type: "host.info" }); },
-    load:  channel("hostLoad")
+    info()   { return request({ type: "host.info" }); },
+    diskIO() { return request({ type: "host.diskIO" }); },
+    load:    channel("hostLoad")
   },
   // Mac internal sensors via IOHIDEventSystem (Apple silicon: per-die temps,
   // per-rail voltage/current, fan RPM). Polled at 2s. Intel SMC sensors deferred.

@@ -497,6 +497,16 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         // by startHost() above.
         .sync("host.info", permission: "host") { _ in Host.info() },
 
+        // Per-disk I/O rates — pulled (not pushed) because the cadence is
+        // entirely up to the stack. First call seeds the per-device baseline
+        // and returns cumulative byte counts only; second + subsequent calls
+        // add bytesReadPerSecond / bytesWrittenPerSecond computed from the
+        // delta against the previous sample. Stats.app-style walk of
+        // IOBlockStorageDriver nodes — see Host.diskIO() for the IOKit details.
+        .sync("host.diskIO", permission: "host", denyValue: [[String: Any]]()) { _ in
+            Host.diskIO()
+        },
+
         // Disks — one-shot snapshot of currently-mounted volumes. Live
         // changes flow via `sd.disk.mounted` / `sd.disk.unmounted` bangs
         // (no permission required to receive bangs; install is global).

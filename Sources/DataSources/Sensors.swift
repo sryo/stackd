@@ -477,6 +477,123 @@ enum Host {
         ]
     }
 
+    // MARK: - Per-disk I/O rates
+
+    // Per-BSD-device cumulative byte counters from the previous diskIO()
+    // call, plus the monotonic timestamp of that read. Diffing against the
+    // next call gives bytes-per-second rates without needing a polling
+    // observer — stacks just call diskIO() on whatever cadence they want
+    // and the first call seeds the baseline. Protected by an NSLock because
+    // diskIO() runs on the main thread from the Bridge sync handler today,
+    // but callers may move to a background queue later.
+    private struct DiskIOSample {
+        let bytesRead:    UInt64
+        let bytesWritten: UInt64
+        let timestamp:    TimeInterval
+    }
+    private static var diskIOSamples: [String: DiskIOSample] = [:]
+    private static let diskIOLock = NSLock()
+
+    /// Pure rate-of-change helper. Bytes per second between two cumulative
+    /// samples. Returns 0 for any degenerate input (no elapsed time, clock
+    /// skew, counter reset on remount) so consumers always get a finite
+    /// non-negative number — the next call will re-baseline naturally.
+    /// Extracted as a static helper so HostDiskIOTests can hammer the math
+    /// in isolation; the surrounding IOKit walk is impure and not tested.
+    static func computeRate(before: UInt64, after: UInt64, elapsed: Double) -> Double {
+        guard elapsed > 0, after >= before else { return 0 }
+        let delta = after - before
+        return Double(delta) / elapsed
+    }
+
+    /// One-shot per-disk I/O snapshot. Walks `IOBlockStorageDriver` matches
+    /// in the IORegistry, reads each node's `Statistics` dict for cumulative
+    /// byte / operation counts, and diffs against the previous diskIO() call
+    /// to compute bytes-per-second rates. First call seeds the baseline —
+    /// rates appear from the second call onward. Stats.app uses this exact
+    /// walk; reference implementation lives in their `IOService` extension.
+    ///
+    /// Returns one entry per block device:
+    ///   { name, bytesRead, bytesWritten,
+    ///     readsPerSecond?, writesPerSecond? }
+    /// `name` is the BSD identifier (e.g. "disk0", "disk1s2") from the
+    /// `BSD Name` property — the same string users see in `diskutil list`.
+    /// Cumulative byte counts are always present; the per-second rates are
+    /// only emitted once a prior sample exists to diff against.
+    static func diskIO() -> [[String: Any]] {
+        guard let matching = IOServiceMatching("IOBlockStorageDriver") else { return [] }
+        var iter: io_iterator_t = 0
+        guard IOServiceGetMatchingServices(kIOMainPortDefault, matching, &iter) == KERN_SUCCESS else {
+            return []
+        }
+        defer { IOObjectRelease(iter) }
+
+        let now = ProcessInfo.processInfo.systemUptime
+        var out: [[String: Any]] = []
+        var nextSamples: [String: DiskIOSample] = [:]
+
+        diskIOLock.lock()
+        defer { diskIOLock.unlock() }
+
+        while case let service = IOIteratorNext(iter), service != 0 {
+            defer { IOObjectRelease(service) }
+
+            // `BSD Name` lives on the IOMedia child, not the IOBlockStorageDriver
+            // node itself. IORegistryEntrySearchCFProperty with kIORegistryIterateRecursively
+            // walks into children to find it — same trick Stats.app uses.
+            // (Auto-bridged return value: already retained per the +1 rule, no
+            // Unmanaged hop required by the Swift import.)
+            let bsdName: String = {
+                guard let cf = IORegistryEntrySearchCFProperty(
+                    service,
+                    kIOServicePlane,
+                    "BSD Name" as CFString,
+                    kCFAllocatorDefault,
+                    IOOptionBits(kIORegistryIterateRecursively)
+                ) else { return "unknown" }
+                return (cf as? String) ?? "unknown"
+            }()
+
+            // Statistics dict is on the IOBlockStorageDriver node directly.
+            // Keys have literal spaces + parens: "Bytes (Read)", "Bytes (Write)",
+            // "Operations (Read)", "Operations (Write)". CFNumber values are
+            // UInt64 cumulative counters that monotonically increase until the
+            // device disappears.
+            guard let statsRef = IORegistryEntryCreateCFProperty(
+                service, "Statistics" as CFString, kCFAllocatorDefault, 0
+            )?.takeRetainedValue() as? [String: Any] else { continue }
+
+            let bytesRead    = (statsRef["Bytes (Read)"]       as? UInt64) ?? 0
+            let bytesWritten = (statsRef["Bytes (Write)"]      as? UInt64) ?? 0
+            let opsRead      = (statsRef["Operations (Read)"]  as? UInt64) ?? 0
+            let opsWritten   = (statsRef["Operations (Write)"] as? UInt64) ?? 0
+
+            var entry: [String: Any] = [
+                "name":         bsdName,
+                "bytesRead":    bytesRead,
+                "bytesWritten": bytesWritten,
+                "opsRead":      opsRead,
+                "opsWritten":   opsWritten
+            ]
+
+            if let prev = diskIOSamples[bsdName] {
+                let elapsed = now - prev.timestamp
+                entry["bytesReadPerSecond"]    = computeRate(before: prev.bytesRead,    after: bytesRead,    elapsed: elapsed)
+                entry["bytesWrittenPerSecond"] = computeRate(before: prev.bytesWritten, after: bytesWritten, elapsed: elapsed)
+            }
+
+            nextSamples[bsdName] = DiskIOSample(
+                bytesRead:    bytesRead,
+                bytesWritten: bytesWritten,
+                timestamp:    now
+            )
+            out.append(entry)
+        }
+
+        diskIOSamples = nextSamples
+        return out
+    }
+
     // Matching the "IOAccelerator" class catches both Apple Silicon's AGX and
     // older Intel iGPU + discrete cards via the IOKit class hierarchy. Max
     // across services so an idle iGPU doesn't shadow a busy dGPU.

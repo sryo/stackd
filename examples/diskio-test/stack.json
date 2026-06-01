@@ -1,0 +1,8 @@
+{
+  "id": "diskio-test",
+  "name": "Disk I/O rates",
+  "anchor": { "edge": "top-right", "inset": [16, 184] },
+  "size": { "w": 260, "h": 220 },
+  "clickThrough": true,
+  "permissions": ["host"]
+}

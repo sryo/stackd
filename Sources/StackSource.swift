@@ -100,7 +100,8 @@ enum ChannelInference {
         "apps.changed":      "apps",
         "spaces.all":        "spaces",
         "host.load":         "host",
-        "host.info":         "host"
+        "host.info":         "host",
+        "host.diskIO":       "host"
     ]
 
     /// Scan `text` (an HTML/JS/CSS source blob) for sd-channel references

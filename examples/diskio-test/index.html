@@ -1,0 +1,63 @@
+<!doctype html>
+<html><head><meta charset="utf-8">
+<style>
+  body {
+    margin: 0; padding: 10px 12px;
+    font: 12px -apple-system, system-ui, sans-serif;
+    color: #fff;
+    background: rgba(20, 20, 22, 0.78);
+    border-radius: 10px;
+    -webkit-backdrop-filter: blur(20px);
+  }
+  h1 { font-size: 11px; margin: 0 0 6px; opacity: 0.55; text-transform: uppercase; letter-spacing: 0.08em; }
+  .row { display: flex; justify-content: space-between; padding: 3px 0; border-bottom: 1px solid rgba(255,255,255,0.06); }
+  .row:last-child { border-bottom: 0; }
+  .name  { font-weight: 600; font-variant-numeric: tabular-nums; }
+  .rates { font-variant-numeric: tabular-nums; opacity: 0.85; }
+  .r { color: #6dd5ff; }
+  .w { color: #ff9b6d; margin-left: 8px; }
+  #status { font-size: 10px; opacity: 0.5; margin-top: 6px; }
+</style>
+</head><body>
+<h1>disk I/O</h1>
+<div id="list">sampling…</div>
+<div id="status"></div>
+<script type="module">
+  import { sd } from "sd://runtime/api.js";
+
+  const list   = document.getElementById("list");
+  const status = document.getElementById("status");
+
+  function fmtRate(bps) {
+    if (bps == null) return "—";
+    if (bps < 1024) return bps.toFixed(0) + " B/s";
+    if (bps < 1024 * 1024) return (bps / 1024).toFixed(1) + " KB/s";
+    if (bps < 1024 * 1024 * 1024) return (bps / (1024 * 1024)).toFixed(2) + " MB/s";
+    return (bps / (1024 * 1024 * 1024)).toFixed(2) + " GB/s";
+  }
+
+  async function tick() {
+    const disks = await sd.host.diskIO();
+    if (!disks || disks.length === 0) {
+      list.textContent = "no block devices";
+      return;
+    }
+    const rows = disks.map(d => `
+      <div class="row">
+        <span class="name">${d.name}</span>
+        <span class="rates">
+          <span class="r">R ${fmtRate(d.bytesReadPerSecond)}</span>
+          <span class="w">W ${fmtRate(d.bytesWrittenPerSecond)}</span>
+        </span>
+      </div>
+    `).join("");
+    list.innerHTML = rows;
+    status.textContent = `${disks.length} device${disks.length === 1 ? "" : "s"} · sampled ${new Date().toLocaleTimeString()}`;
+  }
+
+  // First call seeds baseline (rates are undefined). Second call onward
+  // has live B/s.
+  await tick();
+  setInterval(tick, 1000);
+</script>
+</body></html>

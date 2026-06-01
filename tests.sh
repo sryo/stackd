@@ -25,6 +25,7 @@ TEST_SOURCES=(
   Tests/BridgeJsonifyTests.swift
   Tests/StackDoctorTests.swift
   Tests/UpdateParserTests.swift
+  Tests/HostDiskIOTests.swift
   Tests/TemplateEngineTests.swift
   Tests/main.swift
 )
