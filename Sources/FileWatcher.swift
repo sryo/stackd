@@ -7,6 +7,16 @@ final class FileWatcher {
     private var debounceTask: DispatchWorkItem?
     private let debounceMs: Int
 
+    // Only changes to these extensions trigger a reload. Runtime data files
+    // (SQLite WALs from sd.sqlite, plists from sd.settings, .pid/.lock/.log
+    // from stack-side code) must not cycle the whole host — a stack writing
+    // to its own data dir would otherwise tear down every other stack on
+    // every commit. See digup.db-wal regression: 17 spurious reloads in one
+    // idle session of a stack using SQLite.
+    private static let reloadExtensions: Set<String> = [
+        "js", "mjs", "html", "htm", "css", "json", "svg", "wasm", "stack"
+    ]
+
     init(paths: [String], debounceMs: Int = 300, callback: @escaping () -> Void) {
         self.callback = callback
         self.debounceMs = debounceMs
@@ -17,10 +27,20 @@ final class FileWatcher {
             retain: nil, release: nil, copyDescription: nil
         )
 
-        let streamCallback: FSEventStreamCallback = { _, info, _, _, _, _ in
+        let streamCallback: FSEventStreamCallback = {
+            _, info, numEvents, eventPaths, _, _ in
             guard let info = info else { return }
             let watcher = Unmanaged<FileWatcher>.fromOpaque(info).takeUnretainedValue()
-            watcher.scheduleFire()
+            let paths = Unmanaged<CFArray>
+                .fromOpaque(eventPaths)
+                .takeUnretainedValue() as! [String]
+            for path in paths.prefix(numEvents) {
+                let ext = (path as NSString).pathExtension.lowercased()
+                if FileWatcher.reloadExtensions.contains(ext) {
+                    watcher.scheduleFire()
+                    return
+                }
+            }
         }
 
         let cfPaths = paths as CFArray
@@ -31,7 +51,9 @@ final class FileWatcher {
             cfPaths,
             FSEventStreamEventId(kFSEventStreamEventIdSinceNow),
             0.2,
-            UInt32(kFSEventStreamCreateFlagFileEvents | kFSEventStreamCreateFlagNoDefer)
+            UInt32(kFSEventStreamCreateFlagFileEvents
+                 | kFSEventStreamCreateFlagNoDefer
+                 | kFSEventStreamCreateFlagUseCFTypes)
         )
 
         if let stream = stream {
