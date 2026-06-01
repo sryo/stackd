@@ -124,6 +124,27 @@ function request(payload) {
   });
 }
 
+// Handler-registry helper for the native-mints-an-id pattern shared by
+// sd.hotkey.bind, sd.broadcasts.observe, sd.overlay.attach, and the bind
+// portion of sd.menubar.addItem / sd.httpserver.serve. Native returns the
+// id from `request(bindPayload)`; we stash `callback` under it so the
+// matching `__sd_<name>_fire` dispatcher can route by id. Returns null on
+// failure so callers can early-out without registering a stale entry.
+//
+// Not used by sd.fs.watch (JS mints the watchId before the request) or by
+// the menubar/httpserver handlers (which store structured callback shapes —
+// see those sites for inline registration).
+async function registerHandler(map, bindPayload, callback) {
+  const id = await request(bindPayload);
+  if (id == null || id === false) return null;
+  map.set(id, callback);
+  return id;
+}
+function unregisterHandler(map, id, unbindPayload) {
+  map.delete(id);
+  return request(unbindPayload);
+}
+
 export const sd = {
   // Per-instance screen info, injected before this script runs (see Bridge.swift).
   // Read .current synchronously — items like spacenum + brightness need to
@@ -171,12 +192,53 @@ export const sd = {
     },
     focus(id)  { return request({ type: "windows.byId.focus", id }); },
     close(id)  { return request({ type: "windows.byId.close", id }); },
-    frame(id)  { return request({ type: "windows.byId.frame", id }); }
+    frame(id)  { return request({ type: "windows.byId.frame", id }); },
+    // Synchronous SPI snapshot via CGSHWCaptureWindowList. Works for
+    // hidden / minimized / off-space windows (the AltTab trick) — distinct
+    // from sd.display.snapshot which uses ScreenCaptureKit and gates on
+    // visibility + Screen Recording TCC.
+    //   const png = await sd.windows.snapshot(wid);
+    //   const jpg = await sd.windows.snapshot(wid, { format: "jpeg", quality: 0.7 });
+    //   // → { dataURL, width, height }  (or null if the SPI is unavailable)
+    snapshot(id, opts) {
+      const o = opts || {};
+      return request({
+        type: "windows.byId.snapshot",
+        id, format: o.format || "png", quality: o.quality
+      });
+    },
+    // Atomic multi-window transaction. setFrame calls with an explicit id
+    // inside the closure are queued and committed atomically on closure
+    // return — every window snaps to its new origin on a single compositor
+    // flip instead of cascading. Size still goes through AX per-window (no
+    // SLS size symbol exists), so size cascade may still be visible. Calls
+    // without an id (which target the AX focused window) bypass batching.
+    // Throws-through; queued ops are dropped via commit-empty-then-rethrow.
+    async batch(fn) {
+      const ok = await request({ type: "windows.batch.begin" });
+      if (!ok) return false;
+      try {
+        await fn();
+        return await request({ type: "windows.batch.commit" });
+      } catch (e) {
+        await request({ type: "windows.batch.commit" });
+        throw e;
+      }
+    }
   },
   input:      { layout:    channel("inputLayout") },
   net:        {
     wifi: channel("netWifi"),
-    lan:  channel("netLan")
+    lan:  channel("netLan"),
+    // Network reachability — derived from NWPathMonitor on the daemon side.
+    //   sd.net.path.subscribe(({ status, interfaces, isConstrained, isExpensive }) => …)
+    // status is "satisfied" | "unsatisfied" | "requiresConnection".
+    // interfaces is the available route list, ordered by preference, mapped
+    // to short strings: "wifi" | "wired" | "cellular" | "loopback" | "other".
+    // isConstrained = Low Data Mode; isExpensive = cellular / personal hotspot.
+    // The signal stays null until the first NWPath update lands (typically
+    // within a few hundred ms of stack load).
+    path: channel("netPath")
   },
   defaults: {
     read(bundleId, key) {
@@ -233,12 +295,12 @@ export const sd = {
     // to the stack — unload removes the item automatically.
     async addItem(spec) {
       const { onClick, onMenuPick, icon, title, menu, tooltip } = spec || {};
-      const id = await request({
-        type: "menubar.addItem",
-        icon, title, menu, tooltip
-      });
-      if (id == null || id === false) return null;
-      menubarHandlers.set(id, { onClick, onMenuPick });
+      const id = await registerHandler(
+        menubarHandlers,
+        { type: "menubar.addItem", icon, title, menu, tooltip },
+        { onClick, onMenuPick }
+      );
+      if (id == null) return null;
       return {
         id,
         setTitle(s)       { return request({ type: "menubar.item.setTitle",   id, title: s }); },
@@ -246,8 +308,7 @@ export const sd = {
         setMenu(items)    { return request({ type: "menubar.item.setMenu",    id, items }); },
         setTooltip(s)     { return request({ type: "menubar.item.setTooltip", id, tooltip: s }); },
         remove() {
-          menubarHandlers.delete(id);
-          return request({ type: "menubar.item.remove", id });
+          return unregisterHandler(menubarHandlers, id, { type: "menubar.item.remove", id });
         },
         // Re-assign callbacks after construction (e.g. once a dynamic menu
         // is wired up). Map stays internal.
@@ -328,6 +389,24 @@ export const sd = {
         source: String(source ?? ""),
         language: (opts && opts.language) || "applescript",
         timeout: (opts && opts.timeout) || 10
+      });
+    }
+  },
+  // Invoke a Shortcut by name (the user-visible name in the Shortcuts app).
+  //   const r = await sd.shortcuts.run("My Shortcut");
+  //   const r = await sd.shortcuts.run("Read Text", { input: "hello" });
+  //   // → { stdout, stderr, exitCode }
+  // The shortcut's final "Stop and output" value lands in stdout; a nonzero
+  // exitCode means the run failed (unknown name, mid-shortcut error, denied
+  // TCC). First call on a fresh system surfaces the Shortcuts access prompt.
+  shortcuts: {
+    run(name, opts) {
+      const o = opts || {};
+      return request({
+        type: "shortcuts.run",
+        name: String(name ?? ""),
+        input: o.input,
+        timeout: o.timeout
       });
     }
   },
@@ -428,23 +507,21 @@ export const sd = {
     //   ...later...
     //   await sd.hotkey.unbind(h);
     // Options (skhd parity):
-    //   { mode: "command" }            // only fires while sd.hotkey.mode.current() === "command"
-    //   { apps: ["com.apple.Safari"] } // only fires when Safari is frontmost; "*" matches any
-    // Returns null if the spec doesn't parse. Per-stack: unload cancels all.
-    async bind(spec, fn, opts = {}) {
-      const id = await request({
+    //   { mode: "command" }                       // only fires while sd.hotkey.mode.current() === "command"
+    //   { apps: ["com.apple.Safari"] }            // whitelist: only fires when listed bundleID is frontmost; "*" matches any
+    //   { excludeApps: ["com.apple.Terminal"] }   // blacklist: suppress while listed bundleID is frontmost
+    // apps + excludeApps compose (both must pass). Returns null if the spec doesn't parse. Per-stack: unload cancels all.
+    bind(spec, fn, opts = {}) {
+      return registerHandler(hotkeyHandlers, {
         type: "hotkey.bind",
         spec,
-        mode: opts.mode ?? null,
-        apps: opts.apps ?? null
-      });
-      if (id == null || id === false) return null;
-      hotkeyHandlers.set(id, fn);
-      return id;
+        mode:        opts.mode        ?? null,
+        apps:        opts.apps        ?? null,
+        excludeApps: opts.excludeApps ?? null
+      }, fn);
     },
-    async unbind(id) {
-      hotkeyHandlers.delete(id);
-      return request({ type: "hotkey.unbind", id });
+    unbind(id) {
+      return unregisterHandler(hotkeyHandlers, id, { type: "hotkey.unbind", id });
     },
     // Modal keymaps. While a non-default mode is active, only bindings
     // declared for that mode fire; bindings without a mode are always-on.
@@ -468,15 +545,11 @@ export const sd = {
   //   ...later...
   //   await sd.broadcasts.unobserve(id);
   broadcasts: {
-    async observe(name, fn) {
-      const id = await request({ type: "broadcasts.observe", name });
-      if (id == null || id === false) return null;
-      broadcastHandlers.set(id, fn);
-      return id;
+    observe(name, fn) {
+      return registerHandler(broadcastHandlers, { type: "broadcasts.observe", name }, fn);
     },
-    async unobserve(id) {
-      broadcastHandlers.delete(id);
-      return request({ type: "broadcasts.unobserve", id });
+    unobserve(id) {
+      return unregisterHandler(broadcastHandlers, id, { type: "broadcasts.unobserve", id });
     }
   },
   // CG-context overlay pinned to a target window the stack doesn't own
@@ -507,16 +580,12 @@ export const sd = {
   // invisible to spec authors. Permission: "overlay".
   overlay: {
     async attach(windowId, draw) {
-      const id = await request({ type: "overlay.attach", windowId });
-      if (id == null || id === false) return null;
-      overlayHandlers.set(id, draw);
+      const id = await registerHandler(overlayHandlers, { type: "overlay.attach", windowId }, draw);
+      if (id == null) return null;
       return {
         id,
         update() { return request({ type: "overlay.update", id }); },
-        async detach() {
-          overlayHandlers.delete(id);
-          return request({ type: "overlay.detach", id });
-        }
+        detach()  { return unregisterHandler(overlayHandlers, id, { type: "overlay.detach", id }); }
       };
     }
   },
@@ -541,24 +610,20 @@ export const sd = {
     async serve(opts) {
       const o = opts || {};
       const routes = o.routes || {};
-      const id = await request({
+      const id = await registerHandler(httpServers, {
         type: "httpserver.serve",
         port: o.port || 0,
         bindHost: o.bindHost || "127.0.0.1",
         assetsDir: o.assetsDir,
         routes: Object.keys(routes),
         bonjour: o.bonjour
-      });
+      }, { routes });
       if (id == null) return null;
-      httpServers.set(id, { routes });
       return {
         id,
         port: o.port,
         url: `http://${o.bindHost === "0.0.0.0" ? "localhost" : (o.bindHost || "127.0.0.1")}:${o.port}`,
-        async stop() {
-          httpServers.delete(id);
-          return request({ type: "httpserver.stop", id });
-        }
+        stop() { return unregisterHandler(httpServers, id, { type: "httpserver.stop", id }); }
       };
     }
   },
@@ -621,12 +686,17 @@ export const sd = {
   // System info (one-shot) + load signal (polled 2s):
   //   await sd.host.info()  → { hostname, os: {name,version,build}, locale,
   //                              arch, cpuCount, ramMB }
-  //   sd.host.load          → { cpu: {user,system,idle,total},  // 0-1 fractions
-  //                              idleSeconds,                    // since last HID
-  //                              memoryMB: {used,free,wired} }
+  //   sd.host.load          → { cpu: {user,system,idle,total},     // 0-1 fractions
+  //                              idleSeconds,                       // since last HID
+  //                              memoryMB: {used,free,wired},
+  //                              memoryPressure,                    // "normal"|"warning"|"critical"
+  //                              swap: {totalMB,usedMB},
+  //                              gpu: {usagePercent} }              // Apple Silicon / iGPU
   // First load tick fires ~2s after subscribe (CPU fractions need a prior
   // sample to diff against). idleSeconds resets to ~0 the instant the user
-  // moves the mouse or types.
+  // moves the mouse or types. gpu / swap / memoryPressure may be absent on
+  // hardware where the underlying sysctl or IOAccelerator query fails — treat
+  // each as optional in stack code.
   host: {
     info() { return request({ type: "host.info" }); },
     load:  channel("hostLoad")
@@ -663,6 +733,93 @@ export const sd = {
     tokens(text, unit) { return request({ type: "nlp.tokens",     text: String(text ?? ""), unit }); },
     lemmas(text)       { return request({ type: "nlp.lemmas",     text: String(text ?? "") }); },
     similarity(a, b)   { return request({ type: "nlp.similarity", a: String(a ?? ""), b: String(b ?? "") }); }
+  },
+  // One-shot Spotlight via NSMetadataQuery. `predicate` is the raw
+  // NSPredicate format string — kMDItem* attributes joined by AND / OR.
+  //   await sd.spotlight.find({
+  //     predicate: "kMDItemFSName LIKE[cd] '*.pdf'",
+  //     scopes: ["/Users/me/Documents"],     // default: whole computer
+  //     limit: 50                             // default: unbounded
+  //   })
+  //   // → [{ kMDItemFSName, kMDItemPath, kMDItemContentType,
+  //   //      kMDItemFSContentChangeDate, kMDItemFSCreationDate,
+  //   //      kMDItemFSSize }, ...]
+  // Override `attributes` to fetch a different mdkit attribute set.
+  // Predicate syntax: https://developer.apple.com/library/archive/documentation/Cocoa/Conceptual/Predicates/AdditionalChapters/Introduction.html
+  // Dates are epoch-seconds Numbers; bad predicates will crash the daemon
+  // (NSException isn't catchable from Swift) — test your predicate string.
+  spotlight: {
+    find(opts) {
+      const o = opts || {};
+      return request({
+        type: "spotlight.find",
+        predicate:  o.predicate,
+        scopes:     o.scopes,
+        attributes: o.attributes,
+        limit:      o.limit
+      });
+    }
+  },
+  // Calendar events via EventKit. First call triggers the Calendar TCC
+  // prompt (macOS 14+ asks for "Full Access"). Denial yields [], never null.
+  //   await sd.calendar.events({ from: nowSec, to: nowSec + 86400 })
+  //   await sd.calendar.events({ from, to, calendarIds: ["UUID..."] })
+  //   // → [{ identifier, title, start, end, allDay, calendar,
+  //   //      location?, notes?, url? }, ...]
+  //   await sd.calendar.list()
+  //   // → [{ identifier, title, source, type, allowsModify, color? }, ...]
+  // Times are UNIX epoch seconds (Number). Reminders + event creation +
+  // store-change observers are not yet shipped.
+  calendar: {
+    events(opts) {
+      const o = opts || {};
+      return request({
+        type: "calendar.events",
+        from: o.from, to: o.to,
+        calendarIds: o.calendarIds
+      });
+    },
+    list() { return request({ type: "calendar.list" }); }
+  },
+  // Paired Bluetooth peripherals via IOBluetooth. Triggers the Bluetooth
+  // TCC prompt on first use.
+  //   const devices = await sd.bluetooth.paired();
+  //   // → [{ address, connected, name?, classOfDevice?, services?:
+  //   //      ["Hands-Free Audio Gateway", "A2DP", ...] }, ...]
+  // `services` differentiates AirPods (audio sink + handset) from generic
+  // controllers without you having to decode classOfDevice bits.
+  // Battery levels (AirPods left/right/case, mouse %) are not yet exposed —
+  // those need per-device-class private SPI (separate follow-up).
+  bluetooth: {
+    paired() { return request({ type: "bluetooth.paired" }); }
+  },
+  // Text-to-speech via AVSpeechSynthesizer. No TCC, no microphone.
+  //   sd.speech.speak("hello");
+  //   sd.speech.speak("hola", { voice: "es-ES" });            // by locale
+  //   sd.speech.speak("text", { voice: "com.apple.voice...", rate: 0.5,
+  //                             pitch: 1.1, volume: 0.8 });
+  //   sd.speech.stop();                  // immediate
+  //   sd.speech.stop({ boundary: "word" }); // wait for current word
+  //   const voices = await sd.speech.voices(); // installed voices
+  // rate is 0..1 (0.5 ≈ natural), pitch 0.5..2.0, volume 0..1.
+  // STT (sd.speech.listen) is not yet shipped — separate TCC prompts.
+  speech: {
+    speak(text, opts) {
+      const o = opts || {};
+      return request({
+        type: "speech.speak",
+        text:   String(text ?? ""),
+        voice:  o.voice,
+        rate:   o.rate,
+        pitch:  o.pitch,
+        volume: o.volume
+      });
+    },
+    stop(opts) {
+      const o = opts || {};
+      return request({ type: "speech.stop", boundary: o.boundary || "immediate" });
+    },
+    voices() { return request({ type: "speech.voices" }); }
   },
   // Embedded SQLite (libsqlite3). Minimal wrapper: open / exec / query / close.
   // Default path lands under ~/stackd/stacks/<id>/data/ — absolute paths
@@ -780,7 +937,28 @@ export const sd = {
   // isInUseByAnotherApplication KVO. Use for "camera in use" indicators
   // (the red Continuity Camera dot equivalent). Enumeration is metadata-only
   // and does NOT trigger the TCC camera prompt — stackd never opens a stream.
-  camera: channel("camera"),
+  //
+  // .frame(opts) is the one-shot capture and the first call that DOES trigger
+  // the Camera TCC prompt. Pairs with sd.vision.* — pipe the dataURL
+  // straight in for live face/pose/subject extraction.
+  //   await sd.camera.frame()
+  //   await sd.camera.frame({ deviceId, format: "png" })
+  //   await sd.camera.frame({ format: "jpeg", quality: 0.7, timeoutSeconds: 5 })
+  //   // → { dataURL: "data:image/jpeg;base64,...", width, height }  (or null)
+  // Stream variant (continuous frames) is not yet shipped — wrap .frame() in
+  // a setInterval as a prototype.
+  camera: Object.assign(channel("camera"), {
+    frame(opts) {
+      const o = opts || {};
+      return request({
+        type: "camera.frame",
+        deviceId:       o.deviceId,
+        format:         o.format || "jpeg",
+        quality:        o.quality,
+        timeoutSeconds: o.timeoutSeconds
+      });
+    }
+  }),
   spaces: {
     all: channel("spaces"),
     // Spaces this window is on, by CGWindowID — Promise<number[]>.
@@ -928,6 +1106,7 @@ const __sdSignalPaths = {
   "input.layout":       sd.input.layout,
   "net.wifi":           sd.net.wifi,
   "net.lan":            sd.net.lan,
+  "net.path":           sd.net.path,
   "audio.output":       sd.audio.output,
   "display.all":        sd.display.all,
   "media.nowPlaying":   sd.media.nowPlaying,
@@ -952,9 +1131,12 @@ const __sdSignalPathsSorted = Object.keys(__sdSignalPaths)
   .sort((a, b) => b.length - a.length);
 
 function __sdCompilePlaceholder(expr) {
+  // Compile with (sd, item, index) signature. Non-loop placeholders just
+  // don't reference item/index — bound to undefined when called outside a
+  // sd-each context. Lets the same compiled fn work in both modes.
   let fn;
   try {
-    fn = new Function("sd", "return (" + expr + ");");
+    fn = new Function("sd", "item", "index", "return (" + expr + ");");
   } catch (e) {
     console.error("[stackd] template parse error in {{", expr.trim(), "}}:", String(e));
     fn = () => "";
@@ -967,16 +1149,20 @@ function __sdCompilePlaceholder(expr) {
   return { fn, deps: [...deps] };
 }
 
-function __sdEvalPlaceholder(compiled) {
+function __sdEvalWithScope(compiled, item, index) {
   try {
-    const v = compiled.fn(sd);
+    const v = compiled.fn(sd, item, index);
     return v == null ? "" : String(v);
   } catch (e) {
-    // Typical cause: signal's value is still null, so `sd.battery.percent`
-    // throws on the first read. Once the first sample arrives, the
-    // subscription re-runs and the value renders.
     return "";
   }
+}
+
+function __sdEvalPlaceholder(compiled) {
+  // Typical throw cause: signal's value is still null, so `sd.battery.percent`
+  // throws on the first read. Once the first sample arrives, the subscription
+  // re-runs and the value renders.
+  return __sdEvalWithScope(compiled, undefined, undefined);
 }
 
 function __sdProcessTextNode(textNode) {
@@ -1040,9 +1226,212 @@ function __sdProcessAttribute(el, attrName, raw) {
   }
 }
 
+// ── sd-each list rendering ─────────────────────────────────────────────────
+// `<li sd-each="sd.camera">{{ item.name }} ({{ index }})</li>` clones the
+// element once per array item. `item` and `index` are bound inside any
+// `{{ … }}` (text content or attributes) on the element or its descendants.
+// Full re-render on every signal fire — fine for typical list sizes
+// (cameras, displays, USB, focused-app windows). Not keyed/diffed.
+//
+// Limitations (v1):
+//   - Nested sd-each not supported; an inner loop is silently ignored with a
+//     console.warn. Compose a separate stack or drop down to JS.
+//   - sd-if on the same element as sd-each is ignored (warn). Filter inside the
+//     each expression instead: `sd-each="(sd.x || []).filter(…)"`.
+//   - sd-if INSIDE a sd-each subtree is not honored per-clone — the each's
+//     clones don't re-run sd-if compilation. Use a `{{ cond ? … : '' }}`
+//     placeholder for per-item conditionals.
+
+function __sdProcessEachElement(el) {
+  const expr = el.getAttribute("sd-each");
+  const sourceCompiled = __sdCompilePlaceholder(expr);
+  const anchor = document.createComment(" sd-each:" + expr + " ");
+  el.parentNode.insertBefore(anchor, el);
+  el.remove();
+  el.removeAttribute("sd-each");
+
+  // Pre-scan template (the detached `el`) for `{{ … }}` in text + attributes.
+  // Record paths so we can re-locate each slot in a fresh clone without
+  // re-scanning. Path is an array of childNodes-indices from the template root.
+  const textOps = [];
+  const attrOps = [];
+  const allDeps = new Set(sourceCompiled.deps);
+  const SKIP_TAGS = new Set(["SCRIPT", "STYLE"]);
+
+  function collectPlaceholders(raw) {
+    const re = /\{\{([\s\S]+?)\}\}/g;
+    const parts = [];
+    const compileds = [];
+    let lastIdx = 0;
+    let m;
+    while ((m = re.exec(raw)) !== null) {
+      parts.push(raw.slice(lastIdx, m.index));
+      const c = __sdCompilePlaceholder(m[1]);
+      compileds.push(c);
+      parts.push(null);
+      for (const d of c.deps) allDeps.add(d);
+      lastIdx = m.index + m[0].length;
+    }
+    if (compileds.length === 0) return null;
+    parts.push(raw.slice(lastIdx));
+    return { parts, compileds };
+  }
+
+  function scan(node, path) {
+    if (node.nodeType === 3) { // TEXT
+      const got = collectPlaceholders(node.nodeValue);
+      if (got) textOps.push({ path, ...got });
+      return;
+    }
+    if (node.nodeType !== 1) return;
+    if (SKIP_TAGS.has(node.nodeName)) return;
+    // Nested sd-each: don't recurse; v1 limitation.
+    if (node !== el && node.hasAttribute && node.hasAttribute("sd-each")) {
+      console.warn("[stackd] nested sd-each not supported; ignoring inner loop on", node.nodeName);
+      return;
+    }
+    for (const attr of Array.from(node.attributes)) {
+      if (attr.name === "sd-each") continue;
+      const got = collectPlaceholders(attr.value);
+      if (got) attrOps.push({ path, attrName: attr.name, ...got });
+    }
+    for (let i = 0; i < node.childNodes.length; i++) {
+      scan(node.childNodes[i], path.concat([i]));
+    }
+  }
+  scan(el, []);
+
+  function findByPath(root, path) {
+    let n = root;
+    for (const i of path) {
+      if (!n || !n.childNodes) return null;
+      n = n.childNodes[i];
+    }
+    return n;
+  }
+
+  function applyParts(parts, compileds, item, index) {
+    let out = "";
+    let slotIdx = 0;
+    for (const p of parts) {
+      if (p === null) { out += __sdEvalWithScope(compileds[slotIdx], item, index); slotIdx++; }
+      else            { out += p; }
+    }
+    return out;
+  }
+
+  let active = [];
+
+  function render() {
+    for (const n of active) n.remove();
+    active = [];
+    let arr;
+    try { arr = sourceCompiled.fn(sd, undefined, undefined); } catch (e) { arr = null; }
+    if (!Array.isArray(arr)) return;
+
+    for (let i = 0; i < arr.length; i++) {
+      const item = arr[i];
+      const clone = el.cloneNode(true);
+      for (const op of textOps) {
+        const node = findByPath(clone, op.path);
+        if (!node || node.nodeType !== 3) continue;
+        node.nodeValue = applyParts(op.parts, op.compileds, item, i);
+      }
+      for (const op of attrOps) {
+        const node = findByPath(clone, op.path);
+        if (!node || node.nodeType !== 1) continue;
+        node.setAttribute(op.attrName, applyParts(op.parts, op.compileds, item, i));
+      }
+      anchor.parentNode.insertBefore(clone, anchor.nextSibling);
+      active.push(clone);
+    }
+  }
+
+  render();
+  for (const sig of allDeps) {
+    const unsub = sig.subscribe(render);
+    __sdBindUnsubs.add(unsub);
+  }
+}
+
+// ── sd-if conditional rendering ────────────────────────────────────────────
+// `<li sd-if="!sd.camera || sd.camera.length === 0">no cameras</li>` removes
+// the element from the DOM when the expression is falsy, re-attaches it when
+// truthy. Expression is re-evaluated on every signal fire whose channel it
+// references (same regex-based dep detection as templates). The element keeps
+// its compiled `{{ … }}` subscriptions across toggles — when detached, those
+// fire harmlessly into a disconnected DOM; on re-attach the subtree already
+// reflects current state.
+//
+// Setup runs BEFORE the text/attr walks so the anchor is in place, but
+// detachment is deferred until AFTER those walks — that lets the regular
+// placeholder compilation visit the (still-attached) subtree, so a falsy-at-
+// load-time element still has its internal `{{ }}` bindings wired up for when
+// it becomes truthy later.
+function __sdSetupIfElement(el) {
+  const expr = el.getAttribute("sd-if");
+  el.removeAttribute("sd-if");
+  const compiled = __sdCompilePlaceholder(expr);
+  const anchor = document.createComment(" sd-if:" + expr + " ");
+  el.parentNode.insertBefore(anchor, el);
+
+  function evalTruthy() {
+    try { return !!compiled.fn(sd, undefined, undefined); }
+    catch (e) { return false; }
+  }
+  function render() {
+    const truthy = evalTruthy();
+    if (truthy && !el.isConnected) {
+      anchor.parentNode.insertBefore(el, anchor.nextSibling);
+    } else if (!truthy && el.isConnected) {
+      el.remove();
+    }
+  }
+  return { render, deps: compiled.deps };
+}
+
 function __sdCompileTemplates(root) {
   const SKIP = new Set(["SCRIPT", "STYLE"]);
   const PROBE = /\{\{[\s\S]+?\}\}/;
+
+  // sd-each first — each loop removes its template from the live DOM and
+  // replaces it with a comment anchor. Doing this before the text/attr walks
+  // keeps those walks from seeing — and per-placeholder-subscribing —
+  // anything inside loop bodies (which manage their own subscriptions and
+  // need `item`/`index` in scope).
+  const eachEls = [];
+  const eachWalker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT);
+  let eachEl;
+  while ((eachEl = eachWalker.nextNode())) {
+    if (SKIP.has(eachEl.nodeName)) continue;
+    if (eachEl.hasAttribute("sd-each")) eachEls.push(eachEl);
+  }
+  for (const e of eachEls) {
+    // Skip elements that were detached by an outer sd-each that already
+    // processed them (nested case — warned about in __sdProcessEachElement).
+    if (!e.isConnected) continue;
+    if (e.hasAttribute("sd-if")) {
+      console.warn("[stackd] sd-if on a sd-each element is ignored; filter inside the each expression instead");
+      e.removeAttribute("sd-if");
+    }
+    __sdProcessEachElement(e);
+  }
+
+  // sd-if setup pass — installs comment anchors so structure is final before
+  // the text/attr walks, but defers initial detachment until those walks have
+  // had a chance to compile placeholders inside the subtree.
+  const ifJobs = [];
+  const ifWalker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT);
+  let ifEl;
+  while ((ifEl = ifWalker.nextNode())) {
+    if (SKIP.has(ifEl.nodeName)) continue;
+    if (ifEl.hasAttribute("sd-if")) ifJobs.push(ifEl);
+  }
+  const ifSetups = [];
+  for (const e of ifJobs) {
+    if (!e.isConnected) continue;
+    ifSetups.push(__sdSetupIfElement(e));
+  }
 
   // Collect text nodes first, mutate after — mutating during walk skips siblings.
   const textNodes = [];
@@ -1067,17 +1456,34 @@ function __sdCompileTemplates(root) {
     }
   }
   for (const [e, name, raw] of attrJobs) __sdProcessAttribute(e, name, raw);
+
+  // sd-if initial eval + dep subscription. Runs last so the subtree's
+  // placeholders are compiled (and live-subscribed) before the first
+  // detachment.
+  for (const { render, deps } of ifSetups) {
+    render();
+    for (const sig of deps) {
+      const unsub = sig.subscribe(render);
+      __sdBindUnsubs.add(unsub);
+    }
+  }
 }
 
 // Guard against double-compilation if an explicit `import { sd }` in a stack
 // races with the auto-injected runtime loader. ES modules dedup by URL so
 // the body only runs once anyway — guard is belt-and-suspenders.
+//
+// Deferred via setTimeout(0) after DOMContentLoaded so any user
+// `<script type="module">` body that defines helpers (e.g. `window.icon = …`
+// for templates to call) has finished executing before the template walk
+// starts. Adds <1ms perceptible delay; eliminates a fragile race.
 if (!window.__sd_templates_compiled) {
   window.__sd_templates_compiled = true;
+  const compile = () => __sdCompileTemplates(document);
   if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", () => __sdCompileTemplates(document));
+    document.addEventListener("DOMContentLoaded", () => setTimeout(compile, 0));
   } else {
-    __sdCompileTemplates(document);
+    setTimeout(compile, 0);
   }
 }
 
