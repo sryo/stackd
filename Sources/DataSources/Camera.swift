@@ -103,14 +103,13 @@ final class CameraObserver: RefCountedObserver {
             self.rebindKVO()
             self.fire()
         }
-        let t1 = nc.addObserver(forName: .AVCaptureDeviceWasConnected,
-                                object: nil, queue: .main, using: onChange)
-        let t2 = nc.addObserver(forName: .AVCaptureDeviceWasDisconnected,
-                                object: nil, queue: .main, using: onChange)
+        let ncToken = installNotifications([
+            (nc, .AVCaptureDeviceWasConnected, onChange),
+            (nc, .AVCaptureDeviceWasDisconnected, onChange)
+        ])
 
         return Token { [weak self] in
-            nc.removeObserver(t1)
-            nc.removeObserver(t2)
+            ncToken.cancel()
             self?.watchers.removeAll()
         }
     }

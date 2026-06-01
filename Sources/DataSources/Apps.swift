@@ -27,14 +27,9 @@ final class FrontmostAppObserver: RefCountedObserver {
     private override init() { super.init() }
 
     override func install() -> Token {
-        let token = NSWorkspace.shared.notificationCenter.addObserver(
-            forName: NSWorkspace.didActivateApplicationNotification,
-            object: nil,
-            queue: .main
-        ) { [weak self] _ in self?.fire() }
-        return Token {
-            NSWorkspace.shared.notificationCenter.removeObserver(token)
-        }
+        installNotifications([
+            (NSWorkspace.shared.notificationCenter, NSWorkspace.didActivateApplicationNotification)
+        ])
     }
 }
 
@@ -113,20 +108,12 @@ final class AppsObserver: RefCountedObserver {
 
     override func install() -> Token {
         let nc = NSWorkspace.shared.notificationCenter
-        let names: [NSNotification.Name] = [
-            NSWorkspace.didLaunchApplicationNotification,
-            NSWorkspace.didTerminateApplicationNotification,
-            NSWorkspace.didHideApplicationNotification,
-            NSWorkspace.didUnhideApplicationNotification,
-            NSWorkspace.didActivateApplicationNotification
-        ]
-        let tokens = names.map { name in
-            nc.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
-                self?.fire()
-            }
-        }
-        return Token {
-            for t in tokens { nc.removeObserver(t) }
-        }
+        return installNotifications([
+            (nc, NSWorkspace.didLaunchApplicationNotification),
+            (nc, NSWorkspace.didTerminateApplicationNotification),
+            (nc, NSWorkspace.didHideApplicationNotification),
+            (nc, NSWorkspace.didUnhideApplicationNotification),
+            (nc, NSWorkspace.didActivateApplicationNotification)
+        ])
     }
 }

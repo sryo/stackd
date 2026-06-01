@@ -23,12 +23,9 @@ final class InputObserver: RefCountedObserver {
 
     override func install() -> Token {
         // TIS notifications are CFNotifications via the local distributed center.
-        let token = DistributedNotificationCenter.default().addObserver(
-            forName: NSNotification.Name(kTISNotifySelectedKeyboardInputSourceChanged as String),
-            object: nil, queue: .main
-        ) { [weak self] _ in self?.fire() }
-        return Token {
-            DistributedNotificationCenter.default().removeObserver(token)
-        }
+        return installNotifications([
+            (DistributedNotificationCenter.default(),
+             NSNotification.Name(kTISNotifySelectedKeyboardInputSourceChanged as String))
+        ])
     }
 }

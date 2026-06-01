@@ -591,33 +591,30 @@ final class FrontmostWindowObserver: RefCountedObserver {
     private override init() { super.init() }
 
     private var currentTokens: [Token] = []
-    private var workspaceToken: NSObjectProtocol?
 
     override func install() -> Token? {
-        workspaceToken = NSWorkspace.shared.notificationCenter.addObserver(
-            forName: NSWorkspace.didActivateApplicationNotification,
-            object: nil, queue: .main
-        ) { [weak self] note in
-            guard let self = self,
-                  let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
-            else { return }
-            self.installFor(pid: app.processIdentifier)
-            // Activation itself counts as a focus change — fire so consumers
-            // pick up the new frontmost-app window without waiting for the
-            // first within-app AX notification.
-            self.fire()
-        }
+        let ncToken = installNotifications([
+            (NSWorkspace.shared.notificationCenter,
+             NSWorkspace.didActivateApplicationNotification,
+             { [weak self] note in
+                 guard let self = self,
+                       let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
+                 else { return }
+                 self.installFor(pid: app.processIdentifier)
+                 // Activation itself counts as a focus change — fire so consumers
+                 // pick up the new frontmost-app window without waiting for the
+                 // first within-app AX notification.
+                 self.fire()
+             })
+        ])
         // Install for current frontmost immediately so subscribers don't have
         // to wait for the next app switch.
         if let app = NSWorkspace.shared.frontmostApplication {
             installFor(pid: app.processIdentifier)
         }
         return Token { [weak self] in
+            ncToken.cancel()
             guard let self = self else { return }
-            if let t = self.workspaceToken {
-                NSWorkspace.shared.notificationCenter.removeObserver(t)
-                self.workspaceToken = nil
-            }
             // Cancel the pool subscriptions so the AXObserverPool tears down
             // its per-pid AXAppObserver when this was the last subscriber —
             // matching the Token contract instead of waiting on deinit.

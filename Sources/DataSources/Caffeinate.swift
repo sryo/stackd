@@ -50,36 +50,27 @@ final class CaffeinateObserver: RefCountedObserver {
         lockedFlag = Caffeinate.currentlyLocked()
         sleepingFlag = false
 
-        let t1 = ws.addObserver(forName: NSWorkspace.willSleepNotification,
-                                object: nil, queue: .main) { [weak self] _ in
-            self?.sleepingFlag = true
-            self?.fire()
-        }
-        let t2 = ws.addObserver(forName: NSWorkspace.didWakeNotification,
-                                object: nil, queue: .main) { [weak self] _ in
-            self?.sleepingFlag = false
-            self?.fire()
-        }
         // The screensaver and lock-screen notifications come from
         // DistributedNotificationCenter, not the workspace center — they're
         // posted by loginwindow, not NSWorkspace. Same shape Hammerspoon uses
         // for hs.caffeinate.watcher's lockScreen / unlockScreen events.
-        let t3 = dn.addObserver(forName: Notification.Name("com.apple.screenIsLocked"),
-                                object: nil, queue: .main) { [weak self] _ in
-            self?.lockedFlag = true
-            self?.fire()
-        }
-        let t4 = dn.addObserver(forName: Notification.Name("com.apple.screenIsUnlocked"),
-                                object: nil, queue: .main) { [weak self] _ in
-            self?.lockedFlag = false
-            self?.fire()
-        }
-
-        return Token {
-            ws.removeObserver(t1)
-            ws.removeObserver(t2)
-            dn.removeObserver(t3)
-            dn.removeObserver(t4)
-        }
+        return installNotifications([
+            (ws, NSWorkspace.willSleepNotification, { [weak self] _ in
+                self?.sleepingFlag = true
+                self?.fire()
+            }),
+            (ws, NSWorkspace.didWakeNotification, { [weak self] _ in
+                self?.sleepingFlag = false
+                self?.fire()
+            }),
+            (dn, Notification.Name("com.apple.screenIsLocked"), { [weak self] _ in
+                self?.lockedFlag = true
+                self?.fire()
+            }),
+            (dn, Notification.Name("com.apple.screenIsUnlocked"), { [weak self] _ in
+                self?.lockedFlag = false
+                self?.fire()
+            })
+        ])
     }
 }

@@ -90,3 +90,47 @@ class RefCountedObserver {
         DispatchQueue.main.asyncAfter(deadline: .now() + teardownDelay, execute: work)
     }
 }
+
+// MARK: - NotificationCenter install/teardown sugar
+
+extension RefCountedObserver {
+    /// Install a batch of `NotificationCenter.addObserver` calls — each spec
+    /// fires `self.fire()` on the main queue — and return a Token that
+    /// removes all of them on cancel.
+    ///
+    /// The "every observer just calls `self?.fire()`" shape is by far the
+    /// most common in DataSources/. Pre-helper, each observer cost ~6 lines
+    /// of identical add/remove wiring; this collapses them to one literal.
+    /// For observers that need per-spec side effects (state flips, KVO
+    /// rebinds, userInfo decoding) use the (center, name, handler) overload.
+    func installNotifications(
+        _ specs: [(NotificationCenter, Notification.Name)]
+    ) -> Token {
+        let tokens: [(NotificationCenter, NSObjectProtocol)] = specs.map { center, name in
+            let t = center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                self?.fire()
+            }
+            return (center, t)
+        }
+        return Token {
+            for (center, t) in tokens { center.removeObserver(t) }
+        }
+    }
+
+    /// Install a batch of `NotificationCenter.addObserver` calls where each
+    /// spec carries its own handler — for observers that need per-name side
+    /// effects beyond `self?.fire()` (state flips, userInfo decoding, etc.).
+    /// Handlers run on the main queue. The returned Token removes every
+    /// observer it registered.
+    func installNotifications(
+        _ specs: [(NotificationCenter, Notification.Name, (Notification) -> Void)]
+    ) -> Token {
+        let tokens: [(NotificationCenter, NSObjectProtocol)] = specs.map { center, name, handler in
+            let t = center.addObserver(forName: name, object: nil, queue: .main, using: handler)
+            return (center, t)
+        }
+        return Token {
+            for (center, t) in tokens { center.removeObserver(t) }
+        }
+    }
+}

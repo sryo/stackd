@@ -74,11 +74,9 @@ final class DisplayObserver: RefCountedObserver {
     private override init() { super.init() }
 
     override func install() -> Token {
-        let nc = NotificationCenter.default
-        let screenToken = nc.addObserver(
-            forName: NSApplication.didChangeScreenParametersNotification,
-            object: nil, queue: .main
-        ) { [weak self] _ in self?.fire() }
+        let ncToken = installNotifications([
+            (NotificationCenter.default, NSApplication.didChangeScreenParametersNotification)
+        ])
 
         // Brightness has no notification; poll every 2s while at least one
         // stack subscribes. Bridge's lastDisplay JSON dedup absorbs no-ops.
@@ -88,7 +86,7 @@ final class DisplayObserver: RefCountedObserver {
         RunLoop.main.add(timer, forMode: .common)
 
         return Token {
-            nc.removeObserver(screenToken)
+            ncToken.cancel()
             timer.invalidate()
         }
     }

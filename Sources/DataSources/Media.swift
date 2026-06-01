@@ -89,17 +89,10 @@ final class MediaObserver: RefCountedObserver {
         guard MediaRemote.registerForNotifications != nil else { return nil }
         _ = MediaObserver.registerOnce
         let nc = NotificationCenter.default
-        let tokens = [
-            "kMRMediaRemoteNowPlayingInfoDidChangeNotification",
-            "kMRMediaRemoteNowPlayingApplicationDidChangeNotification",
-            "kMRMediaRemoteNowPlayingPlaybackQueueChangedNotification"
-        ].map { name in
-            nc.addObserver(forName: NSNotification.Name(name), object: nil, queue: .main) { [weak self] _ in
-                self?.fire()
-            }
-        }
-        return Token {
-            for t in tokens { nc.removeObserver(t) }
-        }
+        return installNotifications([
+            (nc, NSNotification.Name("kMRMediaRemoteNowPlayingInfoDidChangeNotification")),
+            (nc, NSNotification.Name("kMRMediaRemoteNowPlayingApplicationDidChangeNotification")),
+            (nc, NSNotification.Name("kMRMediaRemoteNowPlayingPlaybackQueueChangedNotification"))
+        ])
     }
 }

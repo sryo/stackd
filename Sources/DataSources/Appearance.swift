@@ -28,18 +28,12 @@ final class AppearanceObserver: RefCountedObserver {
     private override init() { super.init() }
 
     override func install() -> Token {
-        let dnc = DistributedNotificationCenter.default()
-        let wnc = NSWorkspace.shared.notificationCenter
-
-        let themeToken = dnc.addObserver(
-            forName: NSNotification.Name("AppleInterfaceThemeChangedNotification"),
-            object: nil, queue: .main
-        ) { [weak self] _ in self?.fire() }
-
-        let a11yToken = wnc.addObserver(
-            forName: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification,
-            object: nil, queue: .main
-        ) { [weak self] _ in self?.fire() }
+        let ncToken = installNotifications([
+            (DistributedNotificationCenter.default(),
+             NSNotification.Name("AppleInterfaceThemeChangedNotification")),
+            (NSWorkspace.shared.notificationCenter,
+             NSWorkspace.accessibilityDisplayOptionsDidChangeNotification)
+        ])
 
         // Accent color has no system notification; poll while observer is
         // active. The whole timer stops once the last subscriber leaves.
@@ -49,8 +43,7 @@ final class AppearanceObserver: RefCountedObserver {
         RunLoop.main.add(timer, forMode: .common)
 
         return Token {
-            dnc.removeObserver(themeToken)
-            wnc.removeObserver(a11yToken)
+            ncToken.cancel()
             timer.invalidate()
         }
     }

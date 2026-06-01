@@ -161,17 +161,12 @@ final class SpacesObserver: RefCountedObserver {
     private static var cgsRegistered = false
 
     override func install() -> Token {
-        let workspaceCenter = NSWorkspace.shared.notificationCenter
-        let appCenter = NotificationCenter.default
-        let t1 = workspaceCenter.addObserver(
-            forName: NSWorkspace.activeSpaceDidChangeNotification,
-            object: nil, queue: .main
-        ) { [weak self] _ in self?.fire() }
-        // Screen reconfig can add/remove displays, which changes the keys.
-        let t2 = appCenter.addObserver(
-            forName: NSApplication.didChangeScreenParametersNotification,
-            object: nil, queue: .main
-        ) { [weak self] _ in self?.fire() }
+        // Screen reconfig can add/remove displays, which changes the keys —
+        // observe alongside activeSpaceDidChange.
+        let ncToken = installNotifications([
+            (NSWorkspace.shared.notificationCenter, NSWorkspace.activeSpaceDidChangeNotification),
+            (NotificationCenter.default, NSApplication.didChangeScreenParametersNotification)
+        ])
 
         if !SpacesObserver.cgsRegistered,
            let reg = SkyLightSpaces.registerNotifyProc {
@@ -182,9 +177,6 @@ final class SpacesObserver: RefCountedObserver {
             SpacesObserver.cgsRegistered = true
         }
 
-        return Token {
-            workspaceCenter.removeObserver(t1)
-            appCenter.removeObserver(t2)
-        }
+        return ncToken
     }
 }
