@@ -146,9 +146,13 @@ enum Sensors {
     }
 }
 
-/// 2s poll. IOHIDEventSystem has no change-notification API for sensor values,
-/// so we pull on a timer like Host does. Tuned to match the Host channel —
-/// stacks that overlay CPU% on top of CPU temps get a consistent cadence.
+/// 2s base poll. IOHIDEventSystem has no change-notification API for sensor
+/// values, so we pull on a timer like Host does. Tuned to match the Host
+/// channel — stacks that overlay CPU% on top of CPU temps get a consistent
+/// cadence. Per-stack fanout can be slowed further via
+/// `sd.sensors.subscribe(fn, { interval })`: the bridge gates the JSON +
+/// evaluateJavaScript hop per stack (see Bridge.channelIntervals); the
+/// native poll itself stays at 2s because other subscribers may want it.
 final class SensorsObserver: RefCountedObserver {
     static let shared = SensorsObserver()
     private override init() { super.init() }

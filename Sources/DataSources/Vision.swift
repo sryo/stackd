@@ -170,9 +170,10 @@ enum Vision {
     }
 
     /// 2D joint keypoints per detected body (up to 17 named joints each).
-    /// Joint coordinates are web-style top-left origin in 0..1. A joint is
-    /// omitted from the dict if Vision's per-joint confidence is below 0.1 —
-    /// under that threshold the position is effectively noise.
+    /// Joint coordinates are web-style top-left origin in 0..1. Every joint
+    /// Vision reports is emitted — including low-confidence ones — so stacks
+    /// pick their own threshold (e.g. `.filter(j => j.confidence >= 0.1)`)
+    /// instead of inheriting a daemon-side cutoff.
     /// Consumers: posture coaching, gesture UIs, motion-capture overlays.
     static func bodyPose(image source: Any?,
                          completion: @escaping ([String: Any]?) -> Void) {
@@ -185,7 +186,6 @@ enum Vision {
                 var joints: [String: Any] = [:]
                 if let points = try? obs.recognizedPoints(.all) {
                     for (jointKey, point) in points {
-                        guard point.confidence > 0.1 else { continue }
                         let yFlipped = 1.0 - point.location.y
                         joints[jointName(jointKey)] = [
                             "x":          point.location.x,

@@ -80,6 +80,11 @@ final class DisplayObserver: RefCountedObserver {
 
         // Brightness has no notification; poll every 2s while at least one
         // stack subscribes. Bridge's lastDisplay JSON dedup absorbs no-ops.
+        // Per-stack fanout can be slowed further via
+        // `sd.display.all.subscribe(fn, { interval })` (see
+        // Bridge.channelIntervals); the native 2s timer stays because hot-plug
+        // / arrangement changes still drive fire() on its own NotificationCenter
+        // path.
         let timer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
             self?.fire()
         }
