@@ -9,6 +9,7 @@ SWIFT_SOURCES=(
   Sources/AppDelegate.swift
   Sources/StackWindow.swift
   Sources/StackHost.swift
+  Sources/StackSource.swift
   Sources/URLSchemeHandler.swift
   Sources/StackScope.swift
   Sources/Private/SkyLight.swift
@@ -22,14 +23,17 @@ SWIFT_SOURCES=(
   Sources/FileWatcher.swift
   Sources/DataSources/Battery.swift
   Sources/DataSources/Camera.swift
+  Sources/DataSources/CameraCapture.swift
+  Sources/DataSources/Calendar.swift
   Sources/DataSources/Mouse.swift
   Sources/DataSources/Cursor.swift
   Sources/DataSources/HotCorners.swift
   Sources/DataSources/Hotkey.swift
   Sources/DataSources/Events.swift
+  Sources/DataSources/EventsSynth.swift
 
-  Sources/DataSources/App.swift
   Sources/DataSources/Windows.swift
+  Sources/DataSources/WindowsSnapshot.swift
   Sources/DataSources/WindowEvents.swift
   Sources/DataSources/MissionControl.swift
 
@@ -42,11 +46,13 @@ SWIFT_SOURCES=(
   Sources/DataSources/Defaults.swift
   Sources/DataSources/Broadcasts.swift
   Sources/DataSources/Menubar.swift
+  Sources/DataSources/MenubarVisibility.swift
   Sources/DataSources/Menu.swift
 
 
   Sources/DataSources/Network.swift
   Sources/DataSources/Audio.swift
+  Sources/DataSources/Bluetooth.swift
   Sources/DataSources/Display.swift
   Sources/DataSources/DisplaySnapshot.swift
   Sources/DataSources/Media.swift
@@ -57,6 +63,7 @@ SWIFT_SOURCES=(
   Sources/DataSources/FS.swift
   Sources/DataSources/Pasteboard.swift
   Sources/DataSources/Proc.swift
+  Sources/DataSources/Shortcuts.swift
   Sources/DataSources/Apps.swift
   Sources/DataSources/Icons.swift
   Sources/DataSources/AX.swift
@@ -66,13 +73,11 @@ SWIFT_SOURCES=(
   Sources/DataSources/DisplayLink.swift
   Sources/DataSources/Overlay.swift
   Sources/DataSources/HTTPServer.swift
-  Sources/DataSources/VisionOCR.swift
-  Sources/DataSources/VisionFaces.swift
-  Sources/DataSources/VisionFeaturePrint.swift
-  Sources/DataSources/VisionSubjectMask.swift
-  Sources/DataSources/VisionBodyPose.swift
+  Sources/DataSources/Vision.swift
   Sources/DataSources/SQLite.swift
   Sources/DataSources/NLP.swift
+  Sources/DataSources/Spotlight.swift
+  Sources/DataSources/Speech.swift
   Sources/DataSources/Notify.swift
   Sources/DataSources/TouchDevice.swift
   Sources/DataSources/USB.swift
@@ -93,6 +98,8 @@ swiftc -O \
   -framework CoreLocation \
   -framework CoreVideo \
   -framework DiskArbitration \
+  -framework EventKit \
+  -framework IOBluetooth \
   -framework IOKit \
   -framework MultitouchSupport \
   -framework NaturalLanguage \
@@ -100,7 +107,7 @@ swiftc -O \
   -framework ScreenCaptureKit \
   -framework Vision \
   -framework WebKit \
-  -F /System/Library/PrivateFrameworks \
+  -F "$(xcrun --sdk macosx --show-sdk-path)/System/Library/PrivateFrameworks" \
   -target arm64-apple-macos13.0
 
 # Stage Runtime next to the binary so URLSchemeHandler can find it via
