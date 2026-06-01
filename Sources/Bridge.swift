@@ -1691,7 +1691,7 @@ final class Bridge: NSObject, WKScriptMessageHandler {
             }
         }
         pushFn()
-        scope.adopt(WorkspaceObserver.shared.subscribe(pushFn))
+        scope.adopt(FrontmostAppObserver.shared.subscribe(pushFn))
         if includeWindows {
             scope.adopt(FrontmostWindowObserver.shared.subscribe(pushFn))
         }

@@ -1,5 +1,43 @@
 import AppKit
 
+// Two domains, one workspace:
+//   `App`  + `FrontmostAppObserver` — single-notification, high-fire-rate
+//                                     (didActivateApplicationNotification only)
+//   `Apps` + `AppsObserver`         — five-notification list-rebuild
+//                                     (launch/terminate/hide/unhide/activate)
+// Both subscribe to NSWorkspace.shared.notificationCenter but with different
+// lifetimes and fire shapes — keep the observers separate, just colocate them.
+// Window-related code (focused window, lifecycle, per-id actions, focus
+// observer) lives in Windows.swift — they share the AX + CGWindowList machinery.
+
+enum App {
+    static func frontmostApp() -> [String: Any]? {
+        guard let app = NSWorkspace.shared.frontmostApplication else { return nil }
+        return [
+            "pid": Int(app.processIdentifier),
+            "name": app.localizedName ?? "",
+            "bundleId": app.bundleIdentifier ?? "",
+            "active": app.isActive
+        ]
+    }
+}
+
+final class FrontmostAppObserver: RefCountedObserver {
+    static let shared = FrontmostAppObserver()
+    private override init() { super.init() }
+
+    override func install() -> Token {
+        let token = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didActivateApplicationNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in self?.fire() }
+        return Token {
+            NSWorkspace.shared.notificationCenter.removeObserver(token)
+        }
+    }
+}
+
 // Running apps as a signal + the four imperative verbs every launcher /
 // dock / kill-switch eventually needs. Apps without a bundle id (rare but
 // real — some kernel-side helpers, some old apps) are filtered out — there's
