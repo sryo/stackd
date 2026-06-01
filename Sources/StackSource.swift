@@ -103,7 +103,8 @@ enum ChannelInference {
         "host.info":         "host",
         "host.diskIO":       "host",
         "calendar.observe":  "calendar",
-        "menubar.observe":   "menubar"
+        "menubar.observe":   "menubar",
+        "privacy.observe":   "privacy"
     ]
 
     /// Scan `text` (an HTML/JS/CSS source blob) for sd-channel references

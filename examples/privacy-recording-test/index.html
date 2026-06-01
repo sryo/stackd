@@ -1,0 +1,89 @@
+<!doctype html>
+<html><head><meta charset="utf-8">
+<style>
+  body { font: 12px -apple-system, sans-serif; color: #ddd;
+         background: rgba(0,0,0,0.72); margin: 0; padding: 12px;
+         border-radius: 10px; }
+  h1   { font-size: 11px; margin: 0 0 8px; opacity: 0.6;
+         text-transform: uppercase; letter-spacing: 0.06em; }
+  .row { display: flex; align-items: center; gap: 6px;
+         padding: 4px 0; }
+  .dot { width: 8px; height: 8px; border-radius: 50%;
+         flex-shrink: 0; background: rgba(255,255,255,0.15); }
+  .dot.active   { background: #ff3b30; box-shadow: 0 0 6px rgba(255,59,48,0.7); }
+  .dot.disabled { background: rgba(255,255,255,0.08); }
+  .label { flex: 1; }
+  .device { opacity: 0.55; font-size: 11px; }
+  .idle  { opacity: 0.35; font-style: italic; }
+  .note  { font-size: 10px; opacity: 0.4; margin-top: 8px;
+           padding-top: 6px; border-top: 1px solid rgba(255,255,255,0.06); }
+</style>
+</head><body>
+<h1>Recording status</h1>
+
+<div class="row">
+  <div class="dot disabled" id="screen-dot"></div>
+  <div class="label">Screen <span class="device" id="screen-text">v1: not detected</span></div>
+</div>
+
+<div class="row">
+  <div class="dot" id="camera-dot"></div>
+  <div class="label">Camera <span class="device" id="camera-text">idle</span></div>
+</div>
+
+<div class="row">
+  <div class="dot" id="mic-dot"></div>
+  <div class="label">Microphone <span class="device" id="mic-text">idle</span></div>
+</div>
+
+<div class="note">
+  v1: per-device boolean only. App attribution coming in v2.
+</div>
+
+<script type="module">
+  import { sd } from "sd://runtime/api.js";
+
+  const cameraDot  = document.getElementById("camera-dot");
+  const cameraText = document.getElementById("camera-text");
+  const micDot     = document.getElementById("mic-dot");
+  const micText    = document.getElementById("mic-text");
+  // Screen dot stays disabled in v1 — process attribution isn't supported
+  // yet (see api.js docstring for the SPI rationale). Kept in the markup
+  // so the row order matches what v2 will surface.
+
+  function render(state) {
+    // Camera
+    const cam = state.camera || [];
+    if (cam.length > 0) {
+      cameraDot.className = "dot active";
+      cameraText.textContent = cam.map(c => c.device).join(", ");
+      cameraText.classList.remove("idle");
+    } else {
+      cameraDot.className = "dot";
+      cameraText.textContent = "idle";
+      cameraText.classList.add("idle");
+    }
+
+    // Microphone
+    const mic = state.microphone || [];
+    if (mic.length > 0) {
+      micDot.className = "dot active";
+      micText.textContent = mic.map(m => m.device).join(", ");
+      micText.classList.remove("idle");
+    } else {
+      micDot.className = "dot";
+      micText.textContent = "idle";
+      micText.classList.add("idle");
+    }
+  }
+
+  // Prime once with a one-shot read so the badge renders without waiting
+  // for the first 2s observer tick. The observer itself diff-pushes —
+  // identical steady-state ticks don't re-render here.
+  render(await sd.privacy.recording());
+
+  sd.privacy.observe.subscribe(state => {
+    if (state) render(state);
+  });
+</script>
+</body></html>

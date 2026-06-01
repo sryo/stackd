@@ -33,6 +33,7 @@ TEST_SOURCES=(
   Tests/SpeechSTTTests.swift
   Tests/MenubarItemsTests.swift
   Tests/AppIntentsTests.swift
+  Tests/PrivacyRecordingTests.swift
   Tests/TemplateEngineTests.swift
   Tests/main.swift
 )

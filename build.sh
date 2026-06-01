@@ -54,6 +54,7 @@ SWIFT_SOURCES=(
   Sources/DataSources/Devices.swift
   Sources/DataSources/Camera.swift
   Sources/DataSources/AppIntents.swift
+  Sources/DataSources/Privacy.swift
 )
 
 C_SOURCES=(

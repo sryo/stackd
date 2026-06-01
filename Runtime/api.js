@@ -1413,6 +1413,29 @@ export const sd = {
     //   // later: unsub();
     observe: channel("calendarChanged")
   },
+  // "Is anything capturing my screen / mic / camera right now?" — cross-
+  // references the live-capture signals macOS exposes through public APIs.
+  //   const r = await sd.privacy.recording();
+  //   // → { screen: [], camera: [{ device, id, inUse: true }, ...],
+  //   //                  microphone: [{ device, id, inUse: true }, ...] }
+  //   sd.privacy.observe.subscribe(({ camera, microphone }) => {
+  //     // Fires every 2s when the active set changes (diff-pushed —
+  //     // steady-state "nothing recording" doesn't refire).
+  //   });
+  // v1 limitations (documented):
+  //  - `screen` is always [] — accurate process attribution for screen
+  //    capture needs private SPI (out of scope for v1). Future v2 can
+  //    populate the array without breaking the shape contract.
+  //  - Camera / mic entries don't include `app` / `pid` — AVCaptureDevice
+  //    + CoreAudio don't expose the owning process; resolving it would
+  //    need fragile lsof / /dev walks. v1 surfaces the per-device boolean
+  //    only. v2 may add app attribution once a stable signal exists.
+  // Reading does NOT trigger camera / microphone TCC prompts (no stream
+  // is opened — pure property reads on the device enumeration).
+  privacy: {
+    recording() { return request({ type: "privacy.recording" }); },
+    observe: channel("privacy")
+  },
   // Paired Bluetooth peripherals via IOBluetooth. Triggers the Bluetooth
   // TCC prompt on first use.
   //   const devices = await sd.bluetooth.paired();

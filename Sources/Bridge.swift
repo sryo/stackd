@@ -254,6 +254,7 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         if manifest.permissions.contains("display")    { startDisplay() }
         if manifest.permissions.contains("media")      { startMedia() }
         if manifest.permissions.contains("calendar")   { startCalendar() }
+        if manifest.permissions.contains("privacy")    { startPrivacy() }
         if manifest.permissions.contains("pasteboard") { startPasteboard() }
         if manifest.permissions.contains("apps")       { startApps() }
         if manifest.permissions.contains("spaces")     { startSpaces() }
@@ -1092,6 +1093,21 @@ final class Bridge: NSObject, WKScriptMessageHandler {
             ) { [weak bridge] id in
                 bridge?.respond(requestId: requestId, value: id as Any? ?? NSNull())
             }
+        },
+
+        // Privacy — "what's actively recording right now?" one-shot read.
+        // Cross-references AVCaptureDevice.isInUseByAnotherApplication
+        // (camera) and kAudioDevicePropertyDeviceIsRunningSomewhere
+        // (microphone). Screen is empty in v1 — accurate process
+        // attribution for screen capture needs private SPI (file-level
+        // note in Privacy.swift). Returns the three-key shape always —
+        // arrays may be empty but the keys are stable across versions.
+        // Reads do NOT trigger camera / microphone TCC prompts (no stream
+        // is ever opened — pure property reads).
+        .sync("privacy.recording", permission: "privacy",
+              denyValue: ["screen": [[String: Any]](), "camera": [[String: Any]](),
+                          "microphone": [[String: Any]]()]) { _ in
+            Privacy.recording()
         },
 
         // Bluetooth — paired device list via IOBluetooth. Triggers the
@@ -2260,6 +2276,18 @@ final class Bridge: NSObject, WKScriptMessageHandler {
             // suppresses a real store change. JS doesn't read the value —
             // the channel is treated as a bell, not a snapshot.
             ["ts": Date().timeIntervalSince1970]
+        }
+    }
+
+    // Privacy — polled 2s observer pushes the cross-categorical
+    // "what's recording" snapshot whenever the active set changes.
+    // startChannel's lastState dedupe handles the steady-state case
+    // (nothing recording → same payload tick after tick → no push).
+    // The snapshot itself reads AVCaptureDevice + CoreAudio property
+    // APIs; neither triggers a TCC prompt.
+    private func startPrivacy() {
+        startChannel(name: "privacy", observer: PrivacyObserver.shared) {
+            Privacy.recording()
         }
     }
 
