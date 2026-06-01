@@ -30,6 +30,7 @@ TEST_SOURCES=(
   Tests/CalendarTests.swift
   Tests/SpotlightLiveTests.swift
   Tests/CameraStreamTests.swift
+  Tests/SpeechSTTTests.swift
   Tests/TemplateEngineTests.swift
   Tests/main.swift
 )

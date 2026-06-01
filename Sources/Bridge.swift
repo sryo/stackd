@@ -85,6 +85,15 @@ final class Bridge: NSObject, WKScriptMessageHandler {
     // stops every active capture so reload doesn't strand the camera LED on.
     fileprivate var cameraStreamHandles: [Int: Token] = [:]
     fileprivate var nextCameraStreamId: Int = 1
+    // sd.speech.listen handles — one Listener per active listen() call. The
+    // Listener owns the SFSpeechRecognizer task + AVAudioEngine + tap, so the
+    // Token's cancel calls listener.stop() (which removes the tap, cancels
+    // the task, ends the request). Per-handle channel push uses the
+    // synthesized name "speech:listen:<id>" — JS sd.speech.listen() builds
+    // the same name from the returned handle id and subscribes via the
+    // standard channel() signal machinery (mirrors bonjour.browse).
+    fileprivate var speechListenHandles: [Int: Token] = [:]
+    fileprivate var nextSpeechListenId: Int = 1
     // SQLite handles minted via sd.sqlite.open(). Tracked per-Bridge so the
     // scope drain on stack unload closes every connection — the underlying
     // SQLite.HandleStore is process-wide but the *ownership* is stack-scoped.
@@ -387,6 +396,16 @@ final class Bridge: NSObject, WKScriptMessageHandler {
             guard let self = self else { return }
             for (_, t) in self.cameraStreamHandles { t.cancel() }
             self.cameraStreamHandles.removeAll()
+        })
+        // Speech listeners — stop every active SFSpeechRecognizer task +
+        // audio tap owned by this stack. Without this, a stack that hot-
+        // reloads while listening would strand the recognizer holding the
+        // microphone (and the recording-indicator dot) until the daemon
+        // process exits.
+        scope.adopt(Token { [weak self] in
+            guard let self = self else { return }
+            for (_, t) in self.speechListenHandles { t.cancel() }
+            self.speechListenHandles.removeAll()
         })
         // SQLite — sqlite3_close_v2 every connection minted by this stack.
         // No-ops if the JS code already called db.close() explicitly.
@@ -873,10 +892,14 @@ final class Bridge: NSObject, WKScriptMessageHandler {
             }
         },
 
-        // Speech — text-to-speech via AVSpeechSynthesizer. No TCC, no
-        // microphone — the engine runs entirely on the local audio device.
-        // STT (sd.speech.listen) needs SFSpeechRecognizer + Microphone TCC
-        // and is deferred.
+        // Speech — text-to-speech via AVSpeechSynthesizer (no TCC, no
+        // microphone — the engine runs entirely on the local audio device)
+        // and speech-to-text via SFSpeechRecognizer + AVAudioEngine. STT
+        // triggers TWO TCC prompts on first listen():
+        //   - Microphone           (NSMicrophoneUsageDescription)
+        //   - Speech Recognition   (NSSpeechRecognitionUsageDescription)
+        // Per-handle channel push for listen() uses the synthesized name
+        // "speech:listen:<id>" (mirrors bonjour.browse).
         .sync("speech.speak", permission: "speech", denyValue: false) { body in
             Speech.speak(
                 text:   body["text"]   as? String ?? "",
@@ -891,6 +914,72 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         },
         .sync("speech.voices", permission: "speech", denyValue: [[String: Any]]()) { _ in
             Speech.voices()
+        },
+        // Supported recognizer locales (BCP-47 strings). One-shot read; the
+        // set is static per OS install. No TCC — just an API query.
+        .sync("speech.locales", permission: "speech", denyValue: [String]()) { _ in
+            Speech.availableLocales()
+        },
+        // Start a continuous recognizer. Mints an id synchronously; the
+        // recognizer + audio engine come up asynchronously inside the
+        // Listener (TCC requests are async). Each partial result and the
+        // final result are pushed through "speech:listen:<id>".
+        .custom("speech.listen.start", permission: "speech") { bridge, body, requestId in
+            let locale = body["locale"] as? String
+            let requireOnDevice = (body["requireOnDevice"] as? Bool) ?? false
+            let id = bridge.nextSpeechListenId
+            bridge.nextSpeechListenId += 1
+            let channel = "speech:listen:\(id)"
+            // Capture id strongly inside the closures — the listener may
+            // outlive the immediate respond() because TCC prompts are
+            // user-paced. Errors fan out through the same channel as a
+            // single push with { isFinal: true, error } so JS callers can
+            // treat them uniformly.
+            let listener = Speech.Listener(
+                locale: locale,
+                requireOnDevice: requireOnDevice,
+                onResult: { [weak bridge] envelope in
+                    guard let bridge = bridge else { return }
+                    let json = Bridge.jsonify(envelope)
+                    bridge.push(channel: channel, json: json)
+                    // Final result → drop the handle so a follow-up stop()
+                    // is a no-op (the listener already tore itself down
+                    // inside its result callback).
+                    if (envelope["isFinal"] as? Bool) == true {
+                        bridge.speechListenHandles.removeValue(forKey: id)
+                    }
+                },
+                onError: { [weak bridge] message in
+                    guard let bridge = bridge else { return }
+                    let envelope: [String: Any] = [
+                        "text":     "",
+                        "isFinal":  true,
+                        "segments": [[String: Any]](),
+                        "error":    message
+                    ]
+                    let json = Bridge.jsonify(envelope)
+                    bridge.push(channel: channel, json: json)
+                    bridge.speechListenHandles.removeValue(forKey: id)
+                }
+            )
+            bridge.speechListenHandles[id] = Token { listener.stop() }
+            listener.start(requireOnDevice: requireOnDevice)
+            bridge.respond(requestId: requestId, value: id)
+        },
+        .syncBridge("speech.listen.stop", permission: "speech", denyValue: false) { b, body in
+            guard let id = body["id"] as? Int,
+                  let t  = b.speechListenHandles.removeValue(forKey: id) else { return false }
+            t.cancel()
+            return true
+        },
+        // Convenience — stop every active listener owned by this stack.
+        // Equivalent to calling stop() on each handle returned from
+        // listen(), but useful for a "panic stop" UI affordance or page
+        // teardown shortcut.
+        .syncBridge("speech.listen.cancel", permission: "speech", denyValue: false) { b, _ in
+            for (_, t) in b.speechListenHandles { t.cancel() }
+            b.speechListenHandles.removeAll()
+            return true
         },
 
         // Camera — one-shot frame grab. Triggers the Camera TCC prompt the

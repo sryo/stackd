@@ -1403,7 +1403,12 @@ export const sd = {
   bluetooth: {
     paired() { return request({ type: "bluetooth.paired" }); }
   },
-  // Text-to-speech via AVSpeechSynthesizer. No TCC, no microphone.
+  // Text-to-speech via AVSpeechSynthesizer (no TCC, no microphone) plus
+  // speech-to-text via SFSpeechRecognizer + AVAudioEngine. STT triggers
+  // TWO TCC prompts on first listen():
+  //   - Microphone           (NSMicrophoneUsageDescription)
+  //   - Speech Recognition   (NSSpeechRecognitionUsageDescription)
+  //
   //   sd.speech.speak("hello");
   //   sd.speech.speak("hola", { voice: "es-ES" });            // by locale
   //   sd.speech.speak("text", { voice: "com.apple.voice...", rate: 0.5,
@@ -1412,25 +1417,90 @@ export const sd = {
   //   sd.speech.stop({ boundary: "word" }); // wait for current word
   //   const voices = await sd.speech.voices(); // installed voices
   // rate is 0..1 (0.5 ≈ natural), pitch 0.5..2.0, volume 0..1.
-  // STT (sd.speech.listen) is not yet shipped — separate TCC prompts.
-  speech: {
-    speak(text, opts) {
+  //
+  //   const locales = await sd.speech.locales();   // BCP-47 strings
+  //
+  //   const ear = sd.speech.listen({ locale: "en-US" });
+  //   ear.subscribe(({ text, isFinal, segments, error }) => {
+  //     if (error) console.warn("speech listen failed:", error);
+  //     render(text);                              // partials stream in
+  //     if (isFinal) console.log("final:", text);  // recognizer stopped
+  //   });
+  //   // ...later, to stop early:
+  //   await ear.stop();
+  //
+  // Pass { requireOnDevice: true } to force local-only recognition (audio
+  // never leaves the device). Not every locale supports on-device — listen()
+  // fires once with { error: "on-device recognition not supported…" } when
+  // it doesn't. sd.speech.listen.cancel() stops every active listener
+  // owned by this stack in one call (panic-stop shortcut).
+  speech: (() => {
+    // listen() returns a handle synchronously; the underlying id arrives
+    // async (the request() round-trip), so subscribers attached before the
+    // id resolves get buffered locally and re-bound to the synthesized
+    // channel ("speech:listen:<id>") once we have it. Mirrors the
+    // sd.bonjour.browse pattern exactly.
+    const listen = (opts) => {
       const o = opts || {};
-      return request({
-        type: "speech.speak",
-        text:   String(text ?? ""),
-        voice:  o.voice,
-        rate:   o.rate,
-        pitch:  o.pitch,
-        volume: o.volume
+      const localSubs = new Set();
+      let realCh = null;
+      let realId = null;
+      let stopped = false;
+      const start = request({
+        type:            "speech.listen.start",
+        locale:          o.locale,
+        requireOnDevice: !!o.requireOnDevice
+      }).then((id) => {
+        if (id == null || stopped) return null;
+        realId = id;
+        realCh = channel("speech:listen:" + id);
+        for (const fn of localSubs) realCh.subscribe(fn);
+        localSubs.clear();
+        return id;
       });
-    },
-    stop(opts) {
-      const o = opts || {};
-      return request({ type: "speech.stop", boundary: o.boundary || "immediate" });
-    },
-    voices() { return request({ type: "speech.voices" }); }
-  },
+      return {
+        get id() { return realId; },
+        subscribe(fn) {
+          if (realCh) return realCh.subscribe(fn);
+          localSubs.add(fn);
+          // Pre-bind unsubscribe: drop from the local set if the start
+          // request hasn't resolved yet. Post-bind unsubscribes are
+          // best-effort (process-lifetime channels — same trade-off as
+          // sd.bonjour.browse).
+          return () => { localSubs.delete(fn); };
+        },
+        async stop() {
+          stopped = true;
+          const id = await start;
+          if (id == null) return false;
+          return request({ type: "speech.listen.stop", id });
+        }
+      };
+    };
+    // Convenience hung off listen() itself — `sd.speech.listen.cancel()`
+    // tears down every active listener owned by this stack at once.
+    listen.cancel = () => request({ type: "speech.listen.cancel" });
+    return {
+      speak(text, opts) {
+        const o = opts || {};
+        return request({
+          type: "speech.speak",
+          text:   String(text ?? ""),
+          voice:  o.voice,
+          rate:   o.rate,
+          pitch:  o.pitch,
+          volume: o.volume
+        });
+      },
+      stop(opts) {
+        const o = opts || {};
+        return request({ type: "speech.stop", boundary: o.boundary || "immediate" });
+      },
+      voices()  { return request({ type: "speech.voices" }); },
+      locales() { return request({ type: "speech.locales" }); },
+      listen
+    };
+  })(),
   // Embedded SQLite (libsqlite3). Minimal wrapper: open / exec / query / close.
   // Default path lands under ~/stackd/stacks/<id>/data/ — absolute paths
   // and ~ paths pass through. FTS4 and FTS5 are compiled into the system

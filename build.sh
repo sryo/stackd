@@ -78,6 +78,7 @@ swiftc -O \
   -framework OSAKit \
   -framework QuickLookThumbnailing \
   -framework ScreenCaptureKit \
+  -framework Speech \
   -framework Vision \
   -framework WebKit \
   -F "$(xcrun --sdk macosx --show-sdk-path)/System/Library/PrivateFrameworks" \

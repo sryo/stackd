@@ -1,0 +1,113 @@
+<!doctype html>
+<html><head><meta charset="utf-8">
+<style>
+  body {
+    margin: 0; padding: 10px 12px;
+    font: 11px -apple-system, system-ui, sans-serif;
+    color: #fff;
+    background: rgba(20, 20, 22, 0.78);
+    border-radius: 10px;
+    -webkit-backdrop-filter: blur(20px);
+  }
+  h1 { font-size: 10px; margin: 0 0 6px; opacity: 0.55; text-transform: uppercase; letter-spacing: 0.08em; }
+  .row { display: flex; gap: 6px; margin-bottom: 8px; }
+  button {
+    flex: 1;
+    background: rgba(255,255,255,0.08);
+    color: #fff;
+    border: 1px solid rgba(255,255,255,0.12);
+    border-radius: 6px;
+    padding: 6px 10px;
+    font: inherit;
+    cursor: pointer;
+  }
+  button:hover { background: rgba(255,255,255,0.14); }
+  button:disabled { opacity: 0.35; cursor: default; }
+  #status { font: 10px ui-monospace, Menlo, monospace; opacity: 0.7; margin-bottom: 6px; }
+  #transcript {
+    font: 12px ui-monospace, Menlo, monospace;
+    min-height: 80px;
+    padding: 8px;
+    background: rgba(0,0,0,0.25);
+    border-radius: 6px;
+    line-height: 1.4;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+  .partial { opacity: 0.55; }
+  .final   { color: #9be29b; }
+  .error   { color: #ff7a7a; }
+</style>
+</head><body>
+<h1>sd.speech.listen — partial → final transcription</h1>
+<div class="row">
+  <button id="start">Start listening</button>
+  <button id="stop" disabled>Stop</button>
+</div>
+<div id="status">idle</div>
+<div id="transcript"></div>
+<script type="module">
+  import { sd } from "sd://runtime/api.js";
+
+  // sd.speech.listen — SFSpeechRecognizer + AVAudioEngine wrapper.
+  //
+  // listen(opts) returns a handle with subscribe(fn) + stop(). The callback
+  // fires with { text, isFinal, segments?, error? } each time the recognizer
+  // posts a partial. A final result fires once with isFinal: true and the
+  // recognizer stops on its own.
+  //
+  // First call triggers TWO TCC prompts in sequence:
+  //   - Microphone           (NSMicrophoneUsageDescription)
+  //   - Speech Recognition   (NSSpeechRecognitionUsageDescription)
+  //
+  // Pass { requireOnDevice: true } to force local-only recognition (audio
+  // never leaves the device). Not every locale supports on-device — the
+  // listener fires once with { error: "…" } if it doesn't.
+
+  const startBtn  = document.getElementById("start");
+  const stopBtn   = document.getElementById("stop");
+  const statusEl  = document.getElementById("status");
+  const scriptEl  = document.getElementById("transcript");
+
+  let handle = null;
+
+  startBtn.addEventListener("click", () => {
+    if (handle) return;
+    scriptEl.textContent = "";
+    scriptEl.className = "";
+    statusEl.textContent = "requesting mic + speech recognition…";
+    startBtn.disabled = true;
+    stopBtn.disabled  = false;
+
+    handle = sd.speech.listen({ locale: "en-US" });
+    handle.subscribe(({ text, isFinal, error }) => {
+      if (error) {
+        statusEl.textContent = "error";
+        scriptEl.textContent = error;
+        scriptEl.className = "error";
+        finished();
+        return;
+      }
+      scriptEl.textContent = text || "(listening…)";
+      scriptEl.className = isFinal ? "final" : "partial";
+      statusEl.textContent = isFinal ? "final" : "listening… (partial)";
+      if (isFinal) finished();
+    });
+  });
+
+  stopBtn.addEventListener("click", async () => {
+    if (!handle) return;
+    statusEl.textContent = "stopping…";
+    await handle.stop();
+    // The final-result callback may or may not fire after stop() — the
+    // recognizer cancels in-flight. finished() is idempotent either way.
+    finished();
+  });
+
+  function finished() {
+    handle = null;
+    startBtn.disabled = false;
+    stopBtn.disabled  = true;
+  }
+</script>
+</body></html>
