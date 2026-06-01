@@ -1330,27 +1330,36 @@ final class Bridge: NSObject, WKScriptMessageHandler {
     private static let dispatch: [String: Primitive] =
         Dictionary(uniqueKeysWithValues: primitives.map { ($0.type, $0) })
 
-    private func dispatchFsEvents(watchId: Int, events: [(path: String, flags: FSEventStreamEventFlags)]) {
+    /// Dispatch to a JS global handler with pre-formatted JS argument
+    /// strings. `handler` is the global property name (e.g. "__sd_fs_event",
+    /// "onHotkey_foo", a user-supplied callback name); we look it up via
+    /// `globalThis[<jsString-of-handler>]` so handler names with quotes or
+    /// other tricky characters can't break out. Each entry in `args` is
+    /// already valid JS (a JSON blob, a numeric literal, a string literal)
+    /// and is joined with commas.
+    private func fireGlobal(handler: String, args: [String] = []) {
         guard let webView = webView else { return }
-        let payload = events.map { ev -> [String: Any] in
-            ["path": ev.path, "kind": FSWatch.kindFor(flags: ev.flags)]
-        }
-        let json = Bridge.jsonify(payload)
-        let script = "window.__sd_fs_event && window.__sd_fs_event(\(watchId), \(json));"
+        let h = Bridge.jsString(handler)
+        let joined = args.joined(separator: ", ")
+        let script = "globalThis[\(h)] && globalThis[\(h)](\(joined));"
         DispatchQueue.main.async {
             webView.evaluateJavaScript(script, completionHandler: nil)
         }
     }
 
+    private func dispatchFsEvents(watchId: Int, events: [(path: String, flags: FSEventStreamEventFlags)]) {
+        let payload = events.map { ev -> [String: Any] in
+            ["path": ev.path, "kind": FSWatch.kindFor(flags: ev.flags)]
+        }
+        fireGlobal(handler: "__sd_fs_event", args: ["\(watchId)", Bridge.jsonify(payload)])
+    }
+
     /// Pump a menubar-item click / pick / etc. back to JS. The JS-side proxy
     /// in api.js (sd.menubar.addItem) routes this to the stack's callbacks.
     fileprivate func dispatchMenubarEvent(itemId: Int, type: String, payload: Any?) {
-        guard let webView = webView else { return }
         let payloadJson = payload.map { Bridge.jsonify($0) } ?? "null"
-        let script = "window.__sd_menubar_event && window.__sd_menubar_event(\(itemId), \"\(type)\", \(payloadJson));"
-        DispatchQueue.main.async {
-            webView.evaluateJavaScript(script, completionHandler: nil)
-        }
+        fireGlobal(handler: "__sd_menubar_event",
+                   args: ["\(itemId)", Bridge.jsString(type), payloadJson])
     }
 
     private func log(_ s: String) {
@@ -1422,30 +1431,18 @@ final class Bridge: NSObject, WKScriptMessageHandler {
     }
 
     private func startBattery() {
-        let pushFn: () -> Void = { [weak self] in
-            guard let self = self else { return }
-            let pct = Battery.percent()
-            let charging = Battery.isCharging()
-            let json = "{\"percent\":\(pct),\"charging\":\(charging)}"
-            if json == self.lastState["battery"] { return }     // skip no-op push
-            self.lastState["battery"] = json
-            self.push(channel: "battery", json: json)
+        startChannel(name: "battery", observer: BatteryObserver.shared) {
+            ["percent": Battery.percent(), "charging": Battery.isCharging()]
         }
-        pushFn()
-        scope.adopt(BatteryObserver.shared.subscribe(pushFn))
     }
 
     private func startMouse() {
-        let pushFn: () -> Void = { [weak self] in
-            guard let self = self else { return }
+        // Truncate to Int for the dedupe — sub-pixel jitter would otherwise
+        // push every tick. Matches the original ad-hoc interpolation.
+        startChannel(name: "mouse", observer: MouseObserver.shared) {
             let p = Mouse.location()
-            let json = "{\"x\":\(Int(p.x)),\"y\":\(Int(p.y))}"
-            if json == self.lastState["mouse"] { return }       // idle cursor → no push
-            self.lastState["mouse"] = json
-            self.push(channel: "mouse", json: json)
+            return ["x": Int(p.x), "y": Int(p.y)]
         }
-        pushFn()
-        scope.adopt(MouseObserver.shared.subscribe(pushFn))
     }
 
     private func startAppearance() {
@@ -1701,14 +1698,14 @@ final class Bridge: NSObject, WKScriptMessageHandler {
     }
 
     private func fireHotkey(callback: String) {
-        guard let webView = webView else { return }
+        // Strip embedded quotes defensively — the callback comes from a stack
+        // manifest, and `onHotkey_<callback>` is interpolated into the lookup
+        // name. fireGlobal escapes the resulting key for us via jsString.
         let safe = callback.replacingOccurrences(of: "\"", with: "")
-        let script = "window.onHotkey_\(safe) && window.onHotkey_\(safe)();"
-        DispatchQueue.main.async { webView.evaluateJavaScript(script, completionHandler: nil) }
+        fireGlobal(handler: "onHotkey_\(safe)")
     }
 
     private func fireEventTap(callback: String, type: CGEventType, event: CGEvent) {
-        guard let webView = webView else { return }
         let typeName = EventTapRegistry.name(for: type)
         let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
         let flags = event.flags.rawValue
@@ -1737,15 +1734,10 @@ final class Bridge: NSObject, WKScriptMessageHandler {
             for (k, v) in g { payload[k] = v }
         }
 
-        let json = Bridge.jsonify(payload)
-        let script = "window.onTap_\(callback) && window.onTap_\(callback)(\(json));"
-        DispatchQueue.main.async {
-            webView.evaluateJavaScript(script, completionHandler: nil)
-        }
+        fireGlobal(handler: "onTap_\(callback)", args: [Bridge.jsonify(payload)])
     }
 
     private func fireHotCorner(spec: HotCornerSpec, isEnter: Bool, at p: CGPoint) {
-        guard let webView = webView else { return }
         let payload: [String: Any] = [
             "corner": spec.corner.rawValue,
             "state":  isEnter ? "enter" : "leave",
@@ -1753,17 +1745,14 @@ final class Bridge: NSObject, WKScriptMessageHandler {
             "y":      Int(p.y)
         ]
         let json = Bridge.jsonify(payload)
+        fireGlobal(handler: spec.callback, args: [json])
         // The tooltip callback only fires on enter — leave-side it has nothing
         // to add (the primary callback's leave fires whether or not a tooltip
         // was declared). Stack code that wants tooltip-hide behavior reads
         // state === "leave" from the primary.
-        let primary = "globalThis[\(Bridge.jsString(spec.callback))] && globalThis[\(Bridge.jsString(spec.callback))](\(json));"
-        let tooltipFire: String = {
-            guard isEnter, let t = spec.tooltip else { return "" }
-            return "globalThis[\(Bridge.jsString(t))] && globalThis[\(Bridge.jsString(t))](\(json));"
-        }()
-        let script = primary + tooltipFire
-        DispatchQueue.main.async { webView.evaluateJavaScript(script, completionHandler: nil) }
+        if isEnter, let t = spec.tooltip {
+            fireGlobal(handler: t, args: [json])
+        }
     }
 
     /// Escape an arbitrary string into a JS string literal. JSONSerialization
