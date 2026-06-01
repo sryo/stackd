@@ -220,9 +220,7 @@ export const sd = {
     //   const h = await sd.windows.cornerHints(id);
     //   const r = h.subrole === "AXSystemDialog" || h.role === "AXScrollArea"
     //             ? 0 : h.toolbarPresent ? 26 : 16;
-    // matching Tahoe's WindowServer rounding. Older `sd.windows.cornerRadius`
-    // was a daemon-side heuristic — removed in R1b per the "push to stacks"
-    // rule (F3).
+    // matching Tahoe's WindowServer rounding.
     cornerHints(id) { return request({ type: "windows.byId.cornerHints", id }); },
     // Synchronous SPI snapshot via CGSHWCaptureWindowList. Works for
     // hidden / minimized / off-space windows (the AltTab trick) — distinct

@@ -12,6 +12,7 @@ final class HotkeyRegistry {
         let callback: () -> Void
         let mode: String?          // nil = always fires; otherwise must match currentMode
         let apps: [String]?        // nil = no app gating; element "*" = always-match
+        let excludeApps: [String]? // nil = no blacklist; otherwise matching bundleID is suppressed
     }
 
     private var bindings: [UInt32: Binding] = [:]
@@ -40,6 +41,7 @@ final class HotkeyRegistry {
     func bind(spec: String,
               mode: String? = nil,
               apps: [String]? = nil,
+              excludeApps: [String]? = nil,
               callback: @escaping () -> Void) -> Token? {
         let parts = spec.lowercased().split(separator: "+").map { $0.trimmingCharacters(in: .whitespaces) }
         var mods: UInt32 = 0
@@ -61,7 +63,7 @@ final class HotkeyRegistry {
 
         let id = nextId
         nextId += 1
-        bindings[id] = Binding(callback: callback, mode: mode, apps: apps)
+        bindings[id] = Binding(callback: callback, mode: mode, apps: apps, excludeApps: excludeApps)
 
         var ref: EventHotKeyRef?
         let hotKeyID = EventHotKeyID(signature: OSType(0x73645f6b /* "sd_k" */), id: id)
@@ -101,10 +103,9 @@ final class HotkeyRegistry {
     fileprivate func dispatch(id: UInt32) {
         guard let b = bindings[id] else { return }
         if let m = b.mode, m != currentMode { return }
-        if let apps = b.apps, !apps.contains("*") {
-            let frontId = NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? ""
-            if !apps.contains(frontId) { return }
-        }
+        let frontId = NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? ""
+        if let apps = b.apps, !apps.contains("*"), !apps.contains(frontId) { return }
+        if let exclude = b.excludeApps, exclude.contains(frontId) { return }
         b.callback()
     }
 

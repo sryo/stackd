@@ -29,11 +29,12 @@
     if (currentWid === win.id) return;
     if (current) await current.detach();
     currentWid = win.id;
-    // Per-window corner radius. R1b will return raw AX hints via
-    // sd.windows.cornerHints(id); until that ships, fall back through the
-    // current heuristic-based sd.windows.cornerRadius(id) or 16. Use
-    // defensively so this stack doesn't block on R1b.
-    const radius = (await sd.windows.cornerRadius?.(win.id)) ?? 16;
+    // Per-window corner radius: daemon returns raw AX hints; stack maps to
+    // 26 / 16 / 0 the same way WindowScape's outline.lua does on Tahoe.
+    const hints = (await sd.windows.cornerHints?.(win.id)) ?? {};
+    const radius =
+      hints.subrole === "AXSystemDialog" || hints.role === "AXScrollArea" ? 0 :
+      hints.toolbarPresent ? 26 : 16;
     current = await sd.overlay.attach(win.id, {
       css: `
         html, body { margin: 0; padding: 0; background: transparent; overflow: hidden; }
