@@ -1,0 +1,7 @@
+{
+  "id": "hydration-tracker",
+  "name": "HydrationTracker",
+  "anchor": { "edge": "top-right", "inset": [16, 16] },
+  "size": { "w": 200, "h": 56 },
+  "permissions": ["camera", "vision", "settings"]
+}

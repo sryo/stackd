@@ -1,0 +1,145 @@
+<!doctype html>
+<html><head><meta charset="utf-8">
+<!--
+  hydration-tracker — counts daily water "drinks" via camera + Vision body pose.
+
+  Heads up: the FIRST call to sd.camera.frame() triggers the macOS Camera
+  TCC prompt. Approve once and the stack quietly polls from then on. The
+  camera LED will be lit while frames are being captured (every 2s).
+
+  Detection: wrist y < nose y - 0.05 (Vision returns top-left-origin coords,
+  so "wrist higher on screen than nose" means y is smaller). Two consecutive
+  positive ticks (4s) must fire AND at least 30s must have passed since the
+  last counted drink — kills accidental double-counts on a single sip.
+-->
+<style>
+  body {
+    margin: 0; padding: 8px 14px;
+    font: 11px -apple-system, system-ui, sans-serif;
+    color: #fff;
+    background: rgba(28, 28, 30, 0.6);
+    border-radius: 16px;
+    -webkit-backdrop-filter: blur(20px);
+    backdrop-filter: blur(20px);
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    height: 100vh;
+    box-sizing: border-box;
+  }
+  #count {
+    font-size: 28px;
+    font-weight: 600;
+    letter-spacing: -0.02em;
+    line-height: 1;
+    font-variant-numeric: tabular-nums;
+  }
+  #label {
+    font-size: 10px;
+    opacity: 0.55;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    line-height: 1.2;
+    flex: 1;
+  }
+  #dot {
+    width: 6px; height: 6px;
+    border-radius: 50%;
+    background: rgba(255, 255, 255, 0.15);
+    transition: background 200ms ease-out;
+  }
+  #dot.active {
+    background: #4cd964;
+    box-shadow: 0 0 6px rgba(76, 217, 100, 0.7);
+  }
+</style>
+</head><body>
+<div id="count">0</div>
+<div id="label">glasses<br>today</div>
+<div id="dot" title="flashes when a drink gesture is detected"></div>
+<script type="module">
+  import { sd } from "sd://runtime/api.js";
+
+  // Tunables — see top-of-file comment for the why.
+  const TICK_MS        = 2000;   // camera frame cadence
+  const Y_THRESHOLD    = 0.05;   // wrist must be this much above nose (normalized)
+  const DEBOUNCE_TICKS = 2;      // consecutive positive ticks before counting
+  const DEDUP_MS       = 30000;  // ignore further hits within this window
+
+  const countEl = document.getElementById("count");
+  const dotEl   = document.getElementById("dot");
+
+  const todayKey = () => {
+    const d = new Date();
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, "0");
+    const day = String(d.getDate()).padStart(2, "0");
+    return `count_${y}-${m}-${day}`;
+  };
+
+  let key = todayKey();
+  let count = 0;
+  let positiveStreak = 0;
+  let lastCountedAt = 0;
+
+  // Restore today's count.
+  const stored = await sd.settings.get(key);
+  if (typeof stored === "number") count = stored;
+  countEl.textContent = String(count);
+
+  const isDrinkingGesture = (body) => {
+    const j = body.joints || {};
+    const nose      = j.nose;
+    const leftWrist = j.leftWrist;
+    const rightWrist = j.rightWrist;
+    if (!nose || nose.confidence < 0.1) return false;
+    const wristRaised = (w) => w && w.confidence >= 0.1 && w.y < nose.y - Y_THRESHOLD;
+    return wristRaised(leftWrist) || wristRaised(rightWrist);
+  };
+
+  const flashDot = () => {
+    dotEl.classList.add("active");
+    setTimeout(() => dotEl.classList.remove("active"), 400);
+  };
+
+  const tick = async () => {
+    // Roll over at local midnight.
+    const k = todayKey();
+    if (k !== key) {
+      key = k;
+      count = (await sd.settings.get(key)) || 0;
+      countEl.textContent = String(count);
+      positiveStreak = 0;
+    }
+
+    const frame = await sd.camera.frame({ format: "jpeg", quality: 0.5 });
+    if (!frame || !frame.dataURL) return;
+
+    const result = await sd.vision.bodyPose({ image: frame.dataURL });
+    if (!result || !result.bodies) return;
+
+    const gesture = result.bodies.some(isDrinkingGesture);
+
+    if (gesture) {
+      flashDot();
+      positiveStreak += 1;
+      const now = Date.now();
+      if (positiveStreak >= DEBOUNCE_TICKS && now - lastCountedAt >= DEDUP_MS) {
+        count += 1;
+        lastCountedAt = now;
+        countEl.textContent = String(count);
+        await sd.settings.set(key, count);
+      }
+    } else {
+      positiveStreak = 0;
+    }
+  };
+
+  // Kick off; ignore failures (e.g. camera denied) and keep retrying.
+  const loop = async () => {
+    try { await tick(); } catch (e) { console.error("[hydration]", e); }
+    setTimeout(loop, TICK_MS);
+  };
+  loop();
+</script>
+</body></html>
