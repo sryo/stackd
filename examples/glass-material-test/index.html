@@ -7,10 +7,6 @@
          text-shadow: 0 1px 2px rgba(0,0,0,.3); }
 </style></head>
 <body>
-  <div id="msg">native glass</div>
-  <script type="module">
-    import { sd } from "sd://runtime/api.js";
-    sd.bind(msg, sd.battery, b => b ? `🔋 ${b.percent}%` : "native glass");
-  </script>
+  <div>🔋 {{ sd.battery.percent }}%</div>
 </body>
 </html>

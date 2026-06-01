@@ -1,5 +1,5 @@
 <!doctype html>
-<html>
+<html style="--sd-accent: {{ sd.appearance.accentHex || '' }}">
 <head>
   <meta charset="utf-8">
   <link rel="stylesheet" href="index.css">
@@ -7,9 +7,9 @@
 </head>
 <body>
   <div class="card">
-    <div class="row"><span class="key">KBD </span><span id="kbd" class="val">—</span></div>
-    <div class="row"><span class="key">WIFI</span><span id="wifi" class="val">—</span></div>
-    <div class="row"><span class="key">IP  </span><span id="ip" class="val">—</span></div>
+    <div class="row"><span class="key">KBD </span><span class="val">{{ sd.input.layout.name || '—' }}</span></div>
+    <div class="row"><span class="key">WIFI</span><span class="val">{{ sd.net.wifi.ssid ? sd.net.wifi.ssid + ' ' + sd.net.wifi.signal + 'dBm' : '(no SSID — Location TCC?)' }}</span></div>
+    <div class="row"><span class="key">IP  </span><span class="val">{{ sd.net.lan.ipv4 || '—' }}</span></div>
     <div class="row"><span class="key">DOCK</span><span id="dock" class="val">—</span></div>
     <div class="row"><span class="key">VOL </span><span id="vol" class="val">—</span></div>
     <div class="row"><span class="key">DISP</span><span id="disp" class="val">—</span></div>
@@ -17,9 +17,6 @@
   <script type="module">
     import { sd } from "sd://runtime/api.js";
 
-    sd.bind(kbd,  sd.input.layout, l => l?.name || "—");
-    sd.bind(wifi, sd.net.wifi,     w => w?.ssid ? `${w.ssid} ${w.signal}dBm` : "(no SSID — Location TCC?)");
-    sd.bind(ip,   sd.net.lan,      l => l?.ipv4 || "—");
     sd.bind(vol,  sd.audio.output, a => {
       if (!a) return "—";
       const pct = a.volume != null ? Math.round(a.volume * 100) + "%" : "?";
@@ -34,7 +31,6 @@
         : "";
       return `${list.length} display${list.length === 1 ? "" : "s"}${bright}`;
     });
-    sd.bind([document.documentElement, "style.--sd-accent"], sd.appearance, a => a?.accentHex || "");
 
     // One-shot read: Dock orientation via CFPreferences — not a signal.
     sd.defaults.read("com.apple.dock", "orientation").then(v => {

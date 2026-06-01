@@ -23,16 +23,7 @@
 <body>
   <div class="card">
     <div class="title">location</div>
-    <div class="value" id="value">waiting for fix…</div>
+    <div class="value">{{ sd.location ? sd.location.lat.toFixed(3) + ', ' + sd.location.lon.toFixed(3) + ' (±' + Math.round(sd.location.accuracy) + 'm)' : 'waiting for fix…' }}</div>
   </div>
-  <script type="module">
-    import { sd } from "sd://runtime/api.js";
-    sd.location.subscribe(loc => {
-      console.log("sd.location →", loc);
-      const el = document.getElementById("value");
-      if (!loc) { el.textContent = "waiting for fix…"; return; }
-      el.textContent = `${loc.lat.toFixed(3)}, ${loc.lon.toFixed(3)} (±${Math.round(loc.accuracy)}m)`;
-    });
-  </script>
 </body>
 </html>

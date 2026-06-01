@@ -17,34 +17,8 @@
 </style>
 </head><body>
 <h1>USB devices</h1>
-<ul id="list"><li class="empty">waiting…</li></ul>
-<script type="module">
-  import { sd } from "sd://runtime/api.js";
-
-  const list = document.getElementById("list");
-
-  function icon(name) {
-    const n = (name || "").toLowerCase();
-    if (n.includes("keyboard")) return "⌨️";
-    if (n.includes("mouse") || n.includes("trackpad")) return "🖱";
-    if (n.includes("camera") || n.includes("cam")) return "📷";
-    if (n.includes("audio") || n.includes("headphone") || n.includes("airpods")) return "🎧";
-    if (n.includes("phone") || n.includes("iphone")) return "📱";
-    if (n.includes("hub")) return "🔌";
-    if (n.includes("disk") || n.includes("storage") || n.includes("drive")) return "💾";
-    return "🔧";
-  }
-
-  sd.bind([list, "html"], sd.usb, devices => {
-    console.log("usb update:", devices && devices.length, devices);
-    if (!devices || devices.length === 0) {
-      return '<li class="empty">no devices</li>';
-    }
-    return devices.map(d => {
-      const label = d.productName || `device 0x${d.productID.toString(16)}`;
-      const vendor = d.vendorName ? ` (${d.vendorName})` : "";
-      return `<li>${icon(d.productName)} ${label}<span class="meta">${vendor}</span></li>`;
-    }).join("");
-  });
-</script>
+<ul>
+  <li sd-each="sd.usb">{{ (n => n.includes('keyboard') ? '⌨️' : n.includes('mouse') || n.includes('trackpad') ? '🖱' : n.includes('camera') || n.includes('cam') ? '📷' : n.includes('audio') || n.includes('headphone') || n.includes('airpods') ? '🎧' : n.includes('phone') || n.includes('iphone') ? '📱' : n.includes('hub') ? '🔌' : n.includes('disk') || n.includes('storage') || n.includes('drive') ? '💾' : '🔧')((item.productName || '').toLowerCase()) }} {{ item.productName || ('device 0x' + item.productID.toString(16)) }}<span class="meta">{{ item.vendorName ? ' (' + item.vendorName + ')' : '' }}</span></li>
+  <li sd-if="!sd.usb || sd.usb.length === 0" class="empty">no devices</li>
+</ul>
 </body></html>

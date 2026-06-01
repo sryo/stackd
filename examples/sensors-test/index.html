@@ -11,32 +11,27 @@
   }
   h1 { font-size: 10px; margin: 0 0 4px; opacity: 0.55; text-transform: uppercase; letter-spacing: 0.08em; }
   h2 { font-size: 9px; margin: 6px 0 2px; opacity: 0.45; text-transform: uppercase; letter-spacing: 0.06em; }
-  pre { margin: 0; font: 10px ui-monospace, Menlo, monospace; line-height: 1.35; white-space: pre-wrap; }
+  .col { font: 10px ui-monospace, Menlo, monospace; line-height: 1.35; white-space: pre; }
   .empty { opacity: 0.4; font-style: italic; }
 </style>
 </head><body>
 <h1>sensors</h1>
+
 <h2>temperatures (first 5)</h2>
-<pre id="temps">—</pre>
+<div class="col">
+  <div sd-each="(sd.sensors?.temperatures || []).slice(0, 5)">{{ item.name.padEnd(20) }} {{ item.value.toFixed(1) }} {{ item.unit }}</div>
+  <div sd-if="!sd.sensors?.temperatures?.length" class="empty">(none)</div>
+</div>
+
 <h2>voltages (first 3)</h2>
-<pre id="volts">—</pre>
+<div class="col">
+  <div sd-each="(sd.sensors?.voltages || []).slice(0, 3)">{{ item.name.padEnd(20) }} {{ item.value.toFixed(2) }} {{ item.unit }}</div>
+  <div sd-if="!sd.sensors?.voltages?.length" class="empty">(none)</div>
+</div>
+
 <h2>fans</h2>
-<pre id="fans">—</pre>
-<script type="module">
-  import { sd } from "sd://runtime/api.js";
-
-  const fmt = (rows, n, render) => {
-    if (!rows || rows.length === 0) return "(none)";
-    return rows.slice(0, n).map(render).join("\n");
-  };
-
-  sd.bind([document.getElementById("temps"), "textContent"], sd.sensors, s =>
-    fmt(s?.temperatures, 5, t => `${t.name.padEnd(20)} ${t.value.toFixed(1)} ${t.unit}`));
-
-  sd.bind([document.getElementById("volts"), "textContent"], sd.sensors, s =>
-    fmt(s?.voltages, 3, v => `${v.name.padEnd(20)} ${v.value.toFixed(2)} ${v.unit}`));
-
-  sd.bind([document.getElementById("fans"), "textContent"], sd.sensors, s =>
-    fmt(s?.fans, 10, f => `${f.name.padEnd(20)} ${f.rpm} RPM`));
-</script>
+<div class="col">
+  <div sd-each="sd.sensors?.fans || []">{{ item.name.padEnd(20) }} {{ item.rpm }} RPM</div>
+  <div sd-if="!sd.sensors?.fans?.length" class="empty">(none)</div>
+</div>
 </body></html>

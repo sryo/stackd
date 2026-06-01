@@ -20,23 +20,8 @@
 </style>
 </head><body>
 <h1>Cameras</h1>
-<ul id="list"><li class="empty">waiting…</li></ul>
-<script type="module">
-  import { sd } from "sd://runtime/api.js";
-
-  const list = document.getElementById("list");
-
-  sd.bind([list, "html"], sd.camera, devices => {
-    console.log("camera update:", devices && devices.length, devices);
-    if (!devices || devices.length === 0) {
-      return '<li class="empty">no cameras</li>';
-    }
-    return devices.map(d => {
-      const cls = d.isInUse ? "live" : "";
-      const pos = d.position && d.position !== "unspecified" ? ` (${d.position})` : "";
-      const mfr = d.manufacturer ? ` · ${d.manufacturer}` : "";
-      return `<li class="${cls}"><span class="dot"></span>${d.name}${pos}<span class="meta">${mfr}</span></li>`;
-    }).join("");
-  });
-</script>
+<ul>
+  <li sd-each="sd.camera" class="{{ item.isInUse ? 'live' : '' }}"><span class="dot"></span>{{ item.name }}{{ item.position && item.position !== 'unspecified' ? ' (' + item.position + ')' : '' }}<span class="meta">{{ item.manufacturer ? ' · ' + item.manufacturer : '' }}</span></li>
+  <li sd-if="!sd.camera || sd.camera.length === 0" class="empty">no cameras</li>
+</ul>
 </body></html>

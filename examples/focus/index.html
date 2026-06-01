@@ -8,15 +8,10 @@
 <body>
   <div class="card">
     <div class="row">
-      <span class="dot" id="dot"></span>
-      <span class="app" id="app">—</span>
+      <span class="dot"></span>
+      <span class="app">{{ sd.app.frontmost.name }}</span>
     </div>
-    <div class="title" id="title">no focus</div>
+    <div class="title">{{ sd.windows.focused.title || '(no window title)' }}</div>
   </div>
-  <script type="module">
-    import { sd } from "sd://runtime/api.js";
-    sd.bind(app,   sd.app.frontmost,    a => a?.name ?? "—");
-    sd.bind(title, sd.windows.focused,  w => (w?.title && w.title.length) ? w.title : "(no window title)");
-  </script>
 </body>
 </html>

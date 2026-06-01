@@ -9,15 +9,12 @@
   <div class="card">
     <div class="label">CURSOR</div>
     <div class="coords">
-      <span id="x">—</span>
+      <span>{{ sd.mouse.x }}</span>
       <span class="sep">,</span>
-      <span id="y">—</span>
+      <span>{{ sd.mouse.y }}</span>
     </div>
   </div>
   <script type="module">
-    import { sd } from "sd://runtime/api.js";
-    sd.bind(x, sd.mouse, m => m ? m.x : "—");
-    sd.bind(y, sd.mouse, m => m ? m.y : "—");
     // `stackd bang user.beep` → flashes this stack yellow.
     window.onBang_user_beep = () => {
       document.body.classList.remove("beep");
