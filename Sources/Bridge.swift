@@ -32,17 +32,16 @@ final class Bridge: NSObject, WKScriptMessageHandler {
     fileprivate var broadcastTokens: [Int: Token] = [:]
     fileprivate var nextBroadcastId: Int = 1
     // sd.overlay handles: id → (handle, displayLink subscription token).
-    // Each handle owns a SLS overlay window pinned to a foreign target wid;
-    // the token drives per-vsync redraw via DisplayLinkObserver. Scope drains
-    // both on unload (detach releases the SLS window, token cancel removes
-    // the subscription).
+    // Each handle owns a borderless NSPanel + WKWebView pinned to a foreign
+    // target wid; the token drives per-vsync reposition + sd.target push via
+    // DisplayLinkObserver. Scope drains both on unload (detach closes the
+    // panel, token cancel removes the subscription).
     fileprivate var overlayHandles: [Int: OverlayHandle] = [:]
     fileprivate var overlayTokens: [Int: Token] = [:]
     fileprivate var nextOverlayId: Int = 1
-    // Per-overlay "in-flight" guard. evaluateJavaScript completion handlers
-    // arrive async — if a tick fires before the previous tick's JS callback
-    // resolved, skipping the new tick keeps us from queueing N WebKit calls
-    // deep when the JS draw closure runs slow.
+    // Reserved for backpressure if a future overlay tick path becomes async
+    // (e.g. snapshot-driven reposition). Currently the tick is synchronous —
+    // setFrame + an evaluateJavaScript fire-and-forget — so this stays empty.
     fileprivate var overlayInFlight: Set<Int> = []
     // Owned HTTP servers: serverId → Token (cancel = server.stop()).
     // Pending route requests waiting for sd.httpserver.respond() — keyed
@@ -54,6 +53,20 @@ final class Bridge: NSObject, WKScriptMessageHandler {
     // scope drain on stack unload closes every connection — the underlying
     // SQLite.HandleStore is process-wide but the *ownership* is stack-scoped.
     fileprivate var sqliteHandles: Set<Int> = []
+    // Per-channel JS-requested fanout cadence (seconds). Set via the
+    // sd.channel.setInterval IPC when a stack calls e.g.
+    // `sd.sensors.subscribe(fn, { interval: 5 })`. Channels not listed here
+    // fall back to firing on every native observer tick (2s for sensors /
+    // host.load / display.all, faster for event-driven observers). The
+    // native observer's polling rate isn't changed — we just gate the
+    // bridge's fanout, which dominates the per-stack cost (jsonify +
+    // evaluateJavaScript). Multiple subscribe(fn, {interval}) calls in the
+    // same stack take last-write-wins; stacks coordinate intervals at the
+    // module that owns the channel. Currently honored by sensors / hostLoad /
+    // displays — the three channels with a fixed-cadence poll. Event-driven
+    // channels (mouse, frontApp, audio, …) ignore the gate.
+    fileprivate var channelIntervals: [String: TimeInterval] = [:]
+    fileprivate var lastChannelPushedAt: [String: Date] = [:]
     /// Per-stack native-resource scope. Every observer subscription, hotkey
     /// bind, eventtap register, menubar suppression goes in here. StackHost
     /// calls drain() on unload to release them all in reverse order.
@@ -159,7 +172,6 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         if !codes.isEmpty { p.keyCodes = codes }
         p.flagsMask = raw.flagsMask
         p.flagsAny  = raw.flagsAny
-        if let band = raw.inCornerBand { p.inCornerBand = CGFloat(band) }
         return p
     }
 
@@ -233,26 +245,6 @@ final class Bridge: NSObject, WKScriptMessageHandler {
                 }
             }
         }
-        if let corners = manifest.hotcorners, !corners.isEmpty {
-            let specs: [HotCornerSpec] = corners.compactMap { hc in
-                guard let c = HotCornerSpec.Corner(rawValue: hc.corner) else {
-                    FileHandle.standardError.write(Data("stackd: unknown hotcorner '\(hc.corner)'\n".utf8))
-                    return nil
-                }
-                return HotCornerSpec(corner: c, callback: hc.callback, tooltip: hc.tooltip)
-            }
-            if !specs.isEmpty {
-                let watcher = HotCornerWatcher(entries: specs) { [weak self] spec, isEnter, p in
-                    self?.fireHotCorner(spec: spec, isEnter: isEnter, at: p)
-                }
-                // Piggyback on the existing mouseMoved tap. Adding a second
-                // CGEventTap would just cost another Accessibility-gated mach
-                // port for the same stream of events.
-                scope.adopt(EventTapRegistry.shared.register(eventType: .mouseMoved) { event in
-                    watcher.tick(loc: event.location)
-                })
-            }
-        }
         // If this stack left a sd.windows.batch open (crashed mid-closure,
         // forgot to await commit), commit-and-clear so the process-global sink
         // doesn't strand. WindowsByID.commitBatch is a no-op when no batch is
@@ -309,16 +301,20 @@ final class Bridge: NSObject, WKScriptMessageHandler {
             self.sqliteHandles.removeAll()
         })
         // Overlays — cancel each per-overlay displayLink subscription, then
-        // detach each handle (releases the SLS overlay window). Mirrors the
+        // detach each handle (closes the overlay NSPanel). Mirrors the
         // statusItems / hotkeyTokens drain shape so a hot-reload doesn't
-        // leak SkyLight windows on the WindowServer side.
+        // leak panels. NSPanel.close must run on main, so the detach hop
+        // matches the per-call overlay.detach path.
         scope.adopt(Token { [weak self] in
             guard let self = self else { return }
             for (_, t) in self.overlayTokens { t.cancel() }
             self.overlayTokens.removeAll()
-            for (_, h) in self.overlayHandles { h.detach() }
+            let handles = Array(self.overlayHandles.values)
             self.overlayHandles.removeAll()
             self.overlayInFlight.removeAll()
+            DispatchQueue.main.async {
+                for h in handles { h.detach() }
+            }
         })
     }
 
@@ -894,17 +890,20 @@ final class Bridge: NSObject, WKScriptMessageHandler {
                 "w": Int(r.size.width), "h": Int(r.size.height)
             ] as [String: Any]
         },
-        .ax("windows.byId.cornerRadius", permission: "windows") { _, body in
-            WindowsByID.cornerRadius(windowID: CGWindowID((body["id"] as? Int) ?? 0))
+        .ax("windows.byId.cornerHints", permission: "windows") { _, body in
+            WindowsByID.cornerHints(windowID: CGWindowID((body["id"] as? Int) ?? 0))
         },
         // Per-window snapshot via CGSHWCaptureWindowList (AltTab's trick).
         // Synchronous, no TCC, works for hidden / minimized / off-space
         // windows. Distinct from sd.display.snapshot (ScreenCaptureKit).
+        // `quality` is taken as-is — the canonical 0.85 default is declared
+        // in Runtime/api.js (`sd.windows.snapshot`). If the field arrives
+        // missing here we leave it nil and the encode falls back internally.
         .sync("windows.byId.snapshot",   permission: "windows") { body in
             WindowsByID.snapshot(
                 windowID: CGWindowID((body["id"] as? Int) ?? 0),
                 format:   body["format"]  as? String ?? "png",
-                quality:  body["quality"] as? Double ?? 0.85
+                quality:  body["quality"] as? Double
             )
         },
 
@@ -1128,119 +1127,73 @@ final class Bridge: NSObject, WKScriptMessageHandler {
             return true
         },
 
-        // ── Overlay (JankyBorders pattern) ─────────────────────────────────
-        // Attach a vsync-driven CG overlay to a target window we don't own.
-        // Returns a mint id; the JS side keeps the user's draw fn in a Map
-        // and __sd_overlay_draw(id, geo) looks it up. Per tick we:
-        //   1. read the target's current bounds via SLSGetWindowBounds
-        //   2. evaluateJavaScript("__sd_overlay_draw(id, geo)") with a
-        //      completion handler that gets the spec dict
-        //   3. dispatch handle.draw(spec, targetFrame) on main
-        // Permission: "overlay". Reference: examples/overlay-border.
+        // ── Overlay (WebKit overlay primitive) ─────────────────────────────
+        // Attach a borderless click-through NSPanel + WKWebView pinned to a
+        // target window we don't own. The stack supplies {html, css?, js?};
+        // per vsync we reposition the panel to SLSGetWindowBounds(targetWID)
+        // and push `window.sd.target = {x,y,w,h}` into the overlay's WebView.
+        // The daemon is observe + set only — no CGContext drawing, no spec
+        // DSL. Rendering is plain WebKit. Permission: "overlay".
         .custom("overlay.attach", permission: "overlay") { bridge, body, requestId in
             DispatchQueue.main.async { [weak bridge] in
                 guard let bridge = bridge,
-                      let wid = body["windowId"] as? Int else {
+                      let wid = body["targetId"] as? Int else {
                     bridge?.respond(requestId: requestId, value: NSNull()); return
                 }
+                let html = body["html"] as? String ?? ""
+                let css  = body["css"]  as? String ?? ""
+                let js   = body["js"]   as? String ?? ""
                 let id = bridge.nextOverlayId
                 bridge.nextOverlayId += 1
-                guard let handle = Overlay.attach(targetID: CGWindowID(wid), id: id) else {
+                guard let handle = Overlay.attach(
+                    targetID: CGWindowID(wid), id: id,
+                    html: html, css: css, js: js
+                ) else {
                     bridge.respond(requestId: requestId, value: NSNull()); return
                 }
                 bridge.overlayHandles[id] = handle
 
-                // Vsync tick → JS draw fn → CG draw. We subscribe to the
-                // shared DisplayLinkObserver (already used by sd.displayLink)
-                // so multiple overlays + the displayLink channel share one
-                // CVDisplayLink — RefCountedObserver handles install/teardown.
+                // Vsync tick → reposition + sd.target push. We subscribe to
+                // the shared DisplayLinkObserver (also drives sd.displayLink)
+                // so multiple overlays share one CVDisplayLink —
+                // RefCountedObserver handles install/teardown.
                 let token = DisplayLinkObserver.shared.subscribe { [weak bridge] in
                     guard let bridge = bridge,
-                          let webView = bridge.webView,
                           let h = bridge.overlayHandles[id] else { return }
-                    // Skip if the target's gone or hidden — avoids drawing
+                    // Skip if the target's gone or hidden — avoids repositioning
                     // into the void when the user minimizes / closes the
-                    // window mid-overlay.
+                    // window mid-overlay. The panel stays alive but stale
+                    // (last frame is offscreen until the target returns).
                     guard Overlay.isOrderedIn(h.targetWID),
                           let frame = Overlay.bounds(of: h.targetWID) else { return }
-                    // Backpressure: drop the tick if the previous one's JS
-                    // round-trip hasn't completed. At 120Hz with a slow
-                    // draw fn this otherwise stacks WebKit calls deep.
-                    if bridge.overlayInFlight.contains(id) { return }
-                    bridge.overlayInFlight.insert(id)
-
-                    let geo: [String: Any] = [
-                        "window": [
-                            "x": Int(frame.origin.x),
-                            "y": Int(frame.origin.y),
-                            "w": Int(frame.size.width),
-                            "h": Int(frame.size.height)
-                        ],
-                        "id": Int(h.targetWID)
-                    ]
-                    let geoJson = Bridge.jsonify(geo)
-                    // Wrap in JSON.stringify so the WebKit JS-to-host
-                    // bridge can carry the dict back as a String (it can't
-                    // bridge arbitrary JS objects). We parse on the Swift
-                    // side and dispatch on main for handle.draw.
-                    let js = "JSON.stringify(window.__sd_overlay_draw ? window.__sd_overlay_draw(\(id), \(geoJson)) : null)"
-                    webView.evaluateJavaScript(js) { [weak bridge] result, _ in
-                        guard let bridge = bridge,
-                              let handle = bridge.overlayHandles[id] else {
-                            bridge?.overlayInFlight.remove(id); return
-                        }
-                        defer { bridge.overlayInFlight.remove(id) }
-                        let str = (result as? String) ?? ""
-                        guard !str.isEmpty, str != "null",
-                              let data = str.data(using: .utf8),
-                              let parsed = try? JSONSerialization.jsonObject(with: data),
-                              let spec = parsed as? [String: Any] else { return }
-                        // Re-fetch the target bounds in case the user
-                        // dragged between the tick and the JS round-trip;
-                        // staleness here causes visible lag during fast drags.
-                        let fresh = Overlay.bounds(of: handle.targetWID) ?? frame
-                        handle.draw(spec: spec, targetFrame: fresh)
-                    }
+                    h.tick(targetFrame: frame)
                 }
                 bridge.overlayTokens[id] = token
                 bridge.respond(requestId: requestId, value: id)
             }
         },
-        // Force a fresh redraw on the next tick. The vsync subscription
-        // already fires every frame so this is mostly a no-op in v1 — but
-        // it documents the intended API for a future "only draw when JS
-        // sets dirty" optimization.
-        .syncBridge("overlay.update", permission: "overlay", denyValue: false) { b, body in
-            guard let id = body["id"] as? Int,
-                  b.overlayHandles[id] != nil else { return false }
-            return true
-        },
-        // Tear down: cancel the displayLink subscription, then release the
-        // SLS overlay window. Detaching does NOT touch the target window.
+        // Tear down: cancel the displayLink subscription, then close the
+        // overlay NSPanel. Detaching does NOT touch the target window.
         .syncBridge("overlay.detach", permission: "overlay", denyValue: false) { b, body in
             guard let id = body["id"] as? Int else { return false }
             if let token = b.overlayTokens.removeValue(forKey: id) { token.cancel() }
-            if let handle = b.overlayHandles.removeValue(forKey: id) { handle.detach() }
+            if let handle = b.overlayHandles.removeValue(forKey: id) {
+                DispatchQueue.main.async { handle.detach() }
+            }
             b.overlayInFlight.remove(id)
             return true
         },
 
         // ── HTTP server ─────────────────────────────────────────────────────
-        // Long-running Network.framework listener owned by the stack. Routes
-        // are method+path pairs; matched requests fan out to JS via
-        // __sd_http_request(serverId, requestId, {method,path,query,headers,body}).
-        // JS replies with sd.httpserver.respond(reqId, {status,headers,body}).
+        // Long-running Network.framework listener owned by the stack. Every
+        // request fans out to JS via __sd_http_request(serverId, requestId,
+        // {method,path,query,headers,body}). JS replies with
+        // sd.httpserver.respond(reqId, {status,headers,body}). Stacks own all
+        // dispatch logic — route matching, CORS headers, Content-Type — in JS.
         // Loopback-only unless bindHost === "0.0.0.0". Permission: "httpserver".
         .custom("httpserver.serve", permission: "httpserver") { bridge, body, requestId in
             let port = UInt16((body["port"] as? Int) ?? 0)
             let bindHost = body["bindHost"] as? String ?? "127.0.0.1"
-            let assetsDir = body["assetsDir"] as? String
-            let routesIn = body["routes"] as? [String] ?? []
-            let routes: [(String, String)] = routesIn.compactMap { spec in
-                let parts = spec.split(separator: " ", maxSplits: 1).map(String.init)
-                if parts.count == 2 { return (parts[0].uppercased(), parts[1]) }
-                return ("*", parts[0])
-            }
             let bonjourType: String? = (body["bonjour"] as? [String: Any])?["type"] as? String
             let bonjourName: String? = (body["bonjour"] as? [String: Any])?["name"] as? String
 
@@ -1250,8 +1203,6 @@ final class Bridge: NSObject, WKScriptMessageHandler {
                 let server = try HTTPServer(
                     port: port,
                     bindHost: bindHost,
-                    assetsDir: assetsDir,
-                    routes: routes,
                     bonjourType: bonjourType,
                     bonjourName: bonjourName
                 ) { [weak bridge] req, complete in
@@ -1305,6 +1256,23 @@ final class Bridge: NSObject, WKScriptMessageHandler {
             response.headers = body["headers"] as? [String: String] ?? [:]
             response.body    = body["body"]    as? String ?? ""
             complete(response)
+            return true
+        },
+
+        // Tunable poll cadence. JS calls `sd.sensors.subscribe(fn, { interval })`
+        // → api.js forwards this IPC → the bridge gates the per-stack fanout for
+        // the matching channel to at most one push every `interval` seconds. The
+        // native observer keeps polling at its base rate (2s for sensors / host /
+        // display); only the JSON + evaluateJavaScript hop is throttled. interval
+        // <= 0 (or null) clears the gate. No permission gate — telling your own
+        // stack to push less often is always safe.
+        .syncBridge("channel.setInterval", permission: nil, denyValue: false) { b, body in
+            guard let name = body["name"] as? String else { return false }
+            if let interval = body["interval"] as? Double, interval > 0 {
+                b.channelIntervals[name] = interval
+            } else {
+                b.channelIntervals.removeValue(forKey: name)
+            }
             return true
         },
 
@@ -1388,6 +1356,13 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         ("host",        "hostLoad"),
         ("touchdevice", "touchdevice"),
         ("displayLink", "displayLink"),
+        // F15: granular per-event-type channels split out of the legacy
+        // focusedWindow / frontApp pumps. Same permissions as the union
+        // channels so stacks declaring "app" / "windows" pick them up
+        // automatically.
+        ("app",         "appActivated"),
+        ("windows",     "focusedChanged"),
+        ("windows",     "titleChanged"),
     ]
 
     private func replayState() {
@@ -1414,10 +1389,20 @@ final class Bridge: NSObject, WKScriptMessageHandler {
     ) {
         let pushFn: () -> Void = { [weak self] in
             guard let self = self else { return }
+            // Honor sd.channel.setInterval-set cadence: if a stack asked
+            // for a slower fanout on this channel, skip ticks that arrive
+            // earlier than the requested interval. Native polling rate is
+            // unchanged — this just gates the per-stack JSON + JS round-trip.
+            if let interval = self.channelIntervals[name],
+               let last = self.lastChannelPushedAt[name],
+               Date().timeIntervalSince(last) < interval {
+                return
+            }
             guard let value = snapshot() else { return }
             let json = Bridge.jsonify(value)
             guard json != self.lastState[name] else { return }
             self.lastState[name] = json
+            self.lastChannelPushedAt[name] = Date()
             self.push(channel: name, json: json)
         }
         pushFn()
@@ -1677,10 +1662,50 @@ final class Bridge: NSObject, WKScriptMessageHandler {
     }
 
     // Dual-observer: NSWorkspace activations + per-pid FrontmostWindowObserver
-    // for within-app focus/title changes. Emits up to three channels per tick
-    // (frontApp / focusedWindow / windowsAll) gated on the includeApp /
-    // includeWindows flags. Doesn't fit startChannel's single-channel shape.
+    // for within-app focus/title changes. Emits up to six channels per tick:
+    //   - frontApp / focusedWindow / windowsAll (legacy union — backward compat)
+    //   - appActivated / focusedChanged / titleChanged (granular per-event-type,
+    //     per F15)
+    // Gated on includeApp / includeWindows flags. Doesn't fit startChannel's
+    // single-channel shape.
     private func startWorkspace(includeApp: Bool, includeWindows: Bool) {
+        // Per-channel dedupe-and-push helpers. Each granular channel reuses
+        // lastState so re-firing the same payload (common when AX nudges
+        // multiple times for one focus change) doesn't traverse WebKit
+        // unnecessarily.
+        let pushAppActivated: () -> Void = { [weak self] in
+            guard let self = self, let app = App.frontmostApp() else { return }
+            let json = Bridge.jsonify(app)
+            if json == self.lastState["appActivated"] { return }
+            self.lastState["appActivated"] = json
+            self.push(channel: "appActivated", json: json)
+        }
+        let pushFocusedChanged: () -> Void = { [weak self] in
+            guard let self = self else { return }
+            let json = Windows.focused().map(Bridge.jsonify) ?? "null"
+            if json == self.lastState["focusedChanged"] { return }
+            self.lastState["focusedChanged"] = json
+            self.push(channel: "focusedChanged", json: json)
+        }
+        let pushTitleChanged: () -> Void = { [weak self] in
+            guard let self = self, let w = Windows.focused() else { return }
+            // Small payload — id, app, title, pid. Keeps the channel narrow
+            // so stacks that only care about title rename don't pay the
+            // whole focusedWindow dict on every keystroke in a renaming field.
+            let payload: [String: Any] = [
+                "id":    w["id"]    as Any? ?? NSNull(),
+                "app":   w["app"]   as Any? ?? "",
+                "title": w["title"] as Any? ?? "",
+                "pid":   w["pid"]   as Any? ?? 0
+            ]
+            let json = Bridge.jsonify(payload)
+            if json == self.lastState["titleChanged"] { return }
+            self.lastState["titleChanged"] = json
+            self.push(channel: "titleChanged", json: json)
+        }
+        // Legacy union channel: refire focusedWindow / windowsAll whenever
+        // either focusedChanged or titleChanged fires. Stacks still on
+        // sd.windows.focused see the same shape they always did.
         let pushFn: () -> Void = { [weak self] in
             guard let self = self else { return }
             if includeApp, let app = App.frontmostApp() {
@@ -1702,6 +1727,24 @@ final class Bridge: NSObject, WKScriptMessageHandler {
                     self.push(channel: "windowsAll", json: allJson)
                 }
             }
+        }
+        // Install the granular per-event-type callbacks on the shared observer.
+        // These are process-global slots — Bridge is the only consumer, set
+        // once per stack-load. Each fires alongside the union `fire()` so the
+        // legacy pushFn keeps pumping focusedWindow / windowsAll for back-compat.
+        if includeApp {
+            FrontmostWindowObserver.shared.onAppActivated = pushAppActivated
+        }
+        if includeWindows {
+            FrontmostWindowObserver.shared.onFocusedChanged = pushFocusedChanged
+            FrontmostWindowObserver.shared.onTitleChanged = pushTitleChanged
+        }
+        // Prime each granular channel so subscribers don't wait for the first
+        // AX nudge to see a value.
+        if includeApp { pushAppActivated() }
+        if includeWindows {
+            pushFocusedChanged()
+            pushTitleChanged()
         }
         pushFn()
         scope.adopt(FrontmostAppObserver.shared.subscribe(pushFn))
@@ -1748,24 +1791,6 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         }
 
         fireGlobal(handler: "onTap_\(callback)", args: [Bridge.jsonify(payload)])
-    }
-
-    private func fireHotCorner(spec: HotCornerSpec, isEnter: Bool, at p: CGPoint) {
-        let payload: [String: Any] = [
-            "corner": spec.corner.rawValue,
-            "state":  isEnter ? "enter" : "leave",
-            "x":      Int(p.x),
-            "y":      Int(p.y)
-        ]
-        let json = Bridge.jsonify(payload)
-        fireGlobal(handler: spec.callback, args: [json])
-        // The tooltip callback only fires on enter — leave-side it has nothing
-        // to add (the primary callback's leave fires whether or not a tooltip
-        // was declared). Stack code that wants tooltip-hide behavior reads
-        // state === "leave" from the primary.
-        if isEnter, let t = spec.tooltip {
-            fireGlobal(handler: t, args: [json])
-        }
     }
 
     /// Escape an arbitrary string into a JS string literal. JSONSerialization

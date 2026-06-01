@@ -21,18 +21,58 @@
 </div>
 <script type="module">
   import { sd } from "sd://runtime/api.js";
-  const last = document.getElementById("last");
-  const log = (e) => {
-    last.textContent = `${e.state} ${e.corner} @ ${e.x},${e.y}`;
-    console.log("hotcorner", e);
-    if (e.state === "enter") {
-      sd.notify.show({ title: "hotcorner", body: `${e.corner} at ${e.x},${e.y}` });
+
+  // Daemon-side hot corners were removed (R1d). The new pattern is:
+  // subscribe to sd.mouse, compute "is the cursor inside this corner's
+  // band?", and latch on the rising edge (enter) / falling edge (leave).
+  const BAND = 2;
+  let displays = [];
+  sd.display.all.subscribe(list => { displays = list || []; });
+
+  const corners = ["top-left", "top-right", "bottom-left", "bottom-right"];
+  const state = Object.fromEntries(corners.map(c => [c, false]));
+
+  function cornerForPoint(x, y) {
+    for (const d of displays) {
+      const f = d.frame; if (!f) continue;
+      const onLeft   = x >= f.x && x <= f.x + BAND;
+      const onRight  = x >= f.x + f.w - 1 - BAND && x <= f.x + f.w - 1;
+      const onTop    = y >= f.y && y <= f.y + BAND;
+      const onBottom = y >= f.y + f.h - 1 - BAND && y <= f.y + f.h - 1;
+      if (onLeft  && onTop)    return "top-left";
+      if (onRight && onTop)    return "top-right";
+      if (onLeft  && onBottom) return "bottom-left";
+      if (onRight && onBottom) return "bottom-right";
     }
+    return null;
+  }
+
+  const last = document.getElementById("last");
+  const handlers = {
+    "top-left":     (e) => { last.textContent = `${e.state} top-left @ ${e.x},${e.y}`;
+                             if (e.state === "enter") sd.notify.show({ title: "hotcorner", body: `top-left at ${e.x},${e.y}` }); },
+    "top-right":    (e) => { last.textContent = `${e.state} top-right @ ${e.x},${e.y}`;
+                             if (e.state === "enter") sd.notify.show({ title: "hotcorner", body: `top-right at ${e.x},${e.y}` }); },
+    "bottom-left":  (e) => { last.textContent = `${e.state} bottom-left @ ${e.x},${e.y}`;
+                             if (e.state === "enter") sd.notify.show({ title: "hotcorner", body: `bottom-left at ${e.x},${e.y}` }); },
+    "bottom-right": (e) => { last.textContent = `${e.state} bottom-right @ ${e.x},${e.y}`;
+                             if (e.state === "enter") sd.notify.show({ title: "hotcorner", body: `bottom-right at ${e.x},${e.y}` }); },
   };
-  globalThis.onTL = log;
-  globalThis.onTR = log;
-  globalThis.onBL = log;
-  globalThis.onBR = log;
-  globalThis.tipTL = (e) => console.log("tooltip TL", e);
+
+  // Optional enter-only tooltip side-channel (mirrors the old `tooltip` field).
+  const tipTL = (e) => console.log("tooltip TL", e);
+
+  sd.mouse.subscribe(({ x, y }) => {
+    const here = cornerForPoint(x, y);
+    for (const c of corners) {
+      const inside = (here === c);
+      if (inside !== state[c]) {
+        state[c] = inside;
+        const payload = { corner: c, state: inside ? "enter" : "leave", x, y };
+        handlers[c]?.(payload);
+        if (inside && c === "top-left") tipTL(payload);
+      }
+    }
+  });
 </script>
 </body></html>

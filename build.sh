@@ -27,7 +27,6 @@ SWIFT_SOURCES=(
   Sources/DataSources/Calendar.swift
   Sources/DataSources/Mouse.swift
   Sources/DataSources/Cursor.swift
-  Sources/DataSources/HotCorners.swift
   Sources/DataSources/Hotkey.swift
   Sources/DataSources/Events.swift
   Sources/DataSources/EventsSynth.swift

@@ -7,11 +7,12 @@ struct StackManifest: Decodable {
     let region: String?             // "menubar" — overrides anchor, spans screen width
     let size: Size
     let clickThrough: Bool?
-    let permissions: [String]
+    // Mutable so StackHost can merge auto-inferred channel permissions
+    // (scanned from the stack's source) before passing to Bridge.start.
+    var permissions: [String]
     let hotkeys: [Hotkey]?
     let handles: [String]?          // bangs this stack handles
     let eventtap: [EventTap]?
-    let hotcorners: [HotCorner]?
     let display: String?            // "primary" (default) | "all" | "<index>"
     let invocable: Bool?            // window starts hidden + can take key on .invoke()
     let level: String?              // "high" → above default .statusBar (for toasts on fullscreen stacks)
@@ -19,7 +20,7 @@ struct StackManifest: Decodable {
 
     struct Anchor: Decodable { let edge: String; let inset: [Int] }
     struct Size: Decodable { let w: Int?; let h: Int }
-    /// `key` is the chord (`"cmd+shift+l"`, `"hyper+a"`, …). `mode` gates
+    /// `key` is the chord (`"cmd+shift+l"`, `"cmd+alt+ctrl+shift+a"`, …). `mode` gates
     /// dispatch on the active HotkeyRegistry mode (skhd-style modal keymaps;
     /// nil means always-on). `apps` gates on the frontmost app's bundleID
     /// (nil = ungated; element `"*"` = any).
@@ -28,17 +29,25 @@ struct StackManifest: Decodable {
         let callback: String
         let mode: String?
         let apps: [String]?
+        let excludeApps: [String]?
     }
-    struct EventTap: Decodable { let event: String; let callback: String }
-    /// `corner` ∈ {"top-left","top-right","bottom-left","bottom-right"}.
-    /// `tooltip` is optional and re-uses the same JS-function-name shape as
-    /// `callback` — the stack defines `globalThis[name]({corner, x, y})` to
-    /// surface hover text or any other on-enter side effect distinct from
-    /// the primary callback (the corner port of FrameMaster wants both).
-    struct HotCorner: Decodable {
-        let corner: String
+    /// `consume: true` migrates this entry to the consuming CGEventTap. The
+    /// `if` predicate is evaluated synchronously inside the tap callback —
+    /// JS round-tripping per-event would force CG to wait on WKWebView. An
+    /// empty/missing `if` means "consume every event of this type" (useful
+    /// for the demo case but rarely what you want in production).
+    struct EventTap: Decodable {
+        let event: String
         let callback: String
-        let tooltip: String?
+        let consume: Bool?
+        let `if`: Predicate?
+
+        struct Predicate: Decodable {
+            let keyCode: Int?
+            let keyCodes: [Int]?
+            let flagsMask: UInt64?
+            let flagsAny: UInt64?
+        }
     }
 }
 
@@ -77,9 +86,16 @@ final class StackHost {
         for entry in entries.sorted() where !entry.hasPrefix(".") {
             let path = stacksDir + "/" + entry
             var isDir: ObjCBool = false
-            if FileManager.default.fileExists(atPath: path, isDirectory: &isDir), isDir.boolValue {
-                loadStack(at: path)
+            guard FileManager.default.fileExists(atPath: path, isDirectory: &isDir) else { continue }
+            let src: StackSource?
+            if isDir.boolValue {
+                src = StackSource.loadFolder(at: path, defaults: defaults)
+            } else if entry.hasSuffix(".stack") {
+                src = StackSource.loadSingleFile(at: path, defaults: defaults)
+            } else {
+                src = nil
             }
+            if let src = src { loadStack(source: src) }
         }
     }
 
@@ -140,13 +156,21 @@ final class StackHost {
             unloadAllInstances(baseId: baseId)
             return "disabled \(id) (was multi-display)\n"
         }
-        let path = rootPath + "/stacks/\(id)"
+        let folder = rootPath + "/stacks/\(id)"
+        let single = rootPath + "/stacks/\(id).stack"
         var isDir: ObjCBool = false
-        if FileManager.default.fileExists(atPath: path, isDirectory: &isDir), isDir.boolValue {
-            loadStack(at: path)
-            return "enabled \(id)\n"
-        }
-        return "error: no stack named '\(id)'\n"
+        let src: StackSource? = {
+            if FileManager.default.fileExists(atPath: folder, isDirectory: &isDir), isDir.boolValue {
+                return StackSource.loadFolder(at: folder, defaults: defaults)
+            }
+            if FileManager.default.fileExists(atPath: single) {
+                return StackSource.loadSingleFile(at: single, defaults: defaults)
+            }
+            return nil
+        }()
+        guard let src = src else { return "error: no stack named '\(id)'\n" }
+        loadStack(source: src)
+        return "enabled \(id)\n"
     }
 
     private func unloadStack(id: String) {
@@ -199,24 +223,24 @@ final class StackHost {
 
     // MARK: - Load one stack
 
-    func loadStack(at path: String) {
-        let url = URL(fileURLWithPath: path)
-        let manifestURL = url.appendingPathComponent("stack.json")
-        guard let data = try? Data(contentsOf: manifestURL) else {
-            log("missing manifest at \(manifestURL.path)"); return
-        }
-        let manifest: StackManifest
-        do {
-            let raw = (try? JSONSerialization.jsonObject(with: data) as? [String: Any]) ?? [:]
-            var merged = defaults
-            for (k, v) in raw { merged[k] = v }
-            let mergedData = try JSONSerialization.data(withJSONObject: merged)
-            manifest = try JSONDecoder().decode(StackManifest.self, from: mergedData)
-        } catch {
-            log("bad manifest \(manifestURL.path): \(error)"); return
+    private func loadStack(source: StackSource) {
+        // Channels-only auto-permission merge. RPC actions (fs.*, proc,
+        // hotkey.bind, …) still require explicit manifest declaration —
+        // they carry real security implications and shouldn't be granted
+        // just because the stack source contains the string.
+        var manifest = source.manifest
+        let inferred = ChannelInference.infer(from: source.sourceText)
+        let added = inferred.subtracting(manifest.permissions).sorted()
+        if !added.isEmpty {
+            manifest.permissions += added
+            log("stack \(manifest.id) — inferred channels: \(added.joined(separator: ", "))")
         }
 
-        schemeHandler.register(stackId: manifest.id, rootURL: url)
+        if let root = source.rootURL {
+            schemeHandler.register(stackId: manifest.id, rootURL: root)
+        } else if let body = source.bodyHTML {
+            schemeHandler.registerInline(stackId: manifest.id, body: body)
+        }
 
         let targets = StackHost.screensFor(displaySpec: manifest.display ?? "primary")
         guard !targets.isEmpty else {
