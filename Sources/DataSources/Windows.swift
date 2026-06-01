@@ -496,20 +496,66 @@ enum WindowsByID {
         AXUIElementSetMessagingTimeout(el, 0.1)
         let role    = axStringAttribute(el, kAXRoleAttribute)
         let subrole = axStringAttribute(el, kAXSubroleAttribute)
-        var toolbarPresent = false
-        var childrenRef: AnyObject?
-        if AXUIElementCopyAttributeValue(el, kAXChildrenAttribute as CFString, &childrenRef) == .success,
-           let children = childrenRef as? [AXUIElement] {
-            for child in children where axStringAttribute(child, kAXRoleAttribute) == "AXToolbar" {
-                toolbarPresent = true
-                break
-            }
-        }
+        let toolbarPresent = elementHasToolbar(el)
         return [
             "toolbarPresent": toolbarPresent,
             "role":           role    as Any? ?? NSNull(),
             "subrole":        subrole as Any? ?? NSNull()
         ]
+    }
+
+    // MARK: Curated AX readers
+    //
+    // Per-window AX properties exposed without making stacks round-trip through
+    // `sd.ax.*` (raw AXUIElement handles). Each reader follows the same shape
+    // as `frame(windowID:)` above — resolve the element via `elementFor`, cap
+    // the messaging timeout so one unresponsive app can't stall a poll loop,
+    // read the attribute, return. The setters (`minimize`, `fullscreen`)
+    // already exist; these are the matching read-side surface.
+
+    /// Window title (kAXTitle). Returns nil if AX is unavailable or the window
+    /// has no title set (palettes/inspectors sometimes leave it empty).
+    static func title(windowID: CGWindowID) -> String? {
+        guard let el = elementFor(windowID: windowID) else { return nil }
+        AXUIElementSetMessagingTimeout(el, 0.1)
+        return axStringAttribute(el, kAXTitleAttribute)
+    }
+
+    /// AX role (kAXRole) — "AXWindow", "AXScrollArea", "AXSheet", "AXDialog", …
+    /// Same string `cornerHints` returns; surfaced separately so stacks that
+    /// only need role don't pay the children-walk cost.
+    static func role(windowID: CGWindowID) -> String? {
+        guard let el = elementFor(windowID: windowID) else { return nil }
+        AXUIElementSetMessagingTimeout(el, 0.1)
+        return axStringAttribute(el, kAXRoleAttribute)
+    }
+
+    /// AX subrole (kAXSubrole) — "AXStandardWindow", "AXSystemDialog",
+    /// "AXFloatingWindow", … Returns nil if the window doesn't declare one
+    /// (rare for top-level windows; common for non-window AX elements).
+    static func subrole(windowID: CGWindowID) -> String? {
+        guard let el = elementFor(windowID: windowID) else { return nil }
+        AXUIElementSetMessagingTimeout(el, 0.1)
+        return axStringAttribute(el, kAXSubroleAttribute)
+    }
+
+    /// Standalone toolbar probe — same children-walk `cornerHints` performs.
+    /// Useful for stacks that ONLY need toolbar presence (e.g. a chrome-height
+    /// estimator) without also paying for role/subrole reads.
+    static func hasToolbar(windowID: CGWindowID) -> Bool {
+        guard let el = elementFor(windowID: windowID) else { return false }
+        AXUIElementSetMessagingTimeout(el, 0.1)
+        return elementHasToolbar(el)
+    }
+
+    private static func elementHasToolbar(_ el: AXUIElement) -> Bool {
+        var childrenRef: AnyObject?
+        guard AXUIElementCopyAttributeValue(el, kAXChildrenAttribute as CFString, &childrenRef) == .success,
+              let children = childrenRef as? [AXUIElement] else { return false }
+        for child in children where axStringAttribute(child, kAXRoleAttribute) == "AXToolbar" {
+            return true
+        }
+        return false
     }
 
     private static func axStringAttribute(_ el: AXUIElement, _ attr: String) -> String? {

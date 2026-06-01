@@ -88,6 +88,17 @@ window.__sd_broadcast_fire = (id, payload) => {
   const fn = broadcastHandlers.get(id);
   if (fn) fn(payload);
 };
+// Streamed proc callbacks routed by mint id. Populated by sd.proc.stream.
+// Native fires window.__sd_proc_stream_fire(id, {stream, chunk}) for each
+// stdout/stderr chunk and once at exit with {stream:"exit", code, signal?}.
+// Handler is removed on exit so a late chunk (shouldn't happen) is dropped.
+const procStreamHandlers = new Map();
+window.__sd_proc_stream_fire = (id, payload) => {
+  const fn = procStreamHandlers.get(id);
+  if (!fn) return;
+  try { fn(payload); } catch (e) { try { console.error("[stackd] proc.stream callback threw:", e); } catch (_) {} }
+  if (payload && payload.stream === "exit") procStreamHandlers.delete(id);
+};
 // sd.overlay no longer round-trips JS draw callbacks. The daemon hosts a
 // per-overlay WKWebView and pushes `window.sd.target = {x,y,w,h}` into it
 // each vsync; the overlay's own HTML/CSS/JS handles rendering. attach()
@@ -107,12 +118,18 @@ window.__sd_http_request = async (serverId, reqId, req) => {
   try { resp = await callback(req); }
   catch (e) { resp = { status: 500, body: String(e) }; }
   resp = resp || {};
+  // bodyEncoding: "base64" — body is a base64 string; the daemon decodes it
+  // before writing to the wire (Content-Length reflects the decoded byte
+  // count). Use this to serve PNGs / PDFs / any binary payload alongside
+  // `sd.fs.read(path, { encoding: "base64" })`. Anything else (or missing)
+  // sends body verbatim as a UTF-8 string — the original behavior.
   await request({
     type: "httpserver.respond",
     reqId,
     status:  resp.status  || 200,
     headers: resp.headers || {},
-    body:    resp.body == null ? "" : String(resp.body)
+    body:    resp.body == null ? "" : String(resp.body),
+    bodyEncoding: resp.bodyEncoding || null
   });
 };
 function request(payload) {
@@ -222,6 +239,17 @@ export const sd = {
     //             ? 0 : h.toolbarPresent ? 26 : 16;
     // matching Tahoe's WindowServer rounding.
     cornerHints(id) { return request({ type: "windows.byId.cornerHints", id }); },
+    // Curated AX readers — per-window properties straight off WindowsByID,
+    // so stacks don't have to round-trip through `sd.ax.*` for the common
+    // cases. Permission: "windows" (each gates on the same key as the
+    // setters). Returns null on AX failure; isMinimized/isFullscreen return
+    // false. title returns null when the window has no title set.
+    title(id)         { return request({ type: "windows.byId.title", id }); },
+    role(id)          { return request({ type: "windows.byId.role", id }); },
+    subrole(id)       { return request({ type: "windows.byId.subrole", id }); },
+    isMinimized(id)   { return request({ type: "windows.byId.isMinimized", id }); },
+    isFullscreen(id)  { return request({ type: "windows.byId.isFullscreen", id }); },
+    hasToolbar(id)    { return request({ type: "windows.byId.hasToolbar", id }); },
     // Synchronous SPI snapshot via CGSHWCaptureWindowList. Works for
     // hidden / minimized / off-space windows (the AltTab trick) — distinct
     // from sd.display.snapshot which uses ScreenCaptureKit and gates on
@@ -276,10 +304,39 @@ export const sd = {
       return request({ type: "defaults.read", bundleId, key });
     }
   },
+  // Default-device curated payloads + per-direction setters + device
+  // enumeration. The input channel is a mirror of `output` — same
+  // `{ name, volume, muted, deviceName }` shape, but for the default input
+  // device. CoreAudio property reads do NOT trigger the microphone TCC
+  // prompt (only opening an input stream does), so subscribing to
+  // `sd.audio.input` from a stack that just wants to draw a mic-level VU
+  // meter is privacy-safe.
+  //   sd.audio.output.subscribe(({ volume, muted, deviceName }) => …)
+  //   sd.audio.input.subscribe (({ volume, muted, deviceName }) => …)
+  //   const inputs  = await sd.audio.devices({ scope: "input"  });
+  //   const outputs = await sd.audio.devices({ scope: "output" });
+  //   // → [{ id, name, manufacturer?, transportType?, uid?, isDefault }, ...]
+  //   await sd.audio.setDefaultDevice(inputs[0].id, "input");
+  //   await sd.audio.setInputVolume(0.5);
+  //   await sd.audio.setInputMuted(true);
   audio: {
     output:     channel("audioOutput"),
+    input:      channel("audioInput"),
     setVolume(v) { return request({ type: "audio.setVolume", value: v }); },
-    setMuted(m)  { return request({ type: "audio.setMuted",  value: !!m }); }
+    setMuted(m)  { return request({ type: "audio.setMuted",  value: !!m }); },
+    setInputVolume(v) { return request({ type: "audio.setInputVolume", value: v }); },
+    setInputMuted(m)  { return request({ type: "audio.setInputMuted",  value: !!m }); },
+    // scope: "input" | "output" (default "output")
+    devices(opts) {
+      const o = opts || {};
+      return request({ type: "audio.devices", scope: o.scope || "output" });
+    },
+    // id is the AudioDeviceID from `devices()`; scope picks which default
+    // slot to update (a device that's both input + output can be the
+    // default for one direction without affecting the other).
+    setDefaultDevice(id, scope) {
+      return request({ type: "audio.setDefaultDevice", id, scope: scope || "output" });
+    }
   },
   display: {
     // Per-display info + brightness. Re-fires on screen arrangement changes
@@ -370,7 +427,14 @@ export const sd = {
   },
   fs: {
     // Imperative — paths support ~ expansion.
-    read(path)      { return request({ type: "fs.read", path }); },
+    //   await sd.fs.read("~/Notes/today.md")                    // utf8 string
+    //   await sd.fs.read("/tmp/cover.png", { encoding: "base64" }) // binary-safe
+    // utf8 returns null on non-UTF-8 bytes; base64 always returns a string
+    // (empty for a zero-byte file).
+    read(path, opts) {
+      const o = opts || {};
+      return request({ type: "fs.read", path, encoding: o.encoding || "utf8" });
+    },
     stat(path)      { return request({ type: "fs.stat", path }); },
     list(dir, opts) { return request({ type: "fs.list", dir, hidden: !!(opts && opts.hidden) }); },
     // Write is atomic (temp-file then rename) so half-written contents never
@@ -392,6 +456,26 @@ export const sd = {
     async unwatch(watchId) {
       fsHandlers.delete(watchId);
       return request({ type: "fs.watch.stop", watchId });
+    },
+    // Extended attributes — Darwin getxattr / setxattr / listxattr / removexattr.
+    // Get / set use base64 for the raw bytes so binary plist payloads (Finder
+    // tags under `com.apple.metadata:_kMDItemUserTags`, download provenance
+    // under `com.apple.metadata:kMDItemWhereFroms`) survive the IPC.
+    //   const b64 = await sd.fs.xattr.get(path, "com.apple.metadata:kMDItemWhereFroms");
+    //   // → "YnBsaXN0MDDU..." | null
+    //   // Decode in stack code: atob(b64) → raw bytes → binary-plist parser.
+    //   await sd.fs.xattr.set(path, "com.apple.FinderInfo", btoa(rawBytes));
+    //   await sd.fs.xattr.list(path);   // ["com.apple.metadata:kMDItemWhereFroms", ...]
+    //   await sd.fs.xattr.remove(path, "com.apple.quarantine");
+    // No auto-decoding in v1 — every Apple xattr is binary plist or raw bytes;
+    // shipping a plist parser inside the daemon would lock in a v2 surface
+    // before the consumers are known. Gated by the same "fs" permission as
+    // the rest of sd.fs.
+    xattr: {
+      get(path, name)        { return request({ type: "fs.xattr.get",    path, name }); },
+      set(path, name, value) { return request({ type: "fs.xattr.set",    path, name, value: String(value ?? "") }); },
+      list(path)             { return request({ type: "fs.xattr.list",   path }); },
+      remove(path, name)     { return request({ type: "fs.xattr.remove", path, name }); }
     }
   },
   pasteboard: {
@@ -409,6 +493,44 @@ export const sd = {
         input: opts && opts.input,
         timeout: opts && opts.timeout
       });
+    },
+    // Streamed counterpart of exec — progressive stdout/stderr instead of
+    // buffer-to-completion. Use for long-running children where you want to
+    // surface output as it arrives (tail -f, brew install, ffmpeg, etc.).
+    //
+    //   const h = await sd.proc.stream(
+    //     { cmd: "/usr/bin/tail", args: ["-f", "/var/log/system.log"] },
+    //     ({ stream, chunk, code, signal }) => {
+    //       if (stream === "stdout") appendLine(chunk);
+    //       if (stream === "stderr") logErr(chunk);
+    //       if (stream === "exit")   console.log("done", code, signal);
+    //     });
+    //   ...later...
+    //   await h.cancel();   // SIGTERM the child; "exit" still fires.
+    //
+    // The callback fires once per native chunk (no line buffering — chunks
+    // can split mid-line); accumulate yourself if you need full lines.
+    // The "exit" event does NOT re-send buffered stdout/stderr — accumulate
+    // the chunks if you want a final joined payload.
+    async stream(opts, callback) {
+      const o = opts || {};
+      if (typeof callback !== "function") return null;
+      const id = await registerHandler(procStreamHandlers, {
+        type: "proc.stream.start",
+        cmd:  String(o.cmd ?? ""),
+        args: o.args || [],
+        env:  o.env,
+        cwd:  o.cwd
+      }, callback);
+      if (id == null) return null;
+      return {
+        id,
+        cancel() {
+          // Don't unregister yet — the exit event still needs to land. The
+          // handler map deletes itself when "exit" arrives (see __sd_proc_stream_fire).
+          return request({ type: "proc.stream.cancel", id });
+        }
+      };
     }
   },
   // AppleScript / JXA runner — faster than spawning /usr/bin/osascript for
@@ -486,7 +608,34 @@ export const sd = {
     launch(bundleId)          { return request({ type: "apps.launch", bundleId }); },
     focus(bundleId)           { return request({ type: "apps.focus",  bundleId }); },
     kill(bundleId, force)     { return request({ type: "apps.kill",   bundleId, force: !!force }); },
-    hide(bundleId)            { return request({ type: "apps.hide",   bundleId }); }
+    // hide / unhide accept either a bundleId (string) or a pid (number).
+    // The bundleId form goes through the bundle-id NSWorkspace lookup;
+    // the pid form goes through NSRunningApplication(processIdentifier:).
+    // unhide is pid-only — NSRunningApplication.unhide() needs a specific
+    // process instance, and "unhide every running copy of a bundle" isn't
+    // a coherent verb.
+    hide(arg) {
+      if (typeof arg === "number") return request({ type: "apps.hideByPid", pid: arg });
+      return request({ type: "apps.hide", bundleId: arg });
+    },
+    unhide(pid)               { return request({ type: "apps.unhideByPid", pid }); },
+    // Curated AX readers on a pid. Mirrors hs.application's menu /
+    // findMenuItem / selectMenuItem / visibleWindows surface.
+    //   const tree = await sd.apps.menu(pid);
+    //   // → { title, role, children: [
+    //   //     { title: "File", role: "AXMenuBarItem",
+    //   //       children: [{ title: "New", role: "AXMenuItem",
+    //   //                    enabled: true, shortcut: "⌘N" }, ...] }, ...] }
+    //   await sd.apps.findMenuItem(pid, ["File", "Save As…"]);
+    //   // → { title, role, enabled, marked? } | null
+    //   await sd.apps.selectMenuItem(pid, ["File", "Save"]);
+    //   // → boolean (true = AXPressAction succeeded)
+    //   await sd.apps.visibleWindows(pid);
+    //   // → [{ id, app, pid, title, frame, onscreen }, ...]  // filtered sd.windows.all, minimized dropped
+    menu(pid)                  { return request({ type: "apps.menu", pid }); },
+    findMenuItem(pid, path)    { return request({ type: "apps.findMenuItem", pid, path }); },
+    selectMenuItem(pid, path)  { return request({ type: "apps.selectMenuItem", pid, path }); },
+    visibleWindows(pid)        { return request({ type: "apps.visibleWindows", pid }); }
   },
   icons: {
     // Returns a `data:image/png;base64,...` URL you can drop into <img src="">.
@@ -637,17 +786,26 @@ export const sd = {
   },
   // Long-running HTTP server. Loopback-only by default; pass
   // bindHost: "0.0.0.0" to expose on the LAN. A single callback receives every
-  // request and returns { status?, headers?, body? }. The stack owns route
-  // dispatch (string compare on req.path), CORS headers, Content-Type, and
-  // static-asset lookup — the daemon is just listener + parser + writer.
+  // request and returns { status?, headers?, body?, bodyEncoding? }. The stack
+  // owns route dispatch (string compare on req.path), CORS headers,
+  // Content-Type, and static-asset lookup — the daemon is just listener +
+  // parser + writer.
   //   const srv = await sd.httpserver.serve({ port: 7373 }, async (req) => {
   //     if (req.path === "/hello") {
   //       return { status: 200, headers: { "Content-Type": "text/plain" }, body: "hello" };
+  //     }
+  //     if (req.path === "/icon.png") {
+  //       const b64 = await sd.fs.read("/path/to/icon.png", { encoding: "base64" });
+  //       return { status: 200, headers: { "Content-Type": "image/png" },
+  //                body: b64, bodyEncoding: "base64" };
   //     }
   //     return { status: 404, body: "not found" };
   //   });
   //   ...later...
   //   await srv.stop();
+  // bodyEncoding: "base64" tells the daemon to decode `body` before writing
+  // to the wire — use this for PNG / PDF / any binary payload. Omit it (or
+  // pass any other value) and `body` is sent as a UTF-8 string.
   // Consumers: CloudPad (serves snapshot + bang surface to phones on the LAN);
   // any webhook receiver or local API dashboard stack.
   httpserver: {
@@ -718,7 +876,41 @@ export const sd = {
   // between com.apple.screenIs{Locked,Unlocked} distributed notifications.
   // Use for "don't accumulate time while screen is off" (AppTimeout),
   // "stop drawing while asleep" (TimeTrail), etc.
-  caffeinate: channel("caffeinate"),
+  //
+  // Setter side: sd.caffeinate.assert({ type, reason? }) takes an IOPM wake
+  // lock and returns a handle. Call handle.release() (or await it) when the
+  // work is done — stack unload releases anything still outstanding.
+  //
+  //   const h = await sd.caffeinate.assert({ type: "display", reason: "exporting video" });
+  //   try { await exportVideo(); } finally { await h.release(); }
+  //
+  // Types:
+  //   "display"      — display + system stay awake (NoDisplaySleepAssertion).
+  //                    Use for video export, screen capture, presenting.
+  //   "system"       — system stays awake; display can dim/sleep on its own
+  //                    timer (NoIdleSleepAssertion). Use for long-running
+  //                    background work that doesn't need the screen lit.
+  //   "userActivity" — advisory variant of system, bound to the user-idle
+  //                    path (PreventUserIdleSystemSleep). Same intent as
+  //                    "system" but lower-priority — yields to other power
+  //                    policies (e.g. AC vs battery) more readily.
+  //
+  // Permission: "caffeinate".
+  caffeinate: Object.assign(channel("caffeinate"), {
+    async assert(spec) {
+      const s = spec || {};
+      const id = await request({
+        type:   "caffeinate.assert",
+        type_:  s.type,                 // intentionally renamed to avoid colliding with the IPC envelope's `type`
+        reason: s.reason != null ? String(s.reason) : ""
+      });
+      if (id == null) return null;
+      return {
+        id,
+        release() { return request({ type: "caffeinate.release", id }); }
+      };
+    }
+  }),
   // Vsync-locked frame tick. Refresh rate matches the display (60 Hz on
   // standard, 120 Hz on ProMotion). Cheaper + smoother than rAF inside a
   // heavy WebView, and aligned to the compositor's flip cadence —
@@ -1162,6 +1354,7 @@ const __sdSignalPaths = {
   "net.lan":            sd.net.lan,
   "net.path":           sd.net.path,
   "audio.output":       sd.audio.output,
+  "audio.input":        sd.audio.input,
   "display.all":        sd.display.all,
   "media.nowPlaying":   sd.media.nowPlaying,
   "pasteboard.changed": sd.pasteboard.changed,

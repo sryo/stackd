@@ -1,4 +1,6 @@
 import WebKit
+import IOKit.pwr_mgt
+import CoreAudio  // AudioDeviceID — used by sd.audio.setDefaultDevice
 
 final class Bridge: NSObject, WKScriptMessageHandler {
     weak var webView: WKWebView?
@@ -53,6 +55,20 @@ final class Bridge: NSObject, WKScriptMessageHandler {
     // scope drain on stack unload closes every connection — the underlying
     // SQLite.HandleStore is process-wide but the *ownership* is stack-scoped.
     fileprivate var sqliteHandles: Set<Int> = []
+    // Streamed proc invocations minted via sd.proc.stream(). cancel() sends
+    // SIGTERM; the wrapped Process strongly retains the underlying task so
+    // the terminationHandler still fires after unload. Scope drain SIGTERMs
+    // any still-running child so stack reload doesn't strand subprocesses.
+    fileprivate var procStreamHandles: [Int: ProcStreamHandle] = [:]
+    fileprivate var nextProcStreamId: Int = 1
+    // Active IOPMAssertion handles minted by sd.caffeinate.assert(). Keyed
+    // by a per-bridge counter (the id we hand back to JS); value is the raw
+    // IOPMAssertionID returned by IOPMAssertionCreateWithName. Released
+    // explicitly via sd.caffeinate.release(handleId) — or in bulk by the
+    // scope drain on stack unload (so a forgotten wake-lock doesn't outlive
+    // the stack that took it).
+    fileprivate var caffeinateAssertions: [Int: IOPMAssertionID] = [:]
+    fileprivate var nextCaffeinateId: Int = 1
     // Per-channel JS-requested fanout cadence (seconds). Set via the
     // sd.channel.setInterval IPC when a stack calls e.g.
     // `sd.sensors.subscribe(fn, { interval: 5 })`. Channels not listed here
@@ -281,6 +297,16 @@ final class Bridge: NSObject, WKScriptMessageHandler {
             for (_, t) in self.broadcastTokens { t.cancel() }
             self.broadcastTokens.removeAll()
         })
+        // Caffeinate assertions — IOPMAssertionRelease every wake-lock this
+        // stack took. Stacks that forget to release on unload (or crash
+        // mid-task) would otherwise hold the assertion until the daemon
+        // process exits, which means a forgotten "exporting video" assert
+        // can pin the display awake forever.
+        scope.adopt(Token { [weak self] in
+            guard let self = self else { return }
+            for (_, id) in self.caffeinateAssertions { Caffeinate.release(id: id) }
+            self.caffeinateAssertions.removeAll()
+        })
         // HTTP servers — stop every listener owned by this stack and resolve
         // any in-flight requests with 503 so the connection's send-then-cancel
         // path doesn't leak the NWConnection.
@@ -299,6 +325,15 @@ final class Bridge: NSObject, WKScriptMessageHandler {
             guard let self = self else { return }
             for h in self.sqliteHandles { SQLite.close(handle: h) }
             self.sqliteHandles.removeAll()
+        })
+        // Streamed proc children — SIGTERM any still-running subprocess so
+        // stack unload / reload doesn't strand them. The terminationHandler
+        // still fires for in-flight cancels; JS callbacks just won't be there
+        // to receive the exit event (the bridge is being torn down).
+        scope.adopt(Token { [weak self] in
+            guard let self = self else { return }
+            for (_, h) in self.procStreamHandles { h.cancel() }
+            self.procStreamHandles.removeAll()
         })
         // Overlays — cancel each per-overlay displayLink subscription, then
         // detach each handle (closes the overlay NSPanel). Mirrors the
@@ -459,12 +494,36 @@ final class Bridge: NSObject, WKScriptMessageHandler {
             Mouse.warp(x: (body["x"] as? Double) ?? 0, y: (body["y"] as? Double) ?? 0)
         },
 
-        // Audio — Bool side-effect ops, deny → false.
+        // Audio — Bool side-effect ops, deny → false. Output ops touch the
+        // default output device's "virtual main" volume / mute. Input ops
+        // mirror the same shape for the default input device (CoreAudio
+        // property API only — does NOT open a stream, so the microphone TCC
+        // prompt is not triggered).
         .sync("audio.setVolume", permission: "audio", denyValue: false) { body in
             Audio.setVolume(Float((body["value"] as? Double) ?? 0))
         },
         .sync("audio.setMuted", permission: "audio", denyValue: false) { body in
             Audio.setMuted((body["value"] as? Bool) ?? false)
+        },
+        .sync("audio.setInputVolume", permission: "audio", denyValue: false) { body in
+            Audio.setInputVolume(Float((body["value"] as? Double) ?? 0))
+        },
+        .sync("audio.setInputMuted", permission: "audio", denyValue: false) { body in
+            Audio.setInputMuted((body["value"] as? Bool) ?? false)
+        },
+        // Per-scope device enumeration. Returns [{id, name, manufacturer?,
+        // transportType?, uid?, isDefault}, ...] — id is the AudioDeviceID
+        // as Int so JS can pass it back through `setDefaultDevice`. Filtered
+        // to devices that actually have streams in the requested direction
+        // (an output-only device doesn't appear in the input list).
+        .sync("audio.devices", permission: "audio", denyValue: [[String: Any]]()) { body in
+            let scope: Audio.Scope = (body["scope"] as? String) == "input" ? .input : .output
+            return Audio.devices(scope: scope)
+        },
+        .sync("audio.setDefaultDevice", permission: "audio", denyValue: false) { body in
+            guard let id = body["id"] as? Int else { return false }
+            let scope: Audio.Scope = (body["scope"] as? String) == "input" ? .input : .output
+            return Audio.setDefaultDevice(id: AudioDeviceID(id), scope: scope)
         },
 
         // Display
@@ -527,7 +586,13 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         .syncBridge("settings.all",    permission: "settings", denyValue: [String: Any]()) { b, _ in b.settings?.all() ?? [:] },
 
         // Filesystem
-        .sync("fs.read", permission: "fs") { body in FS.read(path: body["path"] as? String ?? "") },
+        .sync("fs.read", permission: "fs") { body in
+            // encoding:
+            //   "utf8"   (default) — UTF-8 decoded string, null on non-UTF-8 bytes
+            //   "base64" — raw bytes base64-encoded (binary-safe; PNG/plist/etc)
+            FS.read(path:     body["path"]     as? String ?? "",
+                    encoding: body["encoding"] as? String ?? "utf8")
+        },
         .sync("fs.stat", permission: "fs") { body in FS.stat(path: body["path"] as? String ?? "") },
         .sync("fs.list", permission: "fs") { body in
             FS.list(dir: body["dir"] as? String ?? "", includeHidden: body["hidden"] as? Bool ?? false)
@@ -561,6 +626,27 @@ final class Bridge: NSObject, WKScriptMessageHandler {
             } else {
                 bridge.respond(requestId: requestId, value: false)
             }
+        },
+
+        // Extended attributes (com.apple.metadata:*, Finder tags, quarantine,
+        // WhereFroms). get returns the raw bytes base64-encoded — binary plist
+        // payloads survive the IPC. No auto-decoding in v1; stacks that want
+        // a readable tag list parse the binary plist themselves.
+        .sync("fs.xattr.get", permission: "fs") { body in
+            Xattr.get(path: body["path"] as? String ?? "",
+                      name: body["name"] as? String ?? "")
+        },
+        .sync("fs.xattr.set", permission: "fs", denyValue: false) { body in
+            Xattr.set(path:  body["path"]  as? String ?? "",
+                      name:  body["name"]  as? String ?? "",
+                      value: body["value"] as? String ?? "")
+        },
+        .sync("fs.xattr.list", permission: "fs") { body in
+            Xattr.list(path: body["path"] as? String ?? "") as Any? ?? NSNull()
+        },
+        .sync("fs.xattr.remove", permission: "fs", denyValue: false) { body in
+            Xattr.remove(path: body["path"] as? String ?? "",
+                         name: body["name"] as? String ?? "")
         },
 
         // Pasteboard
@@ -778,6 +864,48 @@ final class Bridge: NSObject, WKScriptMessageHandler {
             }
         },
 
+        // Streamed proc — progressive stdout/stderr via per-chunk callbacks,
+        // SIGTERM via cancel. Mints an id (returned synchronously to JS);
+        // each chunk + the final exit event fire via __sd_proc_stream_fire.
+        // Same handle-table pattern as broadcasts.observe / hotkey.bind.
+        .custom("proc.stream.start", permission: "proc") { bridge, body, requestId in
+            let cmd  = body["cmd"]  as? String ?? ""
+            let args = body["args"] as? [String] ?? []
+            let env  = body["env"]  as? [String: String]
+            let cwd  = body["cwd"]  as? String
+            let id = bridge.nextProcStreamId
+            bridge.nextProcStreamId += 1
+            let handle = Proc.stream(cmd: cmd, args: args, env: env, cwd: cwd) { [weak bridge] payload in
+                guard let bridge = bridge, let webView = bridge.webView else { return }
+                let json = Bridge.jsonify(payload)
+                // Proc.stream already hops to main before invoking onEvent;
+                // evaluateJavaScript runs synchronously from here.
+                webView.evaluateJavaScript(
+                    "window.__sd_proc_stream_fire && window.__sd_proc_stream_fire(\(id), \(json));",
+                    completionHandler: nil
+                )
+                // Final event drops the handle so cancel() after exit no-ops
+                // and the per-stack drain doesn't try to SIGTERM a dead child.
+                if (payload["stream"] as? String) == "exit" {
+                    bridge.procStreamHandles.removeValue(forKey: id)
+                }
+            }
+            guard let handle = handle else {
+                bridge.respond(requestId: requestId, value: NSNull()); return
+            }
+            bridge.procStreamHandles[id] = handle
+            bridge.respond(requestId: requestId, value: id)
+        },
+        .syncBridge("proc.stream.cancel", permission: "proc", denyValue: false) { b, body in
+            guard let id = body["id"] as? Int,
+                  let h = b.procStreamHandles[id] else { return false }
+            h.cancel()
+            // Don't remove from the table here — the exit event handler does
+            // that. Removing now would let a subsequent cancel slip through
+            // as "not found" even though the SIGTERM was already in flight.
+            return true
+        },
+
         // Shortcuts CLI invocation — async like proc.exec. Gated by the
         // "shortcuts" permission so a stack must opt in explicitly (a shortcut
         // can do almost anything: AppleScript, file I/O, network requests,
@@ -845,6 +973,37 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         .sync("apps.kill",   permission: "apps", denyValue: false) { body in Apps.kill(  bundleId: body["bundleId"] as? String ?? "", force: body["force"] as? Bool ?? false) },
         .sync("apps.hide",   permission: "apps", denyValue: false) { body in Apps.hide(  bundleId: body["bundleId"] as? String ?? "") },
 
+        // Curated AX readers on a pid (mirrors hs.application's menu /
+        // findMenuItem / selectMenuItem / visibleWindows / hide / unhide).
+        // All hop to main via `.ax` because they walk AXUIElement trees —
+        // same constraint that put windows.byId.cornerHints behind `.ax`.
+        // hide / unhide are pid-specific (the bundleId variant lives above
+        // as apps.hide); the JS surface routes `sd.apps.hide(pid)` → hideByPid.
+        .ax("apps.menu", permission: "apps") { _, body in
+            Apps.menu(pid: pid_t((body["pid"] as? Int) ?? 0))
+        },
+        .ax("apps.findMenuItem", permission: "apps") { _, body in
+            Apps.findMenuItem(
+                pid: pid_t((body["pid"] as? Int) ?? 0),
+                path: (body["path"] as? [String]) ?? []
+            )
+        },
+        .ax("apps.selectMenuItem", permission: "apps", denyValue: false) { _, body in
+            Apps.selectMenuItem(
+                pid: pid_t((body["pid"] as? Int) ?? 0),
+                path: (body["path"] as? [String]) ?? []
+            )
+        },
+        .ax("apps.visibleWindows", permission: "apps", denyValue: [[String: Any]]()) { _, body in
+            Apps.visibleWindows(pid: pid_t((body["pid"] as? Int) ?? 0))
+        },
+        .ax("apps.hideByPid", permission: "apps", denyValue: false) { _, body in
+            Apps.hide(pid: pid_t((body["pid"] as? Int) ?? 0))
+        },
+        .ax("apps.unhideByPid", permission: "apps", denyValue: false) { _, body in
+            Apps.unhide(pid: pid_t((body["pid"] as? Int) ?? 0))
+        },
+
         // Icons
         .sync("icons.app",  permission: "icons") { body in
             Icons.forApp( bundleId: body["bundleId"] as? String ?? "", size: body["size"] as? Int ?? 64)
@@ -892,6 +1051,28 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         },
         .ax("windows.byId.cornerHints", permission: "windows") { _, body in
             WindowsByID.cornerHints(windowID: CGWindowID((body["id"] as? Int) ?? 0))
+        },
+        // Curated AX readers — per-window properties without round-tripping
+        // through `sd.ax.*`. Each maps 1:1 to a WindowsByID static; `.ax`
+        // because AX queries must hop to main. nil/false results pass through
+        // as JSON null / false, matching the byId.frame contract.
+        .ax("windows.byId.title",        permission: "windows") { _, body in
+            WindowsByID.title(windowID: CGWindowID((body["id"] as? Int) ?? 0)) as Any? ?? NSNull()
+        },
+        .ax("windows.byId.role",         permission: "windows") { _, body in
+            WindowsByID.role(windowID: CGWindowID((body["id"] as? Int) ?? 0)) as Any? ?? NSNull()
+        },
+        .ax("windows.byId.subrole",      permission: "windows") { _, body in
+            WindowsByID.subrole(windowID: CGWindowID((body["id"] as? Int) ?? 0)) as Any? ?? NSNull()
+        },
+        .ax("windows.byId.isMinimized",  permission: "windows") { _, body in
+            WindowsByID.isMinimized(windowID: CGWindowID((body["id"] as? Int) ?? 0))
+        },
+        .ax("windows.byId.isFullscreen", permission: "windows") { _, body in
+            WindowsByID.isFullscreen(windowID: CGWindowID((body["id"] as? Int) ?? 0))
+        },
+        .ax("windows.byId.hasToolbar",   permission: "windows") { _, body in
+            WindowsByID.hasToolbar(windowID: CGWindowID((body["id"] as? Int) ?? 0))
         },
         // Per-window snapshot via CGSHWCaptureWindowList (AltTab's trick).
         // Synchronous, no TCC, works for hidden / minimized / off-space
@@ -1127,6 +1308,32 @@ final class Bridge: NSObject, WKScriptMessageHandler {
             return true
         },
 
+        // ── Caffeinate.assert (wake-lock setter) ───────────────────────────
+        // Mints an IOPMAssertion held until release. Three JS types map to
+        // three IOPM assertion strings — see Caffeinate.assert(type:reason:).
+        // Returns a per-bridge handle id; JS wraps it as { id, release() }.
+        // Stack unload drains every outstanding assertion via scope so a
+        // forgotten wake-lock can't outlive the stack. Permission: "caffeinate".
+        .custom("caffeinate.assert", permission: "caffeinate") { bridge, body, requestId in
+            // The IPC envelope already owns the "type" key (used to dispatch
+            // to this primitive), so the assertion kind comes in on
+            // "assertionType" — JS api.js renames spec.type accordingly.
+            let kind = body["assertionType"] as? String ?? ""
+            let reason = body["reason"] as? String ?? ""
+            guard let assertionId = Caffeinate.assert(type: kind, reason: reason) else {
+                bridge.respond(requestId: requestId, value: NSNull()); return
+            }
+            let id = bridge.nextCaffeinateId
+            bridge.nextCaffeinateId += 1
+            bridge.caffeinateAssertions[id] = assertionId
+            bridge.respond(requestId: requestId, value: id)
+        },
+        .syncBridge("caffeinate.release", permission: "caffeinate", denyValue: false) { b, body in
+            guard let id = body["id"] as? Int,
+                  let assertionId = b.caffeinateAssertions.removeValue(forKey: id) else { return false }
+            return Caffeinate.release(id: assertionId)
+        },
+
         // ── Overlay (WebKit overlay primitive) ─────────────────────────────
         // Attach a borderless click-through NSPanel + WKWebView pinned to a
         // target window we don't own. The stack supplies {html, css?, js?};
@@ -1254,7 +1461,17 @@ final class Bridge: NSObject, WKScriptMessageHandler {
             var response = HTTPResponse()
             response.status  = body["status"] as? Int ?? 200
             response.headers = body["headers"] as? [String: String] ?? [:]
-            response.body    = body["body"]    as? String ?? ""
+            let raw = body["body"] as? String ?? ""
+            // Stacks opt into binary by passing bodyEncoding: "base64" — typical
+            // pairing is sd.fs.read(path, { encoding: "base64" }) → forward the
+            // string straight through. Anything else (or missing) treats body as
+            // a UTF-8 string, matching the original String-only contract.
+            if (body["bodyEncoding"] as? String) == "base64",
+               let data = Data(base64Encoded: raw, options: [.ignoreUnknownCharacters]) {
+                response.bodyBytes = data
+            } else {
+                response.body = raw
+            }
             complete(response)
             return true
         },
@@ -1343,6 +1560,7 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         ("net",         "netLan"),
         ("net",         "netPath"),
         ("audio",       "audioOutput"),
+        ("audio",       "audioInput"),
         ("display",     "displays"),
         ("media",       "media"),
         ("pasteboard",  "pasteboard"),
@@ -1493,6 +1711,14 @@ final class Bridge: NSObject, WKScriptMessageHandler {
     private func startAudio() {
         startChannel(name: "audioOutput", observer: AudioObserver.shared) {
             Audio.current()
+        }
+        // Mirror channel for the default input device. Separate observer
+        // because each AudioObserver / AudioInputObserver owns its own
+        // listener-block refs and default-device selector — splitting keeps
+        // an input device change from re-firing the output channel and vice
+        // versa.
+        startChannel(name: "audioInput", observer: AudioInputObserver.shared) {
+            Audio.currentInput()
         }
     }
 

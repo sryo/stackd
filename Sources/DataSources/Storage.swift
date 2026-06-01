@@ -2,6 +2,7 @@ import Foundation
 import CoreServices
 import AppKit
 import SQLite3
+import Darwin
 
 // Storage: files / settings / clipboard / sqlite — all the "remember things on
 // disk or in memory" surfaces collapsed into a single domain file.
@@ -24,9 +25,20 @@ import SQLite3
 // this file exposes the same FSEventStream machinery to stacks per-watch.
 
 enum FS {
-    static func read(path: String) -> String? {
+    /// Read file contents. `encoding` selects how bytes land in JS:
+    ///   - "utf8"   (default) → UTF-8 decoded string, nil if not valid UTF-8.
+    ///   - "base64" → base64-encoded blob, binary-safe (PNG, plist, .ds_store).
+    /// Anything else falls back to utf8. Returns nil if the file can't be
+    /// read at all (missing path, permission denied, etc).
+    static func read(path: String, encoding: String = "utf8") -> String? {
         let p = expand(path)
-        return try? String(contentsOfFile: p, encoding: .utf8)
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: p)) else {
+            return nil
+        }
+        if encoding == "base64" {
+            return data.base64EncodedString()
+        }
+        return String(data: data, encoding: .utf8)
     }
 
     static func stat(path: String) -> [String: Any]? {
@@ -111,6 +123,78 @@ enum FS {
     /// Expand ~ and ~user prefixes. Other paths pass through.
     static func expand(_ path: String) -> String {
         (path as NSString).expandingTildeInPath
+    }
+}
+
+// MARK: - Xattr
+
+// Extended-attribute access via the Darwin syscalls. Raw byte payloads
+// round-trip as base64 strings so binary plist blobs (Finder tags under
+// `com.apple.metadata:_kMDItemUserTags`, download provenance under
+// `com.apple.metadata:kMDItemWhereFroms`) survive the IPC.
+//
+// No auto-decoding in v1 — callers that want a readable tag list run the
+// returned bytes through atob() + a plist parser. See audit §5b A5 for
+// the rationale (binary-plist decoding lives in stack code, not the daemon).
+enum Xattr {
+    /// Read the named xattr. Returns base64-encoded bytes on success,
+    /// nil if the attribute doesn't exist or the path can't be read.
+    static func get(path: String, name: String) -> String? {
+        let p = FS.expand(path)
+        // Two-call dance: ask for size first (size=0 + null buf), then read.
+        let size = getxattr(p, name, nil, 0, 0, 0)
+        if size < 0 { return nil }
+        if size == 0 { return "" }
+        var buf = [UInt8](repeating: 0, count: size)
+        let n = getxattr(p, name, &buf, size, 0, 0)
+        if n < 0 { return nil }
+        return Data(buf[0..<n]).base64EncodedString()
+    }
+
+    /// Set the named xattr. `value` is base64-encoded bytes; bad base64
+    /// returns false without touching the filesystem. Replaces any
+    /// existing value (XATTR_REPLACE not used).
+    @discardableResult
+    static func set(path: String, name: String, value: String) -> Bool {
+        let p = FS.expand(path)
+        guard let data = Data(base64Encoded: value) else { return false }
+        let rc = data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) -> Int32 in
+            setxattr(p, name, raw.baseAddress, data.count, 0, 0)
+        }
+        return rc == 0
+    }
+
+    /// List xattr names on `path`. Returns [] when no xattrs are set,
+    /// nil if the path can't be read.
+    static func list(path: String) -> [String]? {
+        let p = FS.expand(path)
+        let size = listxattr(p, nil, 0, 0)
+        if size < 0 { return nil }
+        if size == 0 { return [] }
+        var buf = [CChar](repeating: 0, count: size)
+        let n = listxattr(p, &buf, size, 0)
+        if n < 0 { return nil }
+        // listxattr returns NUL-separated names with a trailing NUL.
+        var names: [String] = []
+        var start = 0
+        for i in 0..<n {
+            if buf[i] == 0 {
+                if i > start {
+                    let slice = Array(buf[start..<i]) + [0]
+                    names.append(String(cString: slice))
+                }
+                start = i + 1
+            }
+        }
+        return names
+    }
+
+    /// Remove the named xattr. Returns true on success, false if the
+    /// attribute didn't exist or the path can't be written.
+    @discardableResult
+    static func remove(path: String, name: String) -> Bool {
+        let p = FS.expand(path)
+        return removexattr(p, name, 0) == 0
     }
 }
 
