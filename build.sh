@@ -21,7 +21,6 @@ SWIFT_SOURCES=(
   Sources/CLI.swift
   Sources/StackTemplates.swift
   Sources/FileWatcher.swift
-  Sources/DataSources/Battery.swift
   Sources/DataSources/Camera.swift
   Sources/DataSources/CameraCapture.swift
   Sources/DataSources/Calendar.swift
@@ -34,10 +33,8 @@ SWIFT_SOURCES=(
   Sources/DataSources/Windows.swift
 
   Sources/DataSources/Gesture.swift
-  Sources/DataSources/Host.swift
   Sources/DataSources/Input.swift
   Sources/DataSources/Location.swift
-  Sources/DataSources/Defaults.swift
   Sources/DataSources/Broadcasts.swift
   Sources/DataSources/Menubar.swift
   Sources/DataSources/MenubarVisibility.swift
@@ -48,22 +45,16 @@ SWIFT_SOURCES=(
   Sources/DataSources/Audio.swift
   Sources/DataSources/Bluetooth.swift
   Sources/DataSources/Display.swift
-  Sources/DataSources/DisplaySnapshot.swift
-  Sources/DataSources/Settings.swift
   Sources/DataSources/Sensors.swift
 
-  Sources/DataSources/FS.swift
-  Sources/DataSources/Pasteboard.swift
+  Sources/DataSources/Storage.swift
   Sources/DataSources/Proc.swift
   Sources/DataSources/Apps.swift
   Sources/DataSources/AX.swift
-  Sources/DataSources/Caffeinate.swift
   Sources/DataSources/Disks.swift
-  Sources/DataSources/DisplayLink.swift
   Sources/DataSources/Overlay.swift
   Sources/DataSources/HTTPServer.swift
   Sources/DataSources/Vision.swift
-  Sources/DataSources/SQLite.swift
   Sources/DataSources/NLP.swift
   Sources/DataSources/Spotlight.swift
   Sources/DataSources/Speech.swift
