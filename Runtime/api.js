@@ -899,10 +899,14 @@ export const sd = {
   caffeinate: Object.assign(channel("caffeinate"), {
     async assert(spec) {
       const s = spec || {};
+      // The IPC envelope's `type` is reserved for primitive dispatch
+      // ("caffeinate.assert"); the assertion kind ("display"/"system"/
+      // "userActivity") travels on `assertionType` and Bridge.swift reads
+      // it back under that key.
       const id = await request({
-        type:   "caffeinate.assert",
-        type_:  s.type,                 // intentionally renamed to avoid colliding with the IPC envelope's `type`
-        reason: s.reason != null ? String(s.reason) : ""
+        type:          "caffeinate.assert",
+        assertionType: s.type,
+        reason:        s.reason != null ? String(s.reason) : ""
       });
       if (id == null) return null;
       return {

@@ -4,6 +4,7 @@ import Foundation
 import IOKit
 import IOKit.hid
 import IOKit.ps
+import IOKit.pwr_mgt
 
 // MARK: - Sensors (HID thermal/voltage/current/fan)
 
@@ -578,6 +579,60 @@ enum Caffeinate {
               let locked = dict["CGSSessionScreenIsLocked"] as? Bool
         else { return false }
         return locked
+    }
+
+    // MARK: - Assertions (setter side of caffeinate)
+
+    /// Holds a power-management assertion until release() is called. Three JS
+    /// types map to three IOPM assertion strings:
+    ///   - "display"      → kIOPMAssertionTypeNoDisplaySleep
+    ///       (keeps the display awake while the assertion is held; user idle
+    ///        timer doesn't dim or sleep the screen)
+    ///   - "system"       → kIOPMAssertionTypeNoIdleSleep
+    ///       (system stays awake even when user is idle; display may still
+    ///        sleep on its own timer)
+    ///   - "userActivity" → kIOPMAssertionTypePreventUserIdleSystemSleep
+    ///       (advisory equivalent — same intent as "system" but bound to the
+    ///        user-idle path; respects external power policy)
+    /// Returns the raw IOPMAssertionID on success, nil on failure. Bridge
+    /// owns the lifetime — assertions are released at stack unload via the
+    /// scope drain, or explicitly via Caffeinate.release(id:).
+    static func assert(type: String, reason: String) -> IOPMAssertionID? {
+        let assertionType: CFString
+        switch type {
+        case "display":      assertionType = kIOPMAssertionTypeNoDisplaySleep as CFString
+        case "system":       assertionType = kIOPMAssertionTypeNoIdleSleep as CFString
+        case "userActivity": assertionType = kIOPMAssertionTypePreventUserIdleSystemSleep as CFString
+        default:
+            FileHandle.standardError.write(Data("stackd: caffeinate.assert — unknown type \(type)\n".utf8))
+            return nil
+        }
+        // Reason string is surfaced in `pmset -g assertions` / Activity Monitor,
+        // so stacks should pass something descriptive. Empty falls back to a
+        // generic label so the entry isn't anonymous.
+        let label = reason.isEmpty ? "stackd assertion" : reason
+        var assertionId: IOPMAssertionID = IOPMAssertionID(kIOPMNullAssertionID)
+        let result = IOPMAssertionCreateWithName(
+            assertionType,
+            IOPMAssertionLevel(kIOPMAssertionLevelOn),
+            label as CFString,
+            &assertionId
+        )
+        guard result == kIOReturnSuccess else {
+            FileHandle.standardError.write(Data("stackd: caffeinate.assert — IOPMAssertionCreateWithName failed (\(result))\n".utf8))
+            return nil
+        }
+        return assertionId
+    }
+
+    /// Releases an assertion minted by `assert(type:reason:)`. Safe to call
+    /// with a stale id — IOPMAssertionRelease returns an error code which we
+    /// swallow (the alternative is leaking the slot, since callers have no
+    /// useful recovery). No-op on kIOPMNullAssertionID.
+    @discardableResult
+    static func release(id: IOPMAssertionID) -> Bool {
+        guard id != IOPMAssertionID(kIOPMNullAssertionID) else { return false }
+        return IOPMAssertionRelease(id) == kIOReturnSuccess
     }
 }
 
