@@ -32,13 +32,8 @@ SWIFT_SOURCES=(
   Sources/DataSources/EventsSynth.swift
 
   Sources/DataSources/Windows.swift
-  Sources/DataSources/WindowsSnapshot.swift
-  Sources/DataSources/WindowEvents.swift
-  Sources/DataSources/MissionControl.swift
 
   Sources/DataSources/Gesture.swift
-  Sources/DataSources/Appearance.swift
-  Sources/DataSources/AppleScript.swift
   Sources/DataSources/Host.swift
   Sources/DataSources/Input.swift
   Sources/DataSources/Location.swift
@@ -54,19 +49,14 @@ SWIFT_SOURCES=(
   Sources/DataSources/Bluetooth.swift
   Sources/DataSources/Display.swift
   Sources/DataSources/DisplaySnapshot.swift
-  Sources/DataSources/Media.swift
   Sources/DataSources/Settings.swift
   Sources/DataSources/Sensors.swift
 
-  Sources/DataSources/Sound.swift
   Sources/DataSources/FS.swift
   Sources/DataSources/Pasteboard.swift
   Sources/DataSources/Proc.swift
-  Sources/DataSources/Shortcuts.swift
   Sources/DataSources/Apps.swift
-  Sources/DataSources/Icons.swift
   Sources/DataSources/AX.swift
-  Sources/DataSources/Spaces.swift
   Sources/DataSources/Caffeinate.swift
   Sources/DataSources/Disks.swift
   Sources/DataSources/DisplayLink.swift

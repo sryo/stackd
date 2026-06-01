@@ -1,5 +1,6 @@
-import CoreAudio
+import AppKit
 import AudioToolbox
+import CoreAudio
 import Foundation
 
 // Default output device: read/set volume + mute, plus a single observer
@@ -198,5 +199,135 @@ final class AudioObserver: RefCountedObserver {
         var muteAddr = Audio.muteAddress
         if let vol  = vol  { AudioObjectRemovePropertyListenerBlock(id, &volAddr,  listenerQueue, vol)  }
         if let mute = mute { AudioObjectRemovePropertyListenerBlock(id, &muteAddr, listenerQueue, mute) }
+    }
+}
+
+// MARK: - Media (now playing)
+
+// MRMediaRemote.framework private SPI. Covers Spotify / Apple Music /
+// Podcasts / browser audio — anything that publishes to macOS Now Playing.
+// Vendored via dlopen so a missing-or-renamed symbol degrades to null
+// rather than crashing the daemon (cf. CGSSetMenuBarVisibility on Sequoia+).
+
+enum MediaRemote {
+    // Inner closure must be `@escaping`: the framework dispatches it
+    // asynchronously to the queue. Swift auto-bridges to an ObjC block.
+    typealias GetNowPlayingInfoFn = @convention(c) (DispatchQueue, @escaping ([String: Any]) -> Void) -> Void
+    typealias SendCommandFn       = @convention(c) (UInt32, CFDictionary?) -> Bool
+    typealias RegisterFn          = @convention(c) (DispatchQueue) -> Void
+
+    static let handle: UnsafeMutableRawPointer? = {
+        dlopen("/System/Library/PrivateFrameworks/MediaRemote.framework/MediaRemote", RTLD_LAZY)
+    }()
+
+    static let getNowPlayingInfo: GetNowPlayingInfoFn? = {
+        guard let h = handle, let s = dlsym(h, "MRMediaRemoteGetNowPlayingInfo") else { return nil }
+        return unsafeBitCast(s, to: GetNowPlayingInfoFn.self)
+    }()
+
+    static let sendCommand: SendCommandFn? = {
+        guard let h = handle, let s = dlsym(h, "MRMediaRemoteSendCommand") else { return nil }
+        return unsafeBitCast(s, to: SendCommandFn.self)
+    }()
+
+    static let registerForNotifications: RegisterFn? = {
+        guard let h = handle, let s = dlsym(h, "MRMediaRemoteRegisterForNowPlayingNotifications") else { return nil }
+        return unsafeBitCast(s, to: RegisterFn.self)
+    }()
+
+    // MRMediaRemoteCommand enum values (stable across macOS releases).
+    static let commands: [String: UInt32] = [
+        "play":         0,
+        "pause":        1,
+        "toggle":       2,   // togglePlayPause
+        "stop":         3,
+        "next":         4,   // nextTrack
+        "previous":     5,   // previousTrack
+        "skipForward":  14,
+        "skipBackward": 15
+    ]
+}
+
+enum Media {
+    /// Resolves the latest now-playing snapshot. Returns nil if MediaRemote
+    /// isn't loadable, or no app is currently broadcasting.
+    static func nowPlaying(completion: @escaping ([String: Any]?) -> Void) {
+        guard let fn = MediaRemote.getNowPlayingInfo else { completion(nil); return }
+        fn(.global(qos: .utility)) { info in
+            guard !info.isEmpty else { completion(nil); return }
+            var out: [String: Any] = [:]
+            if let t = info["kMRMediaRemoteNowPlayingInfoTitle"]  as? String { out["title"]  = t }
+            if let a = info["kMRMediaRemoteNowPlayingInfoArtist"] as? String { out["artist"] = a }
+            if let a = info["kMRMediaRemoteNowPlayingInfoAlbum"]  as? String { out["album"]  = a }
+            if let d = info["kMRMediaRemoteNowPlayingInfoDuration"]    as? Double { out["duration"] = d }
+            if let e = info["kMRMediaRemoteNowPlayingInfoElapsedTime"] as? Double { out["elapsed"]  = e }
+            if let r = info["kMRMediaRemoteNowPlayingInfoPlaybackRate"] as? Double { out["playing"] = r > 0 }
+            // Artwork omitted — base64-encoding the CFData on every push is
+            // wasteful for a HUD's purposes. Future iteration: serve via a
+            // synthetic sd://artwork URL.
+            completion(out)
+        }
+    }
+
+    @discardableResult
+    static func command(_ name: String) -> Bool {
+        guard let fn = MediaRemote.sendCommand, let cmd = MediaRemote.commands[name] else { return false }
+        return fn(cmd, nil)
+    }
+}
+
+final class MediaObserver: RefCountedObserver {
+    static let shared = MediaObserver()
+    private override init() { super.init() }
+
+    /// MRMediaRemoteRegisterForNowPlayingNotifications is fire-and-forget —
+    /// there is no symmetric unregister. To avoid double-registering across
+    /// install/teardown cycles (which the framework reacts to by either
+    /// duplicating notifications or silently rejecting), gate it to exactly
+    /// once per process via a static-let-once initializer.
+    private static let registerOnce: Void = {
+        MediaRemote.registerForNotifications?(.main)
+    }()
+
+    override func install() -> Token? {
+        guard MediaRemote.registerForNotifications != nil else { return nil }
+        _ = MediaObserver.registerOnce
+        let nc = NotificationCenter.default
+        return installNotifications([
+            (nc, NSNotification.Name("kMRMediaRemoteNowPlayingInfoDidChangeNotification")),
+            (nc, NSNotification.Name("kMRMediaRemoteNowPlayingApplicationDidChangeNotification")),
+            (nc, NSNotification.Name("kMRMediaRemoteNowPlayingPlaybackQueueChangedNotification"))
+        ])
+    }
+}
+
+// MARK: - Sound (fire-and-forget playback)
+
+// Fire-and-forget audio playback via NSSound. No completion callback, no
+// playback tracking — Hammerspoon's hs.sound is the reference shape.
+//
+// Lifecycle: NSSound retains itself while playing, so we don't need to hold
+// a reference. The instance releases once playback ends naturally.
+
+enum Sound {
+    /// NSSound(named:) searches /System/Library/Sounds and ~/Library/Sounds
+    /// for `<name>.aiff` (and a handful of other extensions).
+    @discardableResult
+    static func system(_ name: String) -> Bool {
+        guard let s = NSSound(named: name) else { return false }
+        return s.play()
+    }
+
+    /// byReference: true avoids loading the entire file into memory — fine for
+    /// short alerts, and the file path persists for the lifetime of playback.
+    @discardableResult
+    static func file(_ path: String) -> Bool {
+        let p = (path as NSString).expandingTildeInPath
+        guard let s = NSSound(contentsOfFile: p, byReference: true) else { return false }
+        return s.play()
+    }
+
+    static func beep() {
+        NSSound.beep()
     }
 }
