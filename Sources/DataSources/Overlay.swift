@@ -65,27 +65,64 @@ private enum SkyLightOverlay {
     // signal AX returns for focused windows, but available for any wid.
     typealias GetWindowBoundsFn = @convention(c) (Int32, UInt32, UnsafeMutablePointer<CGRect>) -> Int32
 
-    // Create / release the overlay's own backing window. wid is OUT.
-    // type is the CG backing-store hint (kCGBackingStoreBuffered = 2).
-    typealias NewWindowFn      = @convention(c) (Int32, Int32, Float, Float, CGSRegionRef?, UnsafeMutablePointer<UInt32>) -> Int32
+    // SLSReleaseWindow tears down the overlay window's back-store.
     typealias ReleaseWindowFn  = @convention(c) (Int32, UInt32) -> Int32
 
-    // Make the overlay window 100% see-through except where we draw. Without
-    // this the SLSNewWindow surface is opaque black and the user sees a
-    // rectangle of nothing behind the rendered border.
+    // SLSNewWindowWithOpaqueShapeAndContext is the focus-safe path: the
+    // window's OPAQUE shape (the region the WindowServer treats as "real
+    // pixels that should receive events") is decoupled from its drawing
+    // shape. Pass an empty region for the opaque shape and the window
+    // never intercepts clicks — they fall through to whatever is below,
+    // including the target. SLSSetWindowEventMask(0) alone is not enough:
+    // the window can still STEAL FOCUS on click on some macOS versions
+    // because the WindowServer's hit-test is based on the opaque shape,
+    // not the event mask.
+    //   options arg = 13 | (1<<18)  — bit 18 is "ignores cycle" (excludes
+    //   from cmd-tab + mission control)
+    //   tag_size = 64 (number of bits, NOT bytes)
+    typealias NewWindowWithOpaqueShapeFn = @convention(c) (
+        Int32,            // cid
+        Int32,            // type (kCGBackingStoreBuffered = 2)
+        CGSRegionRef?,    // frame region (the drawn extent)
+        CGSRegionRef?,    // opaque region (what hit-tests as "the window")
+        Int32,            // options (13 | (1<<18) per JankyBorders)
+        UnsafeMutablePointer<UInt64>,  // initial tags
+        Float,            // x
+        Float,            // y
+        Int32,            // tag_size (bits)
+        UnsafeMutablePointer<UInt32>,  // wid OUT
+        UnsafeRawPointer?              // context (NULL)
+    ) -> Int32
+
+    // Empty-region factory for the opaque-shape arg. CFRelease to free.
+    typealias CreateEmptyRegionFn = @convention(c) () -> CGSRegionRef?
+
+    // Per-pixel-alpha compositing toggle. opacity=false tells the
+    // WindowServer to honor the alpha channel of every back-store pixel.
+    // Required for the overlay to actually appear transparent where we
+    // haven't drawn — without it the empty back-store regions composite
+    // as opaque (whatever the format's default fill is).
     typealias SetWindowOpacityFn = @convention(c) (Int32, UInt32, Bool) -> Int32
+
+    // Window tag manipulation. JankyBorders re-asserts the floating /
+    // sticky-across-spaces tags after creation (and clears the inverse
+    // bits) — without this on some macOS versions the window still
+    // surfaces in cmd-tab and Mission Control and CAN STEAL FOCUS on
+    // click despite the empty opaque shape, because the WindowServer's
+    // focus-routing path uses the tag bitfield separately from hit-test.
+    // tag_size is BITS (not bytes); 64 covers all known tag bits.
+    typealias SetWindowTagsFn   = @convention(c) (Int32, UInt32, UnsafePointer<UInt64>, Int32) -> Int32
+    typealias ClearWindowTagsFn = @convention(c) (Int32, UInt32, UnsafePointer<UInt64>, Int32) -> Int32
+
+    // Window-wide alpha (NOT per-pixel). 0 = fully invisible window,
+    // 1 = fully visible (final composited alpha = window alpha * pixel
+    // alpha). JankyBorders creates with alpha=0 to dodge the first-frame
+    // garbage-pixel flash, then bumps to 1 once the back-store is clean.
+    typealias SetWindowAlphaFn = @convention(c) (Int32, UInt32, Float) -> Int32
 
     // Backing-store density. Retina displays need 2.0 or the surface gets
     // bilinearly stretched and a 2pt border draws as 4-5 fuzzy pixels.
     typealias SetWindowResolutionFn = @convention(c) (Int32, UInt32, Double) -> Int32
-
-    // Per-window event mask. NSWindow installs a default mask that lets
-    // mouseDown/Up/Moved through; raw SLS windows created via SLSNewWindow
-    // also accept events by default on modern macOS — without resetting the
-    // mask to 0, the overlay sits above the target and eats every click
-    // landing in its (target + 32pt padding) rect. JankyBorders / SketchyBar
-    // both call this with mask=0 immediately after window creation.
-    typealias SetWindowEventMaskFn = @convention(c) (Int32, UInt32, UInt32) -> Int32
 
     // SLSTransaction* — atomic move/level/order in one server commit.
     typealias TransactionCreateFn          = @convention(c) (Int32) -> Unmanaged<CFTypeRef>?
@@ -106,11 +143,14 @@ private enum SkyLightOverlay {
     static let reenableUpdate:           ReenableUpdateFn?           = SkyLight.sym("SLSReenableUpdate")
     static let windowIsOrderedIn:        WindowIsOrderedInFn?        = SkyLight.sym("SLSWindowIsOrderedIn")
     static let getWindowBounds:          GetWindowBoundsFn?          = SkyLight.sym("SLSGetWindowBounds")
-    static let newWindow:                NewWindowFn?                = SkyLight.sym("SLSNewWindow")
+    static let newWindowWithOpaqueShape: NewWindowWithOpaqueShapeFn? = SkyLight.sym("SLSNewWindowWithOpaqueShapeAndContext")
+    static let createEmptyRegion:        CreateEmptyRegionFn?        = SkyLight.sym("CGRegionCreateEmptyRegion")
     static let releaseWindow:            ReleaseWindowFn?            = SkyLight.sym("SLSReleaseWindow")
     static let setWindowOpacity:         SetWindowOpacityFn?         = SkyLight.sym("SLSSetWindowOpacity")
+    static let setWindowAlpha:           SetWindowAlphaFn?           = SkyLight.sym("SLSSetWindowAlpha")
+    static let setWindowTags:            SetWindowTagsFn?            = SkyLight.sym("SLSSetWindowTags")
+    static let clearWindowTags:          ClearWindowTagsFn?          = SkyLight.sym("SLSClearWindowTags")
     static let setWindowResolution:      SetWindowResolutionFn?      = SkyLight.sym("SLSSetWindowResolution")
-    static let setWindowEventMask:       SetWindowEventMaskFn?       = SkyLight.sym("SLSSetWindowEventMask")
     static let transactionCreate:        TransactionCreateFn?        = SkyLight.sym("SLSTransactionCreate")
     static let transactionCommit:        TransactionCommitFn?        = SkyLight.sym("SLSTransactionCommit")
     static let transactionMove:          TransactionMoveFn?          = SkyLight.sym("SLSTransactionMoveWindowWithGroup")
@@ -129,7 +169,13 @@ final class OverlayHandle {
     let id: Int
     let targetWID: CGWindowID
     let overlayWID: UInt32
-    private let context: CGContext
+    // Why: SLSSetWindowShape reallocates the window's back-store IOSurface,
+    // which invalidates any CGContext bound to the prior surface — every
+    // subsequent draw silently lands in a dead surface and the user sees
+    // a frozen first-frame border with no updates after move/resize.
+    // JankyBorders re-creates the context after every shape change for the
+    // same reason. Mutable so applyGeometry can refresh it post-reshape.
+    private var context: CGContext
 
     // Last frame we positioned the overlay at (in screen-points, top-left
     // origin). Compared against the freshly-fetched bounds on every tick
@@ -137,16 +183,35 @@ final class OverlayHandle {
     // and JankyBorders skips them when the geometry hasn't changed.
     private var lastFrame: CGRect = .zero
 
+    // The overlay starts at alpha=0 (invisible). The first successful
+    // draw() flips this to false and bumps the window-wide alpha to 1.
+    // Keeps the back-store's default-fill bytes hidden until our first
+    // painted pixels land — the "white flash on refresh" fix.
+    private var pendingAlphaBump: Bool = true
+
+    // Why: Bridge.swift calls handle.detach() then drops the dict entry,
+    // which triggers deinit and would release the same overlayWID twice
+    // (the JS detach path is the common case — every focused-window
+    // change). Guarded so deinit no-ops when detach already ran.
+    private var released: Bool = false
+
     // Padding around the target frame: the overlay window extends past the
     // target's bounds by this much so strokes drawn at the edge aren't
     // clipped. Borders are typically 1-2px so 16px is plenty of headroom.
     static let padding: CGFloat = 16
 
-    init(id: Int, targetWID: CGWindowID, overlayWID: UInt32, context: CGContext) {
+    // Resolved once at attach (AX walk to detect toolbar presence). Exposed
+    // to JS via the geometry dict's window.radius field — spec authors round
+    // their stroke rect with this so the border hugs the actual window
+    // shape on Tahoe (Finder=26, Terminal=16, etc.).
+    let cachedCornerRadius: Int
+
+    init(id: Int, targetWID: CGWindowID, overlayWID: UInt32, context: CGContext, cornerRadius: Int) {
         self.id = id
         self.targetWID = targetWID
         self.overlayWID = overlayWID
         self.context = context
+        self.cachedCornerRadius = cornerRadius
     }
 
     /// Per-tick redraw. `targetFrame` is the current SLSGetWindowBounds of
@@ -170,18 +235,20 @@ final class OverlayHandle {
 
         _ = SkyLightOverlay.disableUpdate?(cid)
 
-        // Reposition / resize only when the target moved/resized. JankyBorders
-        // bails out of the shape+transaction path on equal frames; the
-        // CGContext is sticky across moves (it follows the window).
+        // Why: SLSSetWindowShape (called inside applyGeometry) reallocates
+        // the back-store IOSurface at the new size, which (a) invalidates
+        // our current CGContext and (b) leaves the new surface filled with
+        // WindowServer-default bytes. We MUST reshape first (which also
+        // re-creates the context), THEN clear, THEN draw — clearing the
+        // pre-reshape context is a no-op against the new surface, and
+        // drawing into the pre-reshape context lands in a dead surface.
+        // Previous order (clear → reshape → draw) was the root cause of
+        // the "freezes after first frame / flashes white on resize" bug.
         if !rectsApproxEqual(overlayFrame, lastFrame) {
             applyGeometry(overlayFrame: overlayFrame)
             lastFrame = overlayFrame
         }
 
-        // Always clear + redraw. The spec is the source of truth for the
-        // frame's contents; if the stack wants to skip a frame it returns
-        // an empty spec ({}) and we still clear (so a stale stroke from a
-        // previous tick doesn't ghost).
         let doClear = (spec["clear"] as? Bool) ?? true
         if doClear {
             context.clear(CGRect(origin: .zero, size: overlayFrame.size))
@@ -210,11 +277,25 @@ final class OverlayHandle {
         }
 
         context.restoreGState()
-        context.flush()
 
+        // Why: SLSFlushWindowContentRegion is the authoritative commit for
+        // SLWindowContext-bound contexts (JankyBorders uses only this). The
+        // CGContext.flush() that used to live here forced a pixmap-style
+        // flush that doesn't move bytes to the compositor — extra mach
+        // round-trip per frame for no observable effect.
         // NULL region = flush the whole window. We always full-redraw so
         // tracking a dirty rect would just be bookkeeping.
         _ = SkyLightOverlay.flushWindowContentRegion?(cid, overlayWID, nil)
+
+        // First-draw alpha bump. The window was created at alpha=0 to hide
+        // the back-store's default-fill bytes until our first painted
+        // pixels are committed. Now that the flush has landed, raise alpha
+        // to 1 so the user sees the drawn content. Subsequent draws skip
+        // this (it's idempotent but the SLS call is a server round-trip).
+        if pendingAlphaBump {
+            pendingAlphaBump = false
+            _ = SkyLightOverlay.setWindowAlpha?(cid, overlayWID, 1)
+        }
 
         _ = SkyLightOverlay.reenableUpdate?(cid)
     }
@@ -222,6 +303,8 @@ final class OverlayHandle {
     /// Tear down. Releases the SLS window (which kills the back-store and
     /// invalidates our CGContext — CG ARC then drops the context ref).
     func detach() {
+        if released { return }
+        released = true
         let cid = SkyLight.cid
         _ = SkyLightOverlay.releaseWindow?(cid, overlayWID)
     }
@@ -230,6 +313,7 @@ final class OverlayHandle {
         // Last-resort cleanup if detach() wasn't called explicitly. The Bridge
         // detach path is the normal route; this catches scope-drain edge cases
         // where the handle dict is cleared without an explicit detach.
+        if released { return }
         let cid = SkyLight.cid
         _ = SkyLightOverlay.releaseWindow?(cid, overlayWID)
     }
@@ -256,6 +340,19 @@ final class OverlayHandle {
                                                 region)
             // Region is a CF type — release via Unmanaged so we don't leak.
             Unmanaged<CFTypeRef>.fromOpaque(region).release()
+
+            // Why: SLSSetWindowShape reallocates the back-store IOSurface;
+            // the prior CGContext is now bound to a freed surface and any
+            // draw call against it is silently dropped. Re-create the
+            // context against the fresh surface so the draw pipeline lands
+            // in the correct memory. Mirrors JankyBorders' border_init_bind
+            // path which calls SLWindowContextCreate after every reshape.
+            if let makeContext = SkyLightOverlay.windowContextCreate,
+               let ctxRef = makeContext(cid, overlayWID, nil) {
+                let fresh = ctxRef.takeRetainedValue()
+                fresh.interpolationQuality = .none
+                context = fresh
+            }
         }
 
         // Atomically move + order above the target. JankyBorders uses
@@ -406,10 +503,17 @@ enum Overlay {
     static func attach(targetID: CGWindowID, id: Int) -> OverlayHandle? {
         let cid = SkyLight.cid
         guard cid != 0 else { return nil }
-        guard let newWindow      = SkyLightOverlay.newWindow,
-              let makeContext    = SkyLightOverlay.windowContextCreate,
-              let newRegion      = SkyLightOverlay.newRegionWithRect,
-              let setOpacity     = SkyLightOverlay.setWindowOpacity else {
+        // We REQUIRE the opaque-shape constructor for click-through. The
+        // earlier SLSNewWindow + SLSSetWindowEventMask(0) approach is not
+        // sufficient — the WindowServer still routes click-to-front
+        // activation through hit-testing the window's opaque shape, not
+        // the event mask, so the overlay was stealing focus on click.
+        // Empty opaque shape = WindowServer sees zero pixels to hit-test
+        // against = clicks fall through to whatever's below.
+        guard let newWindowWithShape = SkyLightOverlay.newWindowWithOpaqueShape,
+              let createEmpty        = SkyLightOverlay.createEmptyRegion,
+              let makeContext        = SkyLightOverlay.windowContextCreate,
+              let newRegion          = SkyLightOverlay.newRegionWithRect else {
             return nil
         }
 
@@ -425,24 +529,48 @@ enum Overlay {
         }
         defer { Unmanaged<CFTypeRef>.fromOpaque(region).release() }
 
+        guard let emptyRegion = createEmpty() else { return nil }
+        defer { Unmanaged<CFTypeRef>.fromOpaque(emptyRegion).release() }
+
+        // JankyBorders/window.h:228-251 — options=13|(1<<18) gives us
+        // "ignores cycle" (no cmd-tab / mission-control surface) plus the
+        // baseline borderless overlay flags. tag bits (1<<1)=floating,
+        // (1<<9)=stays visible across full-screen target. tag_size=64.
+        var tags: UInt64 = (1 << 1) | (1 << 9)
         var overlayWID: UInt32 = 0
-        // type=2 = kCGBackingStoreBuffered. x/y are -9999 to keep the empty
-        // window offscreen until the first draw() reshapes it; JankyBorders
-        // uses the same trick to dodge a one-frame flash at the screen origin.
-        let newErr = newWindow(cid, 2, -9999, -9999, region, &overlayWID)
+        let opts: Int32 = 13 | (1 << 18)
+        let newErr = newWindowWithShape(cid, 2, region, emptyRegion, opts,
+                                        &tags, -9999, -9999, 64, &overlayWID, nil)
         guard newErr == 0, overlayWID != 0 else { return nil }
 
-        // Transparent window: only our drawn pixels show. Without this the
-        // overlay paints opaque black over the target window — the exact
-        // bug JankyBorders fixes by calling SLSSetWindowOpacity(false).
-        _ = setOpacity(cid, overlayWID, false)
+        // Start invisible (alpha=0). Stays 0 until the FIRST real draw() call
+        // commits — then the bridge bumps to 1 once the back-store is known
+        // good. This is the only way to dodge the "white flash on refresh"
+        // the user sees on every FSEvents reload: between SLSSetWindowShape
+        // (which re-allocates the back-store at the new target size with
+        // default-fill bytes) and the per-tick clear, there's a 1-frame
+        // window where the compositor would show those default-fill bytes.
+        // Keeping alpha=0 until the first clean draw lands hides that window.
+        _ = SkyLightOverlay.setWindowAlpha?(cid, overlayWID, 0)
 
-        // Make the overlay click-through. The SLSNewWindow default lets mouse
-        // events land here, so the overlay would intercept every click in its
-        // (target + 32pt padding) rect — the user sees the target window
-        // refusing to respond to clicks. Mask 0 = no event types received,
-        // so clicks fall through to the next window down (the actual target).
-        _ = SkyLightOverlay.setWindowEventMask?(cid, overlayWID, 0)
+        // Enable per-pixel alpha compositing. Without this the back-store's
+        // transparent regions composite as opaque background fill — we'd
+        // see a (target + padding)-size opaque rect over the target window
+        // even though the back-store IS all-transparent. This is why
+        // JankyBorders calls SLSSetWindowOpacity(wid, 0) right after
+        // creating the window.
+        _ = SkyLightOverlay.setWindowOpacity?(cid, overlayWID, false)
+
+        // Re-assert the floating + sticky tags after creation. Without this
+        // the overlay can still steal focus on click on some macOS versions
+        // — the WindowServer's focus-routing uses the tag bitfield (not
+        // just the opaque shape) to decide whether a window is "real" UI.
+        // (1<<1) = floating, (1<<9) = visible across full-screen targets.
+        // tag_size=64 in BITS — the C signature takes "bits" not bytes.
+        var setTags: UInt64   = (1 << 1) | (1 << 9)
+        var clearTags: UInt64 = 0
+        _ = SkyLightOverlay.setWindowTags?(cid, overlayWID, &setTags, 64)
+        _ = SkyLightOverlay.clearWindowTags?(cid, overlayWID, &clearTags, 64)
 
         // HiDPI backing density. 2.0 = Retina. Without this every drawn
         // stroke is bilinearly upscaled and a 2pt border draws as 4-5
@@ -460,12 +588,70 @@ enum Overlay {
         let context = ctxRef.takeRetainedValue()
         context.interpolationQuality = .none
 
+        // Resolve the per-window corner radius once. The AX walk traverses
+        // the target's children looking for a toolbar — costs a few ms on
+        // first call per app (AX warm-up) and is too expensive to repeat
+        // every vsync. Recompute happens only when the stack re-attaches
+        // (focus change → new overlay handle), which naturally tracks
+        // window-level UI changes.
+        let radius = Int(cornerRadius(of: targetID))
+
         return OverlayHandle(
             id: id,
             targetWID: targetID,
             overlayWID: overlayWID,
-            context: context
+            context: context,
+            cornerRadius: radius
         )
+    }
+
+    /// Per-window corner radius the WindowServer rounds with. Mirrors
+    /// `~/.hammerspoon/WindowScape/outline.lua:getCornerRadius` — the
+    /// reference implementation the user wants this overlay to match.
+    ///
+    /// macOS 26 (Tahoe) uses per-style corner radii:
+    ///   - 26pt for titled windows WITH a toolbar (Finder, Safari, etc.)
+    ///   - 16pt for titled windows WITHOUT a toolbar (Terminal, etc.)
+    ///   -  0pt for borderless / system / non-standard windows
+    ///
+    /// Detection: AX `AXChildren` walked for an `AXRole == "AXToolbar"`
+    /// descendant. We don't have a public WindowServer API that returns
+    /// the actual server-side rounding radius — SLSWindowIteratorGetCornerRadii
+    /// exists but is availability-gated, undocumented, and doesn't return
+    /// the toolbar-aware value on Tahoe. The AX-walk path is what the
+    /// Hammerspoon outline ships in production.
+    ///
+    /// Capped at 100ms via AXUIElementSetMessagingTimeout to keep one
+    /// unresponsive app from stalling the per-tick overlay loop.
+    static func cornerRadius(of wid: CGWindowID) -> CGFloat {
+        guard let axEl = WindowsByID.elementFor(windowID: wid) else { return 16 }
+        AXUIElementSetMessagingTimeout(axEl, 0.1)
+
+        // Bail early on non-standard / system windows — the Hammerspoon
+        // script returns 0 for these (matches Tahoe's borderless rendering).
+        if let subrole = axStringAttribute(axEl, kAXSubroleAttribute) {
+            if subrole == "AXSystemDialog" { return 0 }
+        }
+        if let role = axStringAttribute(axEl, kAXRoleAttribute) {
+            if role == "AXScrollArea" { return 0 }
+        }
+
+        var childrenRef: AnyObject?
+        let err = AXUIElementCopyAttributeValue(axEl, kAXChildrenAttribute as CFString, &childrenRef)
+        if err == .success, let children = childrenRef as? [AXUIElement] {
+            for child in children {
+                if axStringAttribute(child, kAXRoleAttribute) == "AXToolbar" {
+                    return 26
+                }
+            }
+        }
+        return 16
+    }
+
+    private static func axStringAttribute(_ el: AXUIElement, _ attr: String) -> String? {
+        var ref: AnyObject?
+        guard AXUIElementCopyAttributeValue(el, attr as CFString, &ref) == .success else { return nil }
+        return ref as? String
     }
 
     /// Read the current bounds of a window we don't own. Top-left origin,
