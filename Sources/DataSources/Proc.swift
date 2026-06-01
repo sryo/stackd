@@ -3,9 +3,8 @@ import OSAKit
 import Carbon
 
 // One-shot subprocess execution: launch, wait, capture stdout+stderr+exit.
-// Long-running spawn() with line-streaming deferred to a later iteration
-// when something actually needs it (Muse's AI backends, Sssssssscroll's
-// Python detector — neither is in the current port queue).
+// Streamed counterpart (Proc.stream) below — progressive chunks via a
+// per-pipe readabilityHandler instead of buffer-to-completion.
 
 enum Proc {
     static func exec(
@@ -65,6 +64,113 @@ enum Proc {
                 if task.isRunning { task.terminate() }
             }
         }
+    }
+
+    // Streaming counterpart of Proc.exec. The on-callback fires once per
+    // chunk with { stream: "stdout"|"stderr", chunk: <utf8 string> } as the
+    // child writes, and once at exit with { stream: "exit", code, signal? }.
+    // Buffered payloads are NOT re-sent on exit — callers that need a final
+    // joined buffer accumulate the chunks themselves.
+    //
+    // Returns a ProcStreamHandle whose cancel() sends SIGTERM. The "exit"
+    // event still fires after cancel; signal carries the terminating signal
+    // when the child died from one (terminationReason == .uncaughtSignal).
+    static func stream(
+        cmd: String,
+        args: [String],
+        env: [String: String]? = nil,
+        cwd: String? = nil,
+        onEvent: @escaping ([String: Any]) -> Void
+    ) -> ProcStreamHandle? {
+        let task = Process()
+        task.launchPath = cmd
+        task.arguments  = args
+        if let env = env { task.environment = env }
+        if let cwd = cwd { task.currentDirectoryURL = URL(fileURLWithPath: (cwd as NSString).expandingTildeInPath) }
+
+        let outPipe = Pipe()
+        let errPipe = Pipe()
+        task.standardOutput = outPipe
+        task.standardError  = errPipe
+
+        // readabilityHandler fires on the global IO queue. Each non-empty
+        // read becomes one "stdout"/"stderr" event; an empty read means the
+        // child closed that pipe — clear the handler so we don't spin.
+        let drain: (String, FileHandle) -> Void = { stream, handle in
+            let data = handle.availableData
+            if data.isEmpty {
+                handle.readabilityHandler = nil
+                return
+            }
+            let chunk = String(data: data, encoding: .utf8) ?? ""
+            DispatchQueue.main.async {
+                onEvent(["stream": stream, "chunk": chunk])
+            }
+        }
+        outPipe.fileHandleForReading.readabilityHandler = { drain("stdout", $0) }
+        errPipe.fileHandleForReading.readabilityHandler = { drain("stderr", $0) }
+
+        task.terminationHandler = { proc in
+            // Flush whatever was buffered between the last readability tick
+            // and termination — availableData on a closed pipe returns the
+            // remaining bytes without blocking. Then clear handlers so the
+            // empty-data callback (if any) doesn't fire a stray event.
+            for (label, pipe) in [("stdout", outPipe), ("stderr", errPipe)] {
+                let leftover = pipe.fileHandleForReading.availableData
+                pipe.fileHandleForReading.readabilityHandler = nil
+                if !leftover.isEmpty {
+                    let chunk = String(data: leftover, encoding: .utf8) ?? ""
+                    DispatchQueue.main.async {
+                        onEvent(["stream": label, "chunk": chunk])
+                    }
+                }
+            }
+            var payload: [String: Any] = [
+                "stream": "exit",
+                "code":   Int(proc.terminationStatus)
+            ]
+            if proc.terminationReason == .uncaughtSignal {
+                // terminationStatus on signal death is the signal number.
+                payload["signal"] = Int(proc.terminationStatus)
+            }
+            DispatchQueue.main.async {
+                onEvent(payload)
+            }
+        }
+
+        do {
+            try task.run()
+        } catch {
+            outPipe.fileHandleForReading.readabilityHandler = nil
+            errPipe.fileHandleForReading.readabilityHandler = nil
+            DispatchQueue.main.async {
+                onEvent([
+                    "stream": "stderr",
+                    "chunk":  "stackd: failed to launch \(cmd): \(error.localizedDescription)"
+                ])
+                onEvent(["stream": "exit", "code": -1])
+            }
+            return nil
+        }
+
+        return ProcStreamHandle(task: task)
+    }
+}
+
+// Handle returned by Proc.stream. cancel() sends SIGTERM; the wrapped
+// process keeps a strong ref so the terminationHandler still fires.
+final class ProcStreamHandle {
+    private let task: Process
+    private var cancelled = false
+    private let lock = NSLock()
+
+    init(task: Process) { self.task = task }
+
+    func cancel() {
+        lock.lock(); defer { lock.unlock() }
+        if cancelled { return }
+        cancelled = true
+        if task.isRunning { task.terminate() }
     }
 }
 
