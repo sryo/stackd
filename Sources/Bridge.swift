@@ -77,6 +77,14 @@ final class Bridge: NSObject, WKScriptMessageHandler {
     // bonjourBrowseHandles).
     fileprivate var spotlightLiveHandles: [Int: Token] = [:]
     fileprivate var nextSpotlightLiveId: Int = 1
+    // Long-lived sd.camera.stream() handles. Each entry owns a Camera.Stream
+    // (AVCaptureSession + sample-buffer delegate) and a Token whose cancel
+    // calls stream.stop() — same shape as bonjourBrowseHandles. Per-handle
+    // channel push name is "camera:stream:<id>"; JS sd.camera.stream() builds
+    // the same name from the returned handle id. Scope drain on stack unload
+    // stops every active capture so reload doesn't strand the camera LED on.
+    fileprivate var cameraStreamHandles: [Int: Token] = [:]
+    fileprivate var nextCameraStreamId: Int = 1
     // SQLite handles minted via sd.sqlite.open(). Tracked per-Bridge so the
     // scope drain on stack unload closes every connection — the underlying
     // SQLite.HandleStore is process-wide but the *ownership* is stack-scoped.
@@ -372,6 +380,13 @@ final class Bridge: NSObject, WKScriptMessageHandler {
             guard let self = self else { return }
             for (_, t) in self.spotlightLiveHandles { t.cancel() }
             self.spotlightLiveHandles.removeAll()
+        })
+        // Camera streams — stop every AVCaptureSession owned by this stack
+        // so reload doesn't leave the camera LED on / hold the device.
+        scope.adopt(Token { [weak self] in
+            guard let self = self else { return }
+            for (_, t) in self.cameraStreamHandles { t.cancel() }
+            self.cameraStreamHandles.removeAll()
         })
         // SQLite — sqlite3_close_v2 every connection minted by this stack.
         // No-ops if the JS code already called db.close() explicitly.
@@ -891,6 +906,45 @@ final class Bridge: NSObject, WKScriptMessageHandler {
                          quality: quality, timeoutSeconds: timeout) { [weak bridge] result in
                 bridge?.respond(requestId: requestId, value: result as Any? ?? NSNull())
             }
+        },
+
+        // Camera streaming — long-lived AVCaptureSession that pushes one
+        // dataURL payload per tick to a per-handle channel ("camera:stream:<id>").
+        // Same handle-table + scope-drain pattern as bonjour.browse.start.
+        // The first call triggers the Camera TCC prompt iff a prior
+        // camera.frame hasn't already granted it. fps defaults to 10 and
+        // is capped at 60 — caps documented on CameraStream.clampedFps.
+        // Returns the handle id (JS wraps it as { id, subscribe, stop }),
+        // or null if the device can't be opened.
+        .custom("camera.stream.start", permission: "camera") { bridge, body, requestId in
+            let deviceId = body["deviceId"] as? String
+            let format   = CameraStream.normalizedFormat(body["format"] as? String)
+            let quality  = CameraStream.clampedQuality(body["quality"] as? Double)
+            let fps      = CameraStream.clampedFps(body["fps"] as? Double)
+            let id = bridge.nextCameraStreamId
+            bridge.nextCameraStreamId += 1
+            let channel = "camera:stream:\(id)"
+            let stream = Camera.openStream(
+                deviceId: deviceId,
+                format: format,
+                quality: quality,
+                fps: fps
+            ) { [weak bridge] payload in
+                guard let bridge = bridge else { return }
+                let json = Bridge.jsonify(payload)
+                bridge.push(channel: channel, json: json)
+            }
+            guard let stream = stream else {
+                bridge.respond(requestId: requestId, value: NSNull()); return
+            }
+            bridge.cameraStreamHandles[id] = Token { stream.stop() }
+            bridge.respond(requestId: requestId, value: id)
+        },
+        .syncBridge("camera.stream.stop", permission: "camera", denyValue: false) { b, body in
+            guard let id = body["id"] as? Int,
+                  let t  = b.cameraStreamHandles.removeValue(forKey: id) else { return false }
+            t.cancel()
+            return true
         },
 
         // Calendar — read-only EventKit query. Triggers the Calendar TCC

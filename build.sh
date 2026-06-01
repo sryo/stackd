@@ -52,6 +52,7 @@ SWIFT_SOURCES=(
   Sources/DataSources/Update.swift
   Sources/DataSources/Notify.swift
   Sources/DataSources/Devices.swift
+  Sources/DataSources/Camera.swift
 )
 
 C_SOURCES=(

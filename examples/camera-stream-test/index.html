@@ -1,0 +1,81 @@
+<!doctype html>
+<html><head><meta charset="utf-8">
+<!--
+  camera-stream-test — live camera preview via sd.camera.stream().
+
+  Heads up: the FIRST call to sd.camera.stream() triggers the macOS Camera
+  TCC prompt (same prompt as sd.camera.frame() — a prior grant covers
+  this). The camera LED stays solid for the lifetime of the stream; reload
+  the stack to stop, or call stream.stop() from JS.
+
+  Frames are pushed at ~10fps (the daemon-side default). The FPS counter
+  measures actual receipt cadence — drops below 10 indicate the encode
+  hop (CGImageDestination + base64) is dominating, not the camera.
+-->
+<style>
+  body {
+    margin: 0; padding: 8px;
+    font: 11px -apple-system, system-ui, sans-serif;
+    color: #fff;
+    background: rgba(20, 20, 22, 0.78);
+    border-radius: 10px;
+    -webkit-backdrop-filter: blur(20px);
+    backdrop-filter: blur(20px);
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    height: 100vh;
+    box-sizing: border-box;
+  }
+  #frame {
+    flex: 1;
+    width: 100%;
+    object-fit: cover;
+    border-radius: 6px;
+    background: #000;
+    display: block;
+  }
+  .meta {
+    display: flex;
+    justify-content: space-between;
+    font-variant-numeric: tabular-nums;
+    opacity: 0.7;
+  }
+  .meta span { opacity: 0.85; }
+  .meta .label { opacity: 0.45; text-transform: uppercase; letter-spacing: 0.06em; font-size: 9px; }
+</style>
+</head><body>
+<img id="frame" alt="">
+<div class="meta">
+  <span><span class="label">fps</span> <span id="fps">—</span></span>
+  <span><span class="label">size</span> <span id="size">—</span></span>
+</div>
+<script type="module">
+  import { sd } from "sd://runtime/api.js";
+
+  const frameEl = document.getElementById("frame");
+  const fpsEl   = document.getElementById("fps");
+  const sizeEl  = document.getElementById("size");
+
+  // Rolling 1-second window for the FPS counter so a brief stall is visible
+  // (vs an exponential moving average that hides spikes).
+  const window_ = [];
+  const FPS_WINDOW_MS = 1000;
+
+  const stream = sd.camera.stream({ fps: 10, format: "jpeg", quality: 0.7 });
+
+  stream.subscribe(({ dataURL, width, height }) => {
+    frameEl.src = dataURL;
+    sizeEl.textContent = `${width}×${height}`;
+
+    const now = performance.now();
+    window_.push(now);
+    while (window_.length && now - window_[0] > FPS_WINDOW_MS) window_.shift();
+    fpsEl.textContent = window_.length.toString();
+  });
+
+  // Stack reload calls stream.stop() via the daemon's scope drain — no
+  // beforeunload hook needed. But if a stack wants to pause without
+  // unloading, it would just call `await stream.stop()` here.
+</script>
+</body></html>

@@ -1558,8 +1558,19 @@ export const sd = {
   //   await sd.camera.frame({ deviceId, format: "png" })
   //   await sd.camera.frame({ format: "jpeg", quality: 0.7, timeoutSeconds: 5 })
   //   // → { dataURL: "data:image/jpeg;base64,...", width, height }  (or null)
-  // Stream variant (continuous frames) is not yet shipped — wrap .frame() in
-  // a setInterval as a prototype.
+  //
+  // .stream(opts) keeps an AVCaptureSession warm and pushes one frame per
+  // tick at the requested fps (default 10, capped at 60). The camera LED
+  // stays on for the lifetime of the stream — stop() turns it back off.
+  // Same handle-id + subscribe + stop shape as sd.bonjour.browse so a
+  // pre-resolve subscriber gets buffered until the channel exists.
+  //   const s = sd.camera.stream({ fps: 10 });
+  //   const unsub = s.subscribe(({ dataURL, width, height, ts }) => {
+  //     img.src = dataURL;
+  //   });
+  //   // ...later...
+  //   unsub();          // stop receiving locally
+  //   await s.stop();   // tear the AVCaptureSession down (LED off)
   camera: Object.assign(channel("camera"), {
     frame(opts) {
       const o = opts || {};
@@ -1570,6 +1581,45 @@ export const sd = {
         quality:        o.quality,
         timeoutSeconds: o.timeoutSeconds
       });
+    },
+    stream(opts) {
+      // Mirror sd.bonjour.browse: the handle id resolves async, so any
+      // subscribers attached before the channel exists get buffered locally
+      // and re-bound to the synthesized channel ("camera:stream:<id>") once
+      // we have it. Post-resolve subscribe() goes straight through.
+      const o = opts || {};
+      const localSubs = new Set();
+      let realCh = null;
+      let realId = null;
+      let stopped = false;
+      const start = request({
+        type:     "camera.stream.start",
+        deviceId: o.deviceId,
+        format:   o.format || "jpeg",
+        quality:  o.quality,
+        fps:      o.fps
+      }).then((id) => {
+        if (id == null || stopped) return null;
+        realId = id;
+        realCh = channel("camera:stream:" + id);
+        for (const fn of localSubs) realCh.subscribe(fn);
+        localSubs.clear();
+        return id;
+      });
+      return {
+        get id() { return realId; },
+        subscribe(fn) {
+          if (realCh) return realCh.subscribe(fn);
+          localSubs.add(fn);
+          return () => { localSubs.delete(fn); };
+        },
+        async stop() {
+          stopped = true;
+          const id = await start;
+          if (id == null) return false;
+          return request({ type: "camera.stream.stop", id });
+        }
+      };
     }
   }),
   spaces: {
