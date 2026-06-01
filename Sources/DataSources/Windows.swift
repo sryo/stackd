@@ -472,36 +472,43 @@ enum WindowsByID {
         return (ref as? Bool) ?? false
     }
 
-    /// Per-window corner radius (in pt) that the WindowServer rounds with.
-    /// Used by overlay/outline stacks so a stroke hugs the actual window
-    /// shape on Tahoe. Mirrors `~/.hammerspoon/WindowScape/outline.lua`:
+    /// Raw AX hints used by overlay/outline stacks to pick a corner radius
+    /// in JS. The daemon returns:
     ///
-    ///   - 26 for titled windows WITH a toolbar (Finder, Safari, etc.)
-    ///   - 16 for titled windows WITHOUT a toolbar (Terminal, etc.)
-    ///   -  0 for borderless / system / non-standard windows
+    ///   - `toolbarPresent`: a child `AXRole == "AXToolbar"` exists
+    ///   - `role`:           kAXRoleAttribute (e.g. "AXWindow", "AXScrollArea")
+    ///   - `subrole`:        kAXSubroleAttribute (e.g. "AXStandardWindow",
+    ///                       "AXSystemDialog") — nil if unset
     ///
-    /// Detection is via AX: a child `AXRole == "AXToolbar"` → 26, else 16,
-    /// with role/subrole overrides for system dialogs and scroll-areas. No
-    /// public WindowServer API returns this; `SLSWindowIteratorGetCornerRadii`
-    /// exists but is availability-gated and doesn't return the toolbar-aware
-    /// value on Tahoe.
+    /// Stacks (windowscape outline, overlay-border) map these to the actual
+    /// 26 / 16 / 0 radii that match Tahoe's WindowServer rounding. Centralizing
+    /// the policy in the stack lets each consumer override (a stack drawing a
+    /// debug rect doesn't need to match Apple's exact curve).
     ///
     /// AX timeout capped at 100ms so one unresponsive app can't stall a
-    /// per-tick overlay loop.
-    static func cornerRadius(windowID: CGWindowID) -> Int {
-        guard let el = elementFor(windowID: windowID) else { return 16 }
+    /// per-tick overlay loop. Returns nil keys (or empty dict) when the AX
+    /// query fails — the daemon never invents data.
+    static func cornerHints(windowID: CGWindowID) -> [String: Any] {
+        guard let el = elementFor(windowID: windowID) else {
+            return ["toolbarPresent": false, "role": NSNull(), "subrole": NSNull()]
+        }
         AXUIElementSetMessagingTimeout(el, 0.1)
-        // System dialogs / scroll-areas render without rounded corners.
-        if axStringAttribute(el, kAXSubroleAttribute) == "AXSystemDialog" { return 0 }
-        if axStringAttribute(el, kAXRoleAttribute)    == "AXScrollArea"   { return 0 }
+        let role    = axStringAttribute(el, kAXRoleAttribute)
+        let subrole = axStringAttribute(el, kAXSubroleAttribute)
+        var toolbarPresent = false
         var childrenRef: AnyObject?
-        let err = AXUIElementCopyAttributeValue(el, kAXChildrenAttribute as CFString, &childrenRef)
-        if err == .success, let children = childrenRef as? [AXUIElement] {
+        if AXUIElementCopyAttributeValue(el, kAXChildrenAttribute as CFString, &childrenRef) == .success,
+           let children = childrenRef as? [AXUIElement] {
             for child in children where axStringAttribute(child, kAXRoleAttribute) == "AXToolbar" {
-                return 26
+                toolbarPresent = true
+                break
             }
         }
-        return 16
+        return [
+            "toolbarPresent": toolbarPresent,
+            "role":           role    as Any? ?? NSNull(),
+            "subrole":        subrole as Any? ?? NSNull()
+        ]
     }
 
     private static func axStringAttribute(_ el: AXUIElement, _ attr: String) -> String? {
@@ -642,11 +649,26 @@ final class WindowsLifecycleObserver {
 /// Subscribers get a no-arg callback ("something focus-related changed,
 /// re-query"). Bridge.startWorkspace already does the diff + push, so this
 /// observer just needs to nudge.
+///
+/// Per-event-type fan-out (F15): in addition to the union `fire()` that
+/// drives the legacy `sd.windows.focused` channel, this observer exposes
+/// separate `onAppActivated` / `onFocusedChanged` / `onTitleChanged`
+/// closures. Bridge sets them once and they pump the granular channels
+/// (`sd.app.activated`, `sd.windows.focusedChanged`, `sd.windows.titleChanged`)
+/// without losing the existing union behavior.
 final class FrontmostWindowObserver: RefCountedObserver {
     static let shared = FrontmostWindowObserver()
     private override init() { super.init() }
 
     private var currentTokens: [Token] = []
+
+    /// Per-event-type callbacks, set once at startup by Bridge. The observer
+    /// is process-global; only one stack-driving consumer (Bridge) sets these.
+    /// Each fires in addition to (not instead of) the union `fire()` so the
+    /// legacy `sd.windows.focused` channel keeps working.
+    var onAppActivated:  (() -> Void)?
+    var onFocusedChanged: (() -> Void)?
+    var onTitleChanged:  (() -> Void)?
 
     override func install() -> Token? {
         let ncToken = installNotifications([
@@ -660,6 +682,11 @@ final class FrontmostWindowObserver: RefCountedObserver {
                  // Activation itself counts as a focus change — fire so consumers
                  // pick up the new frontmost-app window without waiting for the
                  // first within-app AX notification.
+                 self.onAppActivated?()
+                 // Focus changes with the app switch — pump the focused-window
+                 // channel too so stacks that only listen to focusedChanged
+                 // don't miss the cross-app transition.
+                 self.onFocusedChanged?()
                  self.fire()
              })
         ])
@@ -686,7 +713,21 @@ final class FrontmostWindowObserver: RefCountedObserver {
         for t in currentTokens { t.cancel() }
         currentTokens.removeAll()
 
-        let handler: (String) -> Void = { [weak self] _ in self?.fire() }
+        // Route each AX notification to its dedicated callback before firing
+        // the union nudge. kAXMainWindowChangedNotification is treated as a
+        // focus change (the main window IS the focus target for most apps).
+        let handler: (String) -> Void = { [weak self] notif in
+            guard let self = self else { return }
+            switch notif {
+            case kAXFocusedWindowChangedNotification, kAXMainWindowChangedNotification:
+                self.onFocusedChanged?()
+            case kAXTitleChangedNotification:
+                self.onTitleChanged?()
+            default:
+                break
+            }
+            self.fire()
+        }
         for notif in [
             kAXFocusedWindowChangedNotification,
             kAXMainWindowChangedNotification,
