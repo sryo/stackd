@@ -1,15 +1,16 @@
 import AppKit
 
-// NSStatusItem wrapper backing sd.menubar.addItem. Each stack mints zero or
-// more items; the handle adopts a Token into the stack's StackScope so unload
-// removes the icon.
+// Three menu-related subsystems folded into one domain file:
 //
-// The system menu-bar visibility half of sd.menubar.* (suppress/restore via
-// CGSSetMenuBarVisibility) lives in MenubarVisibility.swift — separate
-// subsystem that just happens to share the word "menubar".
+//   - StatusItemHandle / Menubar  — NSStatusBar items (sd.menubar.addItem)
+//   - MenuBarVisibility          — system menu-bar suppress/restore via
+//                                  CGSSetMenuBarVisibility (sd.menubar.suppress)
+//   - PopupMenu                  — transient cursor-position context menu
+//                                  (sd.menu.popup)
 //
-// PopupMenu (sd.menu.popup) lives in Menu.swift — it's a transient cursor
-// menu, not part of the system menu bar.
+// They share the AppKit menu surface but otherwise have distinct APIs and
+// SPIs. Kept under one roof so stack authors thinking "I want menu stuff"
+// open one file. Mirrors hs.menubar.*'s grouped shape.
 
 // MARK: - NSStatusItem (sd.menubar.addItem)
 
@@ -175,5 +176,134 @@ enum Menubar {
     /// wire `handle.onClick` / `handle.onMenuPick` immediately after.
     static func addItem(id: Int, spec: StatusItemSpec) -> StatusItemHandle {
         StatusItemHandle(id: id, spec: spec)
+    }
+}
+
+// MARK: - System menu-bar visibility (sd.menubar.suppress / restore)
+
+private enum SkyLightMenuBar {
+    typealias SetMenuBarVisibilityFn = @convention(c) (Bool) -> Void
+    static let setMenuBarVisibility: SetMenuBarVisibilityFn? = SkyLight.sym("CGSSetMenuBarVisibility")
+}
+
+/// Reference-counted system menu-bar visibility. Multiple stacks can suppress;
+/// the menu bar reappears only when every suppressor has called restore().
+enum MenuBarVisibility {
+    private static let lock = NSLock()
+    private static var suppressorCount = 0
+
+    /// Each suppress() returns a Token whose cancel decrements the refcount.
+    /// Stacks adopt the Token into their scope so unload always pairs with
+    /// suppression — no more leaks if a stack dies between suppress/restore.
+    /// Returns nil if SkyLight failed to load.
+    static func suppress() -> Token? {
+        guard let fn = SkyLightMenuBar.setMenuBarVisibility else { return nil }
+        lock.lock()
+        suppressorCount += 1
+        if suppressorCount == 1 { fn(false) }
+        lock.unlock()
+        var released = false
+        return Token {
+            lock.lock(); defer { lock.unlock() }
+            // Guard against double-cancel (adopt + explicit cancel).
+            guard !released else { return }
+            released = true
+            suppressorCount = max(0, suppressorCount - 1)
+            if suppressorCount == 0 { fn(true) }
+        }
+    }
+
+    /// Called on daemon shutdown / reload so we never leak the menu bar hidden.
+    static func resetForReload() {
+        guard let fn = SkyLightMenuBar.setMenuBarVisibility else { return }
+        lock.lock(); defer { lock.unlock() }
+        if suppressorCount > 0 {
+            suppressorCount = 0
+            fn(true)
+        }
+    }
+
+    /// Called once at daemon startup. If a previous daemon died with the menu
+    /// bar suppressed (kill -9, crash, power loss), inherit a known-good state
+    /// rather than the user's stale "menubar hidden" surprise.
+    static func forceRestoreOnLaunch() {
+        let handleOK = SkyLight.handle != nil
+        let symOK    = SkyLightMenuBar.setMenuBarVisibility != nil
+        FileHandle.standardError.write(Data("stackd: SkyLight handle=\(handleOK) sym=\(symOK)\n".utf8))
+        guard let fn = SkyLightMenuBar.setMenuBarVisibility else { return }
+        lock.lock(); defer { lock.unlock() }
+        suppressorCount = 0
+        fn(true)
+    }
+}
+
+// MARK: - Popup context menu at the cursor (sd.menu.popup)
+
+/// Native NSMenu popup at the current cursor location. Builds an NSMenu from
+/// a declarative spec (id/title/checked/enabled/separator/submenu) and resolves
+/// with the id of whatever the user clicked, or null on cancel. Native because
+/// a web modal can't escape the WebView's z-order, and a CSS "context menu"
+/// doesn't get the system font / hit-testing / kbd nav.
+enum PopupMenu {
+    static func present(items: [[String: Any]], completion: @escaping (String?) -> Void) {
+        DispatchQueue.main.async {
+            let coordinator = Coordinator(completion: completion)
+            let menu = build(items: items, coordinator: coordinator)
+            coordinator.menu = menu
+
+            // popUpMenu(positioning:atLocation:inView:) is the no-event-needed
+            // path that works from a background process. nil view → screen coords.
+            let loc = NSEvent.mouseLocation
+            DispatchQueue.main.async {
+                let chose = menu.popUp(positioning: nil, at: loc, in: nil)
+                if !chose {
+                    coordinator.fire(nil)
+                }
+                // Hold the coordinator alive long enough for action callbacks
+                // to fire on the main runloop.
+                _ = coordinator
+            }
+        }
+    }
+
+    private static func build(items: [[String: Any]], coordinator: Coordinator) -> NSMenu {
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        for spec in items {
+            if (spec["separator"] as? Bool) == true {
+                menu.addItem(.separator())
+                continue
+            }
+            let title = spec["title"] as? String ?? ""
+            let item = NSMenuItem(title: title, action: #selector(Coordinator.picked(_:)), keyEquivalent: "")
+            item.target = coordinator
+            item.representedObject = spec["id"] as? String
+            if let checked = spec["checked"] as? Bool, checked { item.state = .on }
+            if let enabled = spec["enabled"] as? Bool, !enabled { item.isEnabled = false }
+            if let sub = spec["submenu"] as? [[String: Any]] {
+                item.submenu = build(items: sub, coordinator: coordinator)
+                item.action = nil
+                item.target = nil
+            }
+            menu.addItem(item)
+        }
+        return menu
+    }
+
+    final class Coordinator: NSObject {
+        let completion: (String?) -> Void
+        var fired = false
+        var menu: NSMenu?
+        init(completion: @escaping (String?) -> Void) { self.completion = completion }
+
+        func fire(_ id: String?) {
+            guard !fired else { return }
+            fired = true
+            completion(id)
+        }
+
+        @objc func picked(_ sender: NSMenuItem) {
+            fire(sender.representedObject as? String)
+        }
     }
 }

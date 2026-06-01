@@ -29,8 +29,6 @@ SWIFT_SOURCES=(
   Sources/DataSources/Location.swift
   Sources/DataSources/Broadcasts.swift
   Sources/DataSources/Menubar.swift
-  Sources/DataSources/MenubarVisibility.swift
-  Sources/DataSources/Menu.swift
 
 
   Sources/DataSources/Network.swift
