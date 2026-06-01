@@ -548,6 +548,70 @@ enum WindowsByID {
         return elementHasToolbar(el)
     }
 
+    /// Curated `kAXSubrole == kAXStandardWindow` check. The single most common
+    /// AX gate tilers and overlays make ("should I touch this window?"). Stacks
+    /// previously baked the subrole comparison into JS; this one-liner makes
+    /// it discoverable alongside `subrole(id)`. Matches `hs.window:isStandard()`.
+    static func isStandard(windowID: CGWindowID) -> Bool {
+        subrole(windowID: windowID) == (kAXStandardWindowSubrole as String)
+    }
+
+    /// Per-window tab list. Walks the window's direct children for an
+    /// `AXTabGroup` (browsers, Finder, terminals all use it); returns
+    /// `[{title, selected}]` from the tab group's `AXChildren` (typically
+    /// `AXRadioButton`s, one per tab). Returns nil when the window has no
+    /// AXTabGroup child — most windows. Returns an empty array if the
+    /// AXTabGroup exists but contains no children. Mirrors `hs.window:tabs()`.
+    ///
+    /// Tight strategy (per plan §6.4): direct child only, no recursive walk.
+    /// Apps that bury tabs deeper (Safari's custom AXGroup with "tabs" role
+    /// description) fall through to nil — stacks that need that path use the
+    /// `sd.ax.*` escape hatch.
+    static func tabs(windowID: CGWindowID) -> [[String: Any]]? {
+        guard let el = elementFor(windowID: windowID) else { return nil }
+        AXUIElementSetMessagingTimeout(el, 0.1)
+        guard let group = tabGroup(in: el) else { return nil }
+        var childrenRef: AnyObject?
+        guard AXUIElementCopyAttributeValue(group, kAXChildrenAttribute as CFString, &childrenRef) == .success,
+              let children = childrenRef as? [AXUIElement] else { return [] }
+        return children.map { child -> [String: Any] in
+            let title = axStringAttribute(child, kAXTitleAttribute) ?? ""
+            var valRef: AnyObject?
+            AXUIElementCopyAttributeValue(child, kAXValueAttribute as CFString, &valRef)
+            let selected: Bool
+            if let n = valRef as? NSNumber { selected = n.intValue != 0 }
+            else if let b = valRef as? Bool { selected = b }
+            else { selected = false }
+            return ["title": title, "selected": selected]
+        }
+    }
+
+    /// Press the Nth tab in the window's `AXTabGroup`. Returns false if the
+    /// window has no AXTabGroup child, the index is out of range, or the AX
+    /// press action fails. Mirrors `hs.window:focusTab(n)`.
+    @discardableResult
+    static func focusTab(windowID: CGWindowID, index: Int) -> Bool {
+        guard let el = elementFor(windowID: windowID) else { return false }
+        AXUIElementSetMessagingTimeout(el, 0.1)
+        guard let group = tabGroup(in: el) else { return false }
+        var childrenRef: AnyObject?
+        guard AXUIElementCopyAttributeValue(group, kAXChildrenAttribute as CFString, &childrenRef) == .success,
+              let children = childrenRef as? [AXUIElement],
+              index >= 0, index < children.count else { return false }
+        return AXUIElementPerformAction(children[index], kAXPressAction as CFString) == .success
+    }
+
+    /// Direct-child AXTabGroup lookup. Tight strategy — does not recurse.
+    private static func tabGroup(in el: AXUIElement) -> AXUIElement? {
+        var childrenRef: AnyObject?
+        guard AXUIElementCopyAttributeValue(el, kAXChildrenAttribute as CFString, &childrenRef) == .success,
+              let children = childrenRef as? [AXUIElement] else { return nil }
+        for child in children where axStringAttribute(child, kAXRoleAttribute) == (kAXTabGroupRole as String) {
+            return child
+        }
+        return nil
+    }
+
     private static func elementHasToolbar(_ el: AXUIElement) -> Bool {
         var childrenRef: AnyObject?
         guard AXUIElementCopyAttributeValue(el, kAXChildrenAttribute as CFString, &childrenRef) == .success,
