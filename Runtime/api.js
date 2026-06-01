@@ -1109,6 +1109,21 @@ export const sd = {
   // Predicate syntax: https://developer.apple.com/library/archive/documentation/Cocoa/Conceptual/Predicates/AdditionalChapters/Introduction.html
   // Dates are epoch-seconds Numbers; bad predicates will crash the daemon
   // (NSException isn't catchable from Swift) — test your predicate string.
+  // Live variant — keeps an NSMetadataQuery alive and pushes the FULL
+  // current result-set each time the Spotlight index notifies a change.
+  // Same shape as find()'s return: an array of attribute dicts. First emit
+  // lands after the initial gather finishes; subsequent emits ride
+  // NSMetadataQueryDidUpdate. Stop the query when done.
+  //   const q = sd.spotlight.subscribe({
+  //     predicate: "kMDItemFSContentChangeDate > $time.today(-1)",
+  //     scopes: ["/Users/me/Downloads"]
+  //   });
+  //   const unsub = q.subscribe(files => render(files));
+  //   // ...later...
+  //   unsub();        // stop receiving updates (JS-side only)
+  //   await q.stop(); // tear down the underlying NSMetadataQuery
+  // Mirrors sd.bonjour.browse(): same handle id + per-instance channel
+  // ("spotlight:subscribe:<id>") + buffered-subscriber pattern.
   spotlight: {
     find(opts) {
       const o = opts || {};
@@ -1119,6 +1134,50 @@ export const sd = {
         attributes: o.attributes,
         limit:      o.limit
       });
+    },
+    subscribe(opts) {
+      const o = opts || {};
+      // The handle id arrives async, so subscribers attached before the
+      // id resolves get buffered locally and re-bound to the synthesized
+      // channel ("spotlight:subscribe:<id>") once we have it. After that,
+      // subscribe() goes straight to the underlying channel signal.
+      const localSubs = new Set();
+      let realCh = null;
+      let realId = null;
+      let stopped = false;
+      const start = request({
+        type:       "spotlight.subscribe",
+        predicate:  o.predicate,
+        scopes:     o.scopes,
+        attributes: o.attributes,
+        limit:      o.limit
+      }).then((id) => {
+        if (id == null || stopped) return null;
+        realId = id;
+        realCh = channel("spotlight:subscribe:" + id);
+        for (const fn of localSubs) realCh.subscribe(fn);
+        localSubs.clear();
+        return id;
+      });
+      return {
+        get id() { return realId; },
+        subscribe(fn) {
+          if (realCh) return realCh.subscribe(fn);
+          localSubs.add(fn);
+          // Pre-bind unsubscribe: drop from the local set if the start
+          // request hasn't resolved yet. Post-bind unsubscribes are
+          // best-effort (the channel signal doesn't expose an unbind hook
+          // once we lose the inner unsubscribe ref) — process-lifetime
+          // channels mean the cost is one callback ref until stack unload.
+          return () => { localSubs.delete(fn); };
+        },
+        async stop() {
+          stopped = true;
+          const id = await start;
+          if (id == null) return false;
+          return request({ type: "spotlight.subscribe.stop", id });
+        }
+      };
     }
   },
   // Bonjour / mDNS — publish a service on the LAN, or browse for one.

@@ -1,0 +1,86 @@
+<!doctype html>
+<html><head><meta charset="utf-8">
+<style>
+  body {
+    margin: 0; padding: 10px 12px;
+    font: 11px -apple-system, system-ui, sans-serif;
+    color: #fff;
+    background: rgba(20, 20, 22, 0.78);
+    border-radius: 10px;
+    -webkit-backdrop-filter: blur(20px);
+  }
+  h1 { font-size: 10px; margin: 0 0 6px; opacity: 0.55; text-transform: uppercase; letter-spacing: 0.08em; }
+  #status { font: 10px ui-monospace, Menlo, monospace; opacity: 0.7; margin-bottom: 6px; }
+  ul { margin: 0; padding: 0; list-style: none; max-height: 260px; overflow-y: auto; }
+  li { padding: 3px 0; border-top: 1px solid rgba(255,255,255,0.08); font: 11px ui-monospace, Menlo, monospace; }
+  li:first-child { border-top: none; }
+  .name { color: #fff; }
+  .meta { opacity: 0.5; font-size: 10px; }
+  .empty { opacity: 0.4; padding: 6px 0; }
+</style>
+</head><body>
+<h1>spotlight live — ~/Downloads, last 24h</h1>
+<div id="status">starting…</div>
+<ul id="list"></ul>
+<script type="module">
+  import { sd } from "sd://runtime/api.js";
+
+  // sd.spotlight.subscribe — long-lived NSMetadataQuery in continuous mode.
+  //
+  // The query stays alive; each Spotlight index change (file added, mtime
+  // bumped, file moved into scope) fires a fresh push with the FULL current
+  // result-set — render directly, no diffing needed. Same shape as
+  // sd.spotlight.find().
+  //
+  // Predicate uses Spotlight's NSPredicate format. Date comparisons against
+  // $time.today(-1) target "anything modified since yesterday". Bad
+  // predicate syntax crashes the daemon (NSException isn't catchable from
+  // Swift) — test your predicate before shipping.
+  //
+  // Pairs with sd.fs for follow-up reads on the matched paths.
+
+  const list = document.getElementById("list");
+  const status = document.getElementById("status");
+
+  // Predicate: anything whose Spotlight path starts with the user's
+  // Downloads dir AND was modified in the last 24h. We embed the path
+  // in the predicate rather than the `scopes` array so the example stays
+  // dependency-free (no extra fs/env primitive needed) — and because
+  // NSMetadataQuery scopes don't auto-expand `~`. macOS Spotlight indexes
+  // every user under /Users; the LIKE constrains to the right home.
+  const q = sd.spotlight.subscribe({
+    predicate: "kMDItemPath LIKE[c] '/Users/*/Downloads/*' && kMDItemFSContentChangeDate > $time.today(-1)",
+    limit:     50
+  });
+
+  q.subscribe(files => {
+    status.textContent = `${files.length} file${files.length === 1 ? "" : "s"} · live`;
+    list.innerHTML = "";
+    if (files.length === 0) {
+      const empty = document.createElement("li");
+      empty.className = "empty";
+      empty.textContent = "no files modified in the last 24h";
+      list.appendChild(empty);
+      return;
+    }
+    // Newest first — Spotlight's order is index-dependent, sort by change date.
+    files.sort((a, b) => (b.kMDItemFSContentChangeDate || 0) - (a.kMDItemFSContentChangeDate || 0));
+    for (const f of files) {
+      const li = document.createElement("li");
+      const name = f.kMDItemFSName || "?";
+      const when = f.kMDItemFSContentChangeDate
+        ? new Date(f.kMDItemFSContentChangeDate * 1000).toLocaleTimeString()
+        : "";
+      const size = f.kMDItemFSSize ? ` · ${(f.kMDItemFSSize / 1024).toFixed(0)} KiB` : "";
+      li.innerHTML = `<span class="name">${name}</span> <span class="meta">${when}${size}</span>`;
+      list.appendChild(li);
+    }
+  });
+
+  // ── lifecycle: q.stop() tears down the underlying NSMetadataQuery. The
+  // daemon's per-stack scope drain also stops it on stack reload, so the
+  // explicit stop() below is only needed if you want to release the live
+  // query before the stack itself goes away.
+  // await q.stop();
+</script>
+</body></html>

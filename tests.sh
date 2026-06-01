@@ -28,6 +28,7 @@ TEST_SOURCES=(
   Tests/HostDiskIOTests.swift
   Tests/BonjourTests.swift
   Tests/CalendarTests.swift
+  Tests/SpotlightLiveTests.swift
   Tests/TemplateEngineTests.swift
   Tests/main.swift
 )

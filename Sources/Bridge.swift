@@ -67,6 +67,16 @@ final class Bridge: NSObject, WKScriptMessageHandler {
     fileprivate var bonjourPublishHandles: [Int: Token] = [:]
     fileprivate var bonjourBrowseHandles: [Int: Token] = [:]
     fileprivate var nextBonjourId: Int = 1
+    // Spotlight live-query handles. Each entry owns a Spotlight.LiveQuery
+    // (long-lived NSMetadataQuery in continuous-update mode); cancel calls
+    // LiveQuery.stop() which tears down the query + its NSNotificationCenter
+    // observers. Per-handle channel push uses the synthesized name
+    // "spotlight:subscribe:<id>" — JS sd.spotlight.subscribe() builds the
+    // same name from the returned handle id and subscribes via the standard
+    // channel() signal machinery. Stack unload drains via scope (mirrors
+    // bonjourBrowseHandles).
+    fileprivate var spotlightLiveHandles: [Int: Token] = [:]
+    fileprivate var nextSpotlightLiveId: Int = 1
     // SQLite handles minted via sd.sqlite.open(). Tracked per-Bridge so the
     // scope drain on stack unload closes every connection — the underlying
     // SQLite.HandleStore is process-wide but the *ownership* is stack-scoped.
@@ -354,6 +364,14 @@ final class Bridge: NSObject, WKScriptMessageHandler {
             self.bonjourPublishHandles.removeAll()
             for (_, t) in self.bonjourBrowseHandles { t.cancel() }
             self.bonjourBrowseHandles.removeAll()
+        })
+        // Spotlight live queries — stop every continuous-update
+        // NSMetadataQuery owned by this stack so reload doesn't leak the
+        // backing query objects or their NSNotificationCenter observers.
+        scope.adopt(Token { [weak self] in
+            guard let self = self else { return }
+            for (_, t) in self.spotlightLiveHandles { t.cancel() }
+            self.spotlightLiveHandles.removeAll()
         })
         // SQLite — sqlite3_close_v2 every connection minted by this stack.
         // No-ops if the JS code already called db.close() explicitly.
@@ -753,6 +771,53 @@ final class Bridge: NSObject, WKScriptMessageHandler {
                            attributes: attributes, limit: limit) { [weak bridge] result in
                 bridge?.respond(requestId: requestId, value: result as Any? ?? NSNull())
             }
+        },
+
+        // Spotlight — long-lived NSMetadataQuery in continuous-update mode.
+        // Each subscribe() mints a handle id; per-handle channel push uses
+        // the synthesized name "spotlight:subscribe:<id>". JS
+        // sd.spotlight.subscribe(opts) returns { id, subscribe(fn), stop() }
+        // that wires the same channel name to the standard signal
+        // machinery. First emit fires when the initial Spotlight gather
+        // finishes; subsequent emits ride NSMetadataQueryDidUpdate. Same
+        // predicate-crash caveat as spotlight.find: a malformed format
+        // string raises NSInvalidArgumentException and brings down the
+        // daemon — caller validates.
+        .custom("spotlight.subscribe", permission: "spotlight") { bridge, body, requestId in
+            let predicate  = body["predicate"]  as? String
+            let scopes     = body["scopes"]     as? [String]
+            let attributes = body["attributes"] as? [String]
+            let limit      = body["limit"]      as? Int
+            let id = bridge.nextSpotlightLiveId
+            bridge.nextSpotlightLiveId += 1
+            let channel = "spotlight:subscribe:\(id)"
+            let live = Spotlight.LiveQuery(
+                predicate: predicate,
+                scopes:    scopes,
+                attributes: attributes,
+                limit:     limit,
+                onUpdate:  { [weak bridge] entries in
+                    guard let bridge = bridge else { return }
+                    let json = Bridge.jsonify(entries)
+                    bridge.push(channel: channel, json: json)
+                }
+            )
+            guard let live = live else {
+                // Empty / nil predicate — LiveQuery init? returns nil so
+                // we don't mint a handle. Mirrors the find() empty-predicate
+                // shortcut (returns []) but for subscribe there's nothing
+                // to subscribe to, so the handle id is null and the JS
+                // wrapper's start promise resolves to null.
+                bridge.respond(requestId: requestId, value: NSNull()); return
+            }
+            bridge.spotlightLiveHandles[id] = Token { live.stop() }
+            bridge.respond(requestId: requestId, value: id)
+        },
+        .syncBridge("spotlight.subscribe.stop", permission: "spotlight", denyValue: false) { b, body in
+            guard let id = body["id"] as? Int,
+                  let t  = b.spotlightLiveHandles.removeValue(forKey: id) else { return false }
+            t.cancel()
+            return true
         },
 
         // Update — pending macOS software updates via `softwareupdate -l`.
