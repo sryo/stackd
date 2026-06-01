@@ -1,0 +1,77 @@
+<!doctype html><meta charset="utf-8">
+<style>
+  html, body { margin: 0; padding: 0; font: 12px -apple-system; color: #fff;
+               background: rgba(20,20,22,.92); border-radius: 12px;
+               padding: 12px; box-sizing: border-box; }
+  h1   { margin: 0 0 10px; font-size: 11px; letter-spacing: .1em;
+         text-transform: uppercase; opacity: .55; }
+  .row { display: flex; gap: 10px; align-items: center; margin-bottom: 8px; }
+  .row img { width: 64px; height: 64px; border-radius: 6px; background: #222;
+             object-fit: cover; }
+  .row .meta { flex: 1; min-width: 0; }
+  .row .name { font-weight: 600; white-space: nowrap; overflow: hidden;
+               text-overflow: ellipsis; }
+  .row .info { opacity: .55; font-size: 11px; margin-top: 2px; }
+  .empty { opacity: .55; padding: 20px 0; text-align: center; }
+</style>
+<body>
+  <h1>~/Downloads</h1>
+  <div id="rows"><div class="empty">looking around…</div></div>
+  <script type="module">
+    // Thumbnails for the eight most-recently-modified items in ~/Downloads —
+    // proves QLThumbnailGenerator returns rich previews (PDFs, video
+    // posters, app icons, source-code thumbs) for anything Finder can show.
+    import { sd } from "sd://runtime/api.js";
+
+    const DIR = "~/Downloads";
+    const COUNT = 8;
+
+    async function render() {
+      const names = await sd.fs.list(DIR);
+      if (!names || names.length === 0) {
+        document.getElementById("rows").innerHTML =
+          `<div class="empty">~/Downloads is empty</div>`;
+        return;
+      }
+
+      // fs.list returns basenames only. stat each to get mtime, then sort.
+      const stats = await Promise.all(names.map(async name => {
+        const path = `${DIR}/${name}`;
+        const s = await sd.fs.stat(path);
+        return { name, path, mtime: s?.mtime ?? 0 };
+      }));
+      const recent = stats.sort((a, b) => b.mtime - a.mtime).slice(0, COUNT);
+
+      const rows = await Promise.all(recent.map(async r => {
+        const t = await sd.thumbnails.generate({
+          path: r.path, width: 64, height: 64, format: "jpeg", quality: 0.8
+        });
+        return { ...r, thumb: t };
+      }));
+
+      document.getElementById("rows").innerHTML = rows.map(r => `
+        <div class="row">
+          <img src="${r.thumb?.dataURL ?? ""}" alt="">
+          <div class="meta">
+            <div class="name">${escapeHtml(r.name)}</div>
+            <div class="info">
+              ${r.thumb?.type ?? "no preview"} ·
+              ${r.thumb ? r.thumb.width + "×" + r.thumb.height : "—"}
+            </div>
+          </div>
+        </div>
+      `).join("");
+    }
+
+    function escapeHtml(s) {
+      return String(s).replace(/[&<>"']/g, c => ({
+        "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"
+      }[c]));
+    }
+
+    render();
+    // Refresh periodically so newly-downloaded files show up.
+    setInterval(render, 5000);
+  </script>
+</body>
+</html>

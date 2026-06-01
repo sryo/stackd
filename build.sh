@@ -47,6 +47,7 @@ SWIFT_SOURCES=(
   Sources/DataSources/NLP.swift
   Sources/DataSources/Spotlight.swift
   Sources/DataSources/Speech.swift
+  Sources/DataSources/Thumbnails.swift
   Sources/DataSources/Notify.swift
   Sources/DataSources/Devices.swift
 )
@@ -72,6 +73,7 @@ swiftc -O \
   -framework MultitouchSupport \
   -framework NaturalLanguage \
   -framework OSAKit \
+  -framework QuickLookThumbnailing \
   -framework ScreenCaptureKit \
   -framework Vision \
   -framework WebKit \

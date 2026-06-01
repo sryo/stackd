@@ -725,6 +725,32 @@ final class Bridge: NSObject, WKScriptMessageHandler {
             }
         },
 
+        // Thumbnails — QLThumbnailGenerator one-shot. Renders the same
+        // preview Finder/Quick Look show (PDF first page, video poster,
+        // app icon, source highlight) for any file the user can read. No
+        // TCC. Returns null on missing file / unrenderable type / timeout.
+        .custom("thumbnails.generate", permission: "thumbnails") { bridge, body, requestId in
+            let path           = body["path"] as? String ?? ""
+            let w              = body["width"]  as? Double ?? 128
+            let h              = body["height"] as? Double ?? 128
+            let scale          = CGFloat(body["scale"] as? Double ?? Double(NSScreen.main?.backingScaleFactor ?? 2.0))
+            let representation = body["representation"] as? String ?? "all"
+            let format         = body["format"]  as? String ?? "png"
+            let quality        = body["quality"] as? Double ?? 0.85
+            let timeout        = body["timeoutSeconds"] as? Double ?? 5.0
+            Thumbnails.generate(
+                path:            path,
+                size:            CGSize(width: w, height: h),
+                scale:           scale,
+                representation:  representation,
+                format:          format,
+                quality:         quality,
+                timeoutSeconds:  timeout
+            ) { [weak bridge] result in
+                bridge?.respond(requestId: requestId, value: result as Any? ?? NSNull())
+            }
+        },
+
         // Speech — text-to-speech via AVSpeechSynthesizer. No TCC, no
         // microphone — the engine runs entirely on the local audio device.
         // STT (sd.speech.listen) needs SFSpeechRecognizer + Microphone TCC

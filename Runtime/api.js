@@ -1113,6 +1113,37 @@ export const sd = {
       });
     }
   },
+  // QLThumbnailGenerator one-shot — same preview Finder/Quick Look render
+  // for the file at `path` (PDF first page, video poster, audio waveform,
+  // app icon, source-code thumbnail). No TCC; file accessibility is the
+  // only gate.
+  //   const t = await sd.thumbnails.generate({
+  //     path: "~/Documents/report.pdf",
+  //     width: 256, height: 256,    // points; pixels = size * scale
+  //     scale: 2,                    // default: main display backing scale
+  //     representation: "all",       // "all" | "thumbnail" | "icon" | "lowQualityThumbnail"
+  //     format: "png",               // "png" (default) | "jpeg"
+  //     quality: 0.85                // jpeg only
+  //   })
+  //   // → { dataURL, width, height, type }  or null
+  // `type` echoes which QL pass produced the image — handy for telling
+  // an icon fallback apart from a real thumbnail.
+  thumbnails: {
+    generate(opts) {
+      const o = opts || {};
+      return request({
+        type: "thumbnails.generate",
+        path:           String(o.path ?? ""),
+        width:          o.width,
+        height:         o.height,
+        scale:          o.scale,
+        representation: o.representation,
+        format:         o.format,
+        quality:        o.quality,
+        timeoutSeconds: o.timeoutSeconds
+      });
+    }
+  },
   // Calendar events via EventKit. First call triggers the Calendar TCC
   // prompt (macOS 14+ asks for "Full Access"). Denial yields [], never null.
   //   await sd.calendar.events({ from: nowSec, to: nowSec + 86400 })

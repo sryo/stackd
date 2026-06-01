@@ -1,0 +1,7 @@
+{
+  "id": "thumbnails-test",
+  "name": "Thumbnails test",
+  "anchor": { "edge": "top-right", "inset": [16, 16] },
+  "size":   { "w": 360, "h": 460 },
+  "permissions": ["thumbnails", "fs"]
+}
