@@ -217,6 +217,7 @@ enum ChannelInference {
         "net.lan":           "net",
         "net.path":          "net",
         "audio.output":      "audio",
+        "audio.input":       "audio",
         "display.all":       "display",
         "media.nowPlaying":  "media",
         "pasteboard.changed":"pasteboard",
