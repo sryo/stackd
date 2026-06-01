@@ -1165,6 +1165,47 @@ function __sdEvalPlaceholder(compiled) {
   return __sdEvalWithScope(compiled, undefined, undefined);
 }
 
+// Wire an applyFn to a set of dependent signals: paint once, subscribe each
+// dep, register every unsub with __sdBindUnsubs so stack unload tears them
+// down. Used by all four template paths (text nodes, attributes, sd-each,
+// sd-if) — each supplies its own applyFn (DOM write strategies differ) but
+// the subscription + cleanup plumbing is identical.
+function __sdSubscribeAll(deps, applyFn) {
+  applyFn();
+  for (const sig of deps) {
+    const unsub = sig.subscribe(applyFn);
+    __sdBindUnsubs.add(unsub);
+  }
+}
+
+// Scan a raw string for `{{ … }}` placeholders. Returns null when no
+// placeholders are present, otherwise:
+//   parts:  alternating literal-string / null slots — concat by replacing
+//           each null with the eval of slots[slotIdx++].
+//   slots:  compiled placeholder objects, one per { fn, deps }.
+//   deps:   union of all slot deps (the set you subscribe to).
+// Shared between __sdProcessAttribute (single-attr concat) and
+// __sdProcessEachElement (per-text-or-attribute concat inside a clone).
+function __sdScanPlaceholders(raw) {
+  const re = /\{\{([\s\S]+?)\}\}/g;
+  const parts = [];
+  const slots = [];
+  const deps = new Set();
+  let lastIndex = 0;
+  let m;
+  while ((m = re.exec(raw)) !== null) {
+    parts.push(raw.slice(lastIndex, m.index));
+    const c = __sdCompilePlaceholder(m[1]);
+    slots.push(c);
+    parts.push(null);
+    for (const d of c.deps) deps.add(d);
+    lastIndex = m.index + m[0].length;
+  }
+  if (slots.length === 0) return null;
+  parts.push(raw.slice(lastIndex));
+  return { parts, slots, deps };
+}
+
 function __sdProcessTextNode(textNode) {
   const raw = textNode.nodeValue;
   const re = /\{\{([\s\S]+?)\}\}/g;
@@ -1179,12 +1220,9 @@ function __sdProcessTextNode(textNode) {
     }
     const slot = document.createElement("span");
     const compiled = __sdCompilePlaceholder(m[1]);
-    const apply = () => { slot.textContent = __sdEvalPlaceholder(compiled); };
-    apply();
-    for (const sig of compiled.deps) {
-      const unsub = sig.subscribe(apply);
-      __sdBindUnsubs.add(unsub);
-    }
+    __sdSubscribeAll(compiled.deps, () => {
+      slot.textContent = __sdEvalPlaceholder(compiled);
+    });
     frag.appendChild(slot);
     lastIndex = m.index + m[0].length;
   }
@@ -1196,34 +1234,17 @@ function __sdProcessTextNode(textNode) {
 }
 
 function __sdProcessAttribute(el, attrName, raw) {
-  const re = /\{\{([\s\S]+?)\}\}/g;
   // parts[i] is either a literal string or null (meaning "splice in
   // slots[slotIdx++]"). Cheap concat on every fire.
-  const parts = [];
-  const slots = [];
-  let lastIndex = 0;
-  let m;
-  while ((m = re.exec(raw)) !== null) {
-    parts.push(raw.slice(lastIndex, m.index));
-    slots.push(__sdCompilePlaceholder(m[1]));
-    parts.push(null);
-    lastIndex = m.index + m[0].length;
-  }
-  parts.push(raw.slice(lastIndex));
-
-  const apply = () => {
+  const scanned = __sdScanPlaceholders(raw);
+  if (!scanned) return;
+  const { parts, slots, deps } = scanned;
+  __sdSubscribeAll(deps, () => {
     let out = "";
     let slotIdx = 0;
     for (const p of parts) out += p === null ? __sdEvalPlaceholder(slots[slotIdx++]) : p;
     el.setAttribute(attrName, out);
-  };
-  apply();
-  const allDeps = new Set();
-  for (const s of slots) for (const d of s.deps) allDeps.add(d);
-  for (const sig of allDeps) {
-    const unsub = sig.subscribe(apply);
-    __sdBindUnsubs.add(unsub);
-  }
+  });
 }
 
 // ── sd-each list rendering ─────────────────────────────────────────────────
@@ -1258,29 +1279,17 @@ function __sdProcessEachElement(el) {
   const allDeps = new Set(sourceCompiled.deps);
   const SKIP_TAGS = new Set(["SCRIPT", "STYLE"]);
 
-  function collectPlaceholders(raw) {
-    const re = /\{\{([\s\S]+?)\}\}/g;
-    const parts = [];
-    const compileds = [];
-    let lastIdx = 0;
-    let m;
-    while ((m = re.exec(raw)) !== null) {
-      parts.push(raw.slice(lastIdx, m.index));
-      const c = __sdCompilePlaceholder(m[1]);
-      compileds.push(c);
-      parts.push(null);
-      for (const d of c.deps) allDeps.add(d);
-      lastIdx = m.index + m[0].length;
-    }
-    if (compileds.length === 0) return null;
-    parts.push(raw.slice(lastIdx));
-    return { parts, compileds };
+  function scanPlaceholders(raw) {
+    const got = __sdScanPlaceholders(raw);
+    if (!got) return null;
+    for (const d of got.deps) allDeps.add(d);
+    return got;
   }
 
   function scan(node, path) {
     if (node.nodeType === 3) { // TEXT
-      const got = collectPlaceholders(node.nodeValue);
-      if (got) textOps.push({ path, ...got });
+      const got = scanPlaceholders(node.nodeValue);
+      if (got) textOps.push({ path, parts: got.parts, slots: got.slots });
       return;
     }
     if (node.nodeType !== 1) return;
@@ -1292,8 +1301,8 @@ function __sdProcessEachElement(el) {
     }
     for (const attr of Array.from(node.attributes)) {
       if (attr.name === "sd-each") continue;
-      const got = collectPlaceholders(attr.value);
-      if (got) attrOps.push({ path, attrName: attr.name, ...got });
+      const got = scanPlaceholders(attr.value);
+      if (got) attrOps.push({ path, attrName: attr.name, parts: got.parts, slots: got.slots });
     }
     for (let i = 0; i < node.childNodes.length; i++) {
       scan(node.childNodes[i], path.concat([i]));
@@ -1310,11 +1319,11 @@ function __sdProcessEachElement(el) {
     return n;
   }
 
-  function applyParts(parts, compileds, item, index) {
+  function applyParts(parts, slots, item, index) {
     let out = "";
     let slotIdx = 0;
     for (const p of parts) {
-      if (p === null) { out += __sdEvalWithScope(compileds[slotIdx], item, index); slotIdx++; }
+      if (p === null) { out += __sdEvalWithScope(slots[slotIdx], item, index); slotIdx++; }
       else            { out += p; }
     }
     return out;
@@ -1335,23 +1344,19 @@ function __sdProcessEachElement(el) {
       for (const op of textOps) {
         const node = findByPath(clone, op.path);
         if (!node || node.nodeType !== 3) continue;
-        node.nodeValue = applyParts(op.parts, op.compileds, item, i);
+        node.nodeValue = applyParts(op.parts, op.slots, item, i);
       }
       for (const op of attrOps) {
         const node = findByPath(clone, op.path);
         if (!node || node.nodeType !== 1) continue;
-        node.setAttribute(op.attrName, applyParts(op.parts, op.compileds, item, i));
+        node.setAttribute(op.attrName, applyParts(op.parts, op.slots, item, i));
       }
       anchor.parentNode.insertBefore(clone, anchor.nextSibling);
       active.push(clone);
     }
   }
 
-  render();
-  for (const sig of allDeps) {
-    const unsub = sig.subscribe(render);
-    __sdBindUnsubs.add(unsub);
-  }
+  __sdSubscribeAll(allDeps, render);
 }
 
 // ── sd-if conditional rendering ────────────────────────────────────────────
@@ -1460,13 +1465,7 @@ function __sdCompileTemplates(root) {
   // sd-if initial eval + dep subscription. Runs last so the subtree's
   // placeholders are compiled (and live-subscribed) before the first
   // detachment.
-  for (const { render, deps } of ifSetups) {
-    render();
-    for (const sig of deps) {
-      const unsub = sig.subscribe(render);
-      __sdBindUnsubs.add(unsub);
-    }
-  }
+  for (const { render, deps } of ifSetups) __sdSubscribeAll(deps, render);
 }
 
 // Guard against double-compilation if an explicit `import { sd }` in a stack
