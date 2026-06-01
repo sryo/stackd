@@ -4,32 +4,14 @@ final class Bridge: NSObject, WKScriptMessageHandler {
     weak var webView: WKWebView?
     fileprivate var stackId: String = ""
     private var permissions: [String] = []
-    private var lastBattery: String?
-    private var lastMouse: String?
-    private var lastFrontApp: String?
-    private var lastFocusedWindow: String?
-    private var lastWindowsAll: String?
-    private var lastAppearance: String?
-    private var lastInput: String?
-    private var lastNetWifi: String?
-    private var lastNetLan: String?
-    private var lastAudio: String?
-    private var lastDisplay: String?
-    private var lastMedia: String?
-    private var lastPasteboard: String?
-    private var lastApps: String?
+    // Per-channel JSON dedupe cache, keyed by the channel name used in
+    // push(channel:json:). Every startXxx() reads + writes via this dict so
+    // adding a new channel doesn't require declaring another `lastXxx` field.
+    private var lastState: [String: String] = [:]
     // Parsed snapshot used to compute the sd.apps.changed delta — keyed by
     // bundleId because pids recycle but bundleIds are stable across launches.
+    // Not a string cache, so it sits next to lastState rather than inside it.
     private var lastAppsByBundle: [String: [String: Any]] = [:]
-    private var lastSpaces: String?
-    private var lastCaffeinate: String?
-    private var lastSensors: String?
-    private var lastLocation: String?
-    private var lastUSB: String?
-    private var lastCamera: String?
-    private var lastHostLoad: String?
-    private var lastTouchDevice: String?
-    private var lastDisplayLink: String?
     private var settings: StackSettings?
     private var fsWatches: [Int: FSWatch] = [:]
     private var handlesBangs: Set<String> = []
@@ -141,18 +123,44 @@ final class Bridge: NSObject, WKScriptMessageHandler {
             guard let cf = CGDisplayCreateUUIDFromDisplayID(id)?.takeRetainedValue() else { return "" }
             return CFUUIDCreateString(nil, cf) as String? ?? ""
         }()
+        // Top-left, matching sd.display.all and every other xy in sd.*.
+        let cgFrame = CGDisplayBounds(id)
+        let nsFrame = screen.frame, nsVisible = screen.visibleFrame
+        let topInset    = max(0, nsFrame.maxY - nsVisible.maxY)
+        let bottomInset = max(0, nsVisible.minY - nsFrame.minY)
+        let leftInset   = max(0, nsVisible.minX - nsFrame.minX)
+        let rightInset  = max(0, nsFrame.maxX - nsVisible.maxX)
+        let cgVisible = CGRect(
+            x: cgFrame.minX + leftInset,
+            y: cgFrame.minY + topInset,
+            width:  max(0, cgFrame.width  - leftInset - rightInset),
+            height: max(0, cgFrame.height - topInset  - bottomInset)
+        )
         return [
             "uuid":         uuid,
             "displayID":    Int(id),
             "index":        index,
-            "frame":        rect(screen.frame),
-            "visibleFrame": rect(screen.visibleFrame)
+            "frame":        rect(cgFrame),
+            "visibleFrame": rect(cgVisible)
         ]
     }
 
     private static func rect(_ r: CGRect) -> [String: Int] {
         ["x": Int(r.origin.x), "y": Int(r.origin.y),
          "w": Int(r.size.width), "h": Int(r.size.height)]
+    }
+
+    fileprivate static func buildPredicate(_ raw: StackManifest.EventTap.Predicate?) -> EventTapPredicate {
+        var p = EventTapPredicate()
+        guard let raw = raw else { return p }
+        var codes = Set<Int64>()
+        if let kc = raw.keyCode { codes.insert(Int64(kc)) }
+        if let arr = raw.keyCodes { for k in arr { codes.insert(Int64(k)) } }
+        if !codes.isEmpty { p.keyCodes = codes }
+        p.flagsMask = raw.flagsMask
+        p.flagsAny  = raw.flagsAny
+        if let band = raw.inCornerBand { p.inCornerBand = CGFloat(band) }
+        return p
     }
 
     func start(manifest: StackManifest) {
@@ -195,7 +203,8 @@ final class Bridge: NSObject, WKScriptMessageHandler {
                 scope.adopt(HotkeyRegistry.shared.bind(
                     spec: hk.key,
                     mode: hk.mode,
-                    apps: hk.apps
+                    apps: hk.apps,
+                    excludeApps: hk.excludeApps
                 ) { [weak self] in
                     self?.fireHotkey(callback: cb)
                 })
@@ -208,9 +217,20 @@ final class Bridge: NSObject, WKScriptMessageHandler {
                     continue
                 }
                 let cb = et.callback
-                scope.adopt(EventTapRegistry.shared.register(eventType: type) { [weak self] event in
-                    self?.fireEventTap(callback: cb, type: type, event: event)
-                })
+                if et.consume == true {
+                    let predicate = Bridge.buildPredicate(et.`if`)
+                    let token = EventTapRegistry.shared.registerConsumer(
+                        eventType: type,
+                        predicate: predicate
+                    ) { [weak self] event in
+                        self?.fireEventTap(callback: cb, type: type, event: event)
+                    }
+                    scope.adopt(token)
+                } else {
+                    scope.adopt(EventTapRegistry.shared.register(eventType: type) { [weak self] event in
+                        self?.fireEventTap(callback: cb, type: type, event: event)
+                    })
+                }
             }
         }
         if let corners = manifest.hotcorners, !corners.isEmpty {
@@ -233,6 +253,13 @@ final class Bridge: NSObject, WKScriptMessageHandler {
                 })
             }
         }
+        // If this stack left a sd.windows.batch open (crashed mid-closure,
+        // forgot to await commit), commit-and-clear so the process-global sink
+        // doesn't strand. WindowsByID.commitBatch is a no-op when no batch is
+        // active, so safe to call unconditionally.
+        scope.adopt(Token {
+            _ = WindowsByID.commitBatch()
+        })
         // Drain any leftover sd.menubar.suppress() tokens. If the stack
         // paired suppress/restore correctly this is a no-op; if it crashed
         // mid-suppress this is the safety net so the bar reappears.
@@ -584,6 +611,83 @@ final class Bridge: NSObject, WKScriptMessageHandler {
             NLP.similarity(body["a"] as? String ?? "", body["b"] as? String ?? "")
         },
 
+        // Spotlight — one-shot NSMetadataQuery. Predicate string is raw
+        // NSPredicate format ("kMDItemFSName LIKE[cd] '*.pdf'"); callers
+        // must provide valid syntax (malformed predicates crash the daemon
+        // — NSException isn't catchable from Swift). Scopes default to the
+        // local computer; attributes default to a useful subset.
+        .custom("spotlight.find", permission: "spotlight") { bridge, body, requestId in
+            let predicate  = body["predicate"]  as? String
+            let scopes     = body["scopes"]     as? [String]
+            let attributes = body["attributes"] as? [String]
+            let limit      = body["limit"]      as? Int
+            Spotlight.find(predicate: predicate, scopes: scopes,
+                           attributes: attributes, limit: limit) { [weak bridge] result in
+                bridge?.respond(requestId: requestId, value: result as Any? ?? NSNull())
+            }
+        },
+
+        // Speech — text-to-speech via AVSpeechSynthesizer. No TCC, no
+        // microphone — the engine runs entirely on the local audio device.
+        // STT (sd.speech.listen) needs SFSpeechRecognizer + Microphone TCC
+        // and is deferred.
+        .sync("speech.speak", permission: "speech", denyValue: false) { body in
+            Speech.speak(
+                text:   body["text"]   as? String ?? "",
+                voice:  body["voice"]  as? String,
+                rate:   (body["rate"]   as? Double).map { Float($0) },
+                pitch:  (body["pitch"]  as? Double).map { Float($0) },
+                volume: (body["volume"] as? Double).map { Float($0) }
+            )
+        },
+        .sync("speech.stop", permission: "speech", denyValue: false) { body in
+            Speech.stop(boundary: body["boundary"] as? String ?? "immediate")
+        },
+        .sync("speech.voices", permission: "speech", denyValue: [[String: Any]]()) { _ in
+            Speech.voices()
+        },
+
+        // Camera — one-shot frame grab. Triggers the Camera TCC prompt the
+        // first time. `deviceId` matches sd.camera channel ids; nil = system
+        // default. Format jpeg/png, quality 0..1 (jpeg only). Returns
+        // { dataURL, width, height } or null. Pairs with sd.vision.*.
+        .custom("camera.frame", permission: "camera") { bridge, body, requestId in
+            let deviceId = body["deviceId"] as? String
+            let format   = body["format"]   as? String ?? "jpeg"
+            let quality  = body["quality"]  as? Double ?? 0.85
+            let timeout  = body["timeoutSeconds"] as? Double ?? 3.0
+            Camera.frame(deviceId: deviceId, format: format,
+                         quality: quality, timeoutSeconds: timeout) { [weak bridge] result in
+                bridge?.respond(requestId: requestId, value: result as Any? ?? NSNull())
+            }
+        },
+
+        // Calendar — read-only EventKit query. Triggers the Calendar TCC
+        // prompt on first use. `from` / `to` are epoch seconds; `calendarIds`
+        // optionally restricts to specific calendars (default = all).
+        // Returns [] on denial, never nil.
+        .custom("calendar.events", permission: "calendar") { bridge, body, requestId in
+            let from = (body["from"] as? Double) ?? 0
+            let to   = (body["to"]   as? Double) ?? 0
+            let ids  = body["calendarIds"] as? [String]
+            Calendar.events(from: from, to: to, calendarIds: ids) { [weak bridge] result in
+                bridge?.respond(requestId: requestId, value: result as Any? ?? [[String: Any]]())
+            }
+        },
+        .custom("calendar.list", permission: "calendar") { bridge, _, requestId in
+            Calendar.calendars { [weak bridge] result in
+                bridge?.respond(requestId: requestId, value: result as Any? ?? [[String: Any]]())
+            }
+        },
+
+        // Bluetooth — paired device list via IOBluetooth. Triggers the
+        // Bluetooth TCC prompt the first time. Returns [{ name?, address,
+        // connected, classOfDevice?, services? }, ...]. Battery is a
+        // focused follow-up (per-device-class private SPI).
+        .sync("bluetooth.paired", permission: "bluetooth", denyValue: [[String: Any]]()) { _ in
+            Bluetooth.paired()
+        },
+
         // Vision OCR — VNRecognizeTextRequest. Async (perform() blocks on a
         // worker queue); image accepts a dataURL or an absolute file path.
         // Bounding boxes are y-flipped from Vision's normalized origin-bottom-
@@ -678,6 +782,21 @@ final class Bridge: NSObject, WKScriptMessageHandler {
             }
         },
 
+        // Shortcuts CLI invocation — async like proc.exec. Gated by the
+        // "shortcuts" permission so a stack must opt in explicitly (a shortcut
+        // can do almost anything: AppleScript, file I/O, network requests,
+        // automations chained to other apps). The first call also surfaces
+        // the macOS Shortcuts TCC prompt if access hasn't been granted.
+        .custom("shortcuts.run", permission: "shortcuts") { bridge, body, requestId in
+            Shortcuts.run(
+                name:    body["name"]  as? String ?? "",
+                input:   body["input"] as? String,
+                timeoutSeconds: body["timeout"] as? Double
+            ) { [weak bridge] result in
+                bridge?.respond(requestId: requestId, value: result)
+            }
+        },
+
         // AppleScript / JXA — async hop to main. OSAKit is Apple Event-based
         // and depends on the main runloop for inter-process AEs (tell app "X").
         .custom("applescript.run", permission: "applescript") { bridge, body, requestId in
@@ -740,34 +859,68 @@ final class Bridge: NSObject, WKScriptMessageHandler {
 
         // Windows — focused-window helpers operate on the AX focused window
         // of frontmost app. All Bool-returning except byId.frame (returns
-        // dict or nil).
-        .sync("windows.setFrame",   permission: "windows", denyValue: false) { body in
+        // dict or nil). These hop to main via `.ax` because the underlying
+        // AXUIElementSetAttributeValue calls deadlock or silently partial-
+        // apply when invoked from a non-main thread (same constraint that
+        // moved the .ax.* surface). Concretely: WindowScape's per-tick
+        // setFrame loop would land position but drop size on ~half the
+        // calls, leaving windows moved-but-not-resized — the "windows
+        // resize incorrectly" symptom.
+        .ax("windows.setFrame",   permission: "windows", denyValue: false) { _, body in
             Windows.setFocusedFrame(
                 x: body["x"] as? Double ?? 0, y: body["y"] as? Double ?? 0,
                 w: body["w"] as? Double ?? 0, h: body["h"] as? Double ?? 0)
         },
-        .sync("windows.minimize",   permission: "windows", denyValue: false) { body in Windows.minimizeFocused(body["value"] as? Bool ?? true) },
-        .sync("windows.fullscreen", permission: "windows", denyValue: false) { body in Windows.fullscreenFocused(body["value"] as? Bool ?? true) },
-        .sync("windows.raise",      permission: "windows", denyValue: false) { _    in Windows.raiseFocused() },
+        .ax("windows.minimize",   permission: "windows", denyValue: false) { _, body in Windows.minimizeFocused(body["value"] as? Bool ?? true) },
+        .ax("windows.fullscreen", permission: "windows", denyValue: false) { _, body in Windows.fullscreenFocused(body["value"] as? Bool ?? true) },
+        .ax("windows.raise",      permission: "windows", denyValue: false) { _, _    in Windows.raiseFocused() },
 
         // Windows-by-id
-        .sync("windows.byId.setFrame",   permission: "windows", denyValue: false) { body in
+        .ax("windows.byId.setFrame",   permission: "windows", denyValue: false) { _, body in
             WindowsByID.setFrame(
                 windowID: CGWindowID((body["id"] as? Int) ?? 0),
                 x: body["x"] as? Double ?? 0, y: body["y"] as? Double ?? 0,
                 w: body["w"] as? Double ?? 0, h: body["h"] as? Double ?? 0)
         },
-        .sync("windows.byId.minimize",   permission: "windows", denyValue: false) { body in WindowsByID.minimize(  windowID: CGWindowID((body["id"] as? Int) ?? 0), body["value"] as? Bool ?? true) },
-        .sync("windows.byId.fullscreen", permission: "windows", denyValue: false) { body in WindowsByID.fullscreen(windowID: CGWindowID((body["id"] as? Int) ?? 0), body["value"] as? Bool ?? true) },
-        .sync("windows.byId.raise",      permission: "windows", denyValue: false) { body in WindowsByID.raise(     windowID: CGWindowID((body["id"] as? Int) ?? 0)) },
-        .sync("windows.byId.focus",      permission: "windows", denyValue: false) { body in WindowsByID.focus(     windowID: CGWindowID((body["id"] as? Int) ?? 0)) },
-        .sync("windows.byId.close",      permission: "windows", denyValue: false) { body in WindowsByID.close(     windowID: CGWindowID((body["id"] as? Int) ?? 0)) },
-        .sync("windows.byId.frame",      permission: "windows") { body in
+        .ax("windows.byId.minimize",   permission: "windows", denyValue: false) { _, body in WindowsByID.minimize(  windowID: CGWindowID((body["id"] as? Int) ?? 0), body["value"] as? Bool ?? true) },
+        .ax("windows.byId.fullscreen", permission: "windows", denyValue: false) { _, body in WindowsByID.fullscreen(windowID: CGWindowID((body["id"] as? Int) ?? 0), body["value"] as? Bool ?? true) },
+        .ax("windows.byId.raise",      permission: "windows", denyValue: false) { _, body in WindowsByID.raise(     windowID: CGWindowID((body["id"] as? Int) ?? 0)) },
+        .ax("windows.byId.focus",      permission: "windows", denyValue: false) { _, body in WindowsByID.focus(     windowID: CGWindowID((body["id"] as? Int) ?? 0)) },
+        .ax("windows.byId.close",      permission: "windows", denyValue: false) { _, body in WindowsByID.close(     windowID: CGWindowID((body["id"] as? Int) ?? 0)) },
+        .ax("windows.byId.frame",      permission: "windows") { _, body in
             guard let r = WindowsByID.frame(windowID: CGWindowID((body["id"] as? Int) ?? 0)) else { return nil }
             return [
                 "x": Int(r.origin.x), "y": Int(r.origin.y),
                 "w": Int(r.size.width), "h": Int(r.size.height)
             ] as [String: Any]
+        },
+        // Per-window snapshot via CGSHWCaptureWindowList (AltTab's trick).
+        // Synchronous, no TCC, works for hidden / minimized / off-space
+        // windows. Distinct from sd.display.snapshot (ScreenCaptureKit).
+        .sync("windows.byId.snapshot",   permission: "windows") { body in
+            WindowsByID.snapshot(
+                windowID: CGWindowID((body["id"] as? Int) ?? 0),
+                format:   body["format"]  as? String ?? "png",
+                quality:  body["quality"] as? Double ?? 0.85
+            )
+        },
+
+        // Atomic multi-window transaction. begin opens a fresh SLSTransaction
+        // and installs the WindowsByID.batchSink that funnels per-id setFrame
+        // calls (and future per-id windows mutations) into it; commit calls
+        // SLSTransactionCommit and clears the sink. Process-global — if a
+        // batch is already open the begin refuses rather than nest, matching
+        // the JS-side single-await model. Hops to main because both AX and
+        // the SkyLight tx symbols want the WindowServer connection thread.
+        .custom("windows.batch.begin", permission: "windows", denyValue: false) { bridge, _, requestId in
+            DispatchQueue.main.async { [weak bridge] in
+                bridge?.respond(requestId: requestId, value: WindowsByID.beginBatch())
+            }
+        },
+        .custom("windows.batch.commit", permission: "windows", denyValue: false) { bridge, _, requestId in
+            DispatchQueue.main.async { [weak bridge] in
+                bridge?.respond(requestId: requestId, value: WindowsByID.commitBatch())
+            }
         },
 
         // Spaces — returns array; pre-refactor returned `[]` on deny.
@@ -892,14 +1045,16 @@ final class Bridge: NSObject, WKScriptMessageHandler {
                 bridge.respond(requestId: requestId, value: NSNull()); return
             }
             // Optional skhd-style scoping. `mode` gates dispatch on the
-            // active HotkeyRegistry mode; `apps` gates on the frontmost
-            // app's bundleID. Both nil = current always-on behavior.
+            // active HotkeyRegistry mode; `apps` whitelists the frontmost
+            // app's bundleID; `excludeApps` blacklists it. All nil = current
+            // always-on behavior. apps + excludeApps compose (both must pass).
             let mode = body["mode"] as? String
             let apps = body["apps"] as? [String]
+            let excludeApps = body["excludeApps"] as? [String]
             let id = bridge.nextHotkeyId
             bridge.nextHotkeyId += 1
             let token = HotkeyRegistry.shared.bind(
-                spec: spec, mode: mode, apps: apps
+                spec: spec, mode: mode, apps: apps, excludeApps: excludeApps
             ) { [weak bridge] in
                 // Fire on the same hop pattern as fireBang / fireHotkey — the
                 // Carbon callback already runs on main, but the eval has to be
@@ -1016,7 +1171,16 @@ final class Bridge: NSObject, WKScriptMessageHandler {
                             "x": Int(frame.origin.x),
                             "y": Int(frame.origin.y),
                             "w": Int(frame.size.width),
-                            "h": Int(frame.size.height)
+                            "h": Int(frame.size.height),
+                            // Per-window corner radius (AX-derived, mirrors
+                            // WindowScape/outline.lua getCornerRadius):
+                            // 26 for windows with a toolbar, 16 otherwise,
+                            // 0 for system/borderless. Cached on the handle
+                            // — the AX walk runs once at attach, not every
+                            // tick. Spec authors should round their border
+                            // rects with THIS value to match the actual
+                            // window shape (Finder=26, Terminal=16, etc.).
+                            "radius": h.cachedCornerRadius
                         ],
                         "id": Int(h.targetWID)
                     ]
@@ -1193,74 +1357,68 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         FileHandle.standardError.write(Data("stackd: \(s)\n".utf8))
     }
 
+    // (permission, channel) tuples driving replayState. Same keys lastState
+    // is written under in startXxx — adding a new channel here is the only
+    // wiring needed for "ready" replay to find it.
+    private static let replayTable: [(permission: String, channel: String)] = [
+        ("battery",     "battery"),
+        ("mouse",       "mouse"),
+        ("app",         "frontApp"),
+        ("windows",     "focusedWindow"),
+        ("windows",     "windowsAll"),
+        ("appearance",  "appearance"),
+        ("input",       "inputLayout"),
+        ("net",         "netWifi"),
+        ("net",         "netLan"),
+        ("net",         "netPath"),
+        ("audio",       "audioOutput"),
+        ("display",     "displays"),
+        ("media",       "media"),
+        ("pasteboard",  "pasteboard"),
+        ("apps",        "apps"),
+        ("spaces",      "spaces"),
+        ("caffeinate",  "caffeinate"),
+        ("sensors",     "sensors"),
+        ("location",    "location"),
+        ("usb",         "usb"),
+        ("camera",      "camera"),
+        ("host",        "hostLoad"),
+        ("touchdevice", "touchdevice"),
+        ("displayLink", "displayLink"),
+    ]
+
     private func replayState() {
-        if permissions.contains("battery"), let json = lastBattery {
-            push(channel: "battery", json: json)
+        for (permission, channel) in Bridge.replayTable {
+            guard permissions.contains(permission),
+                  let json = lastState[channel] else { continue }
+            push(channel: channel, json: json)
         }
-        if permissions.contains("mouse"), let json = lastMouse {
-            push(channel: "mouse", json: json)
+    }
+
+    /// Wire a snapshot-driven channel: prime once, then refire on every
+    /// observer tick. Returning nil from `snapshot` skips the push — matches
+    /// the "no data yet" cases (host.load before its first diff, touchdevice
+    /// before the first frame, displayLink before vsync).
+    ///
+    /// Dedupe via lastState[name]: re-emitting an identical JSON blob is
+    /// pure overhead (WebKit roundtrip + signal subscribers re-running), and
+    /// most observers (Battery, Audio, Display) fire on broad notifications
+    /// where the underlying snapshot often hasn't actually changed.
+    private func startChannel(
+        name: String,
+        observer: RefCountedObserver,
+        snapshot: @escaping () -> Any?
+    ) {
+        let pushFn: () -> Void = { [weak self] in
+            guard let self = self else { return }
+            guard let value = snapshot() else { return }
+            let json = Bridge.jsonify(value)
+            guard json != self.lastState[name] else { return }
+            self.lastState[name] = json
+            self.push(channel: name, json: json)
         }
-        if permissions.contains("app"), let json = lastFrontApp {
-            push(channel: "frontApp", json: json)
-        }
-        if permissions.contains("windows"), let json = lastFocusedWindow {
-            push(channel: "focusedWindow", json: json)
-        }
-        if permissions.contains("windows"), let json = lastWindowsAll {
-            push(channel: "windowsAll", json: json)
-        }
-        if permissions.contains("appearance"), let json = lastAppearance {
-            push(channel: "appearance", json: json)
-        }
-        if permissions.contains("input"), let json = lastInput {
-            push(channel: "inputLayout", json: json)
-        }
-        if permissions.contains("net") {
-            if let json = lastNetWifi { push(channel: "netWifi", json: json) }
-            if let json = lastNetLan  { push(channel: "netLan",  json: json) }
-        }
-        if permissions.contains("audio"), let json = lastAudio {
-            push(channel: "audioOutput", json: json)
-        }
-        if permissions.contains("display"), let json = lastDisplay {
-            push(channel: "displays", json: json)
-        }
-        if permissions.contains("media"), let json = lastMedia {
-            push(channel: "media", json: json)
-        }
-        if permissions.contains("pasteboard"), let json = lastPasteboard {
-            push(channel: "pasteboard", json: json)
-        }
-        if permissions.contains("apps"), let json = lastApps {
-            push(channel: "apps", json: json)
-        }
-        if permissions.contains("spaces"), let json = lastSpaces {
-            push(channel: "spaces", json: json)
-        }
-        if permissions.contains("caffeinate"), let json = lastCaffeinate {
-            push(channel: "caffeinate", json: json)
-        }
-        if permissions.contains("sensors"), let json = lastSensors {
-            push(channel: "sensors", json: json)
-        }
-        if permissions.contains("location"), let json = lastLocation {
-            push(channel: "location", json: json)
-        }
-        if permissions.contains("usb"), let json = lastUSB {
-            push(channel: "usb", json: json)
-        }
-        if permissions.contains("camera"), let json = lastCamera {
-            push(channel: "camera", json: json)
-        }
-        if permissions.contains("host"), let json = lastHostLoad {
-            push(channel: "hostLoad", json: json)
-        }
-        if permissions.contains("touchdevice"), let json = lastTouchDevice {
-            push(channel: "touchdevice", json: json)
-        }
-        if permissions.contains("displayLink"), let json = lastDisplayLink {
-            push(channel: "displayLink", json: json)
-        }
+        pushFn()
+        scope.adopt(observer.subscribe(pushFn))
     }
 
     private func startBattery() {
@@ -1269,8 +1427,8 @@ final class Bridge: NSObject, WKScriptMessageHandler {
             let pct = Battery.percent()
             let charging = Battery.isCharging()
             let json = "{\"percent\":\(pct),\"charging\":\(charging)}"
-            if json == self.lastBattery { return }     // skip no-op push
-            self.lastBattery = json
+            if json == self.lastState["battery"] { return }     // skip no-op push
+            self.lastState["battery"] = json
             self.push(channel: "battery", json: json)
         }
         pushFn()
@@ -1282,8 +1440,8 @@ final class Bridge: NSObject, WKScriptMessageHandler {
             guard let self = self else { return }
             let p = Mouse.location()
             let json = "{\"x\":\(Int(p.x)),\"y\":\(Int(p.y))}"
-            if json == self.lastMouse { return }       // idle cursor → no push
-            self.lastMouse = json
+            if json == self.lastState["mouse"] { return }       // idle cursor → no push
+            self.lastState["mouse"] = json
             self.push(channel: "mouse", json: json)
         }
         pushFn()
@@ -1291,41 +1449,46 @@ final class Bridge: NSObject, WKScriptMessageHandler {
     }
 
     private func startAppearance() {
-        let pushFn: () -> Void = { [weak self] in
-            guard let self = self else { return }
-            let json = Bridge.jsonify(Appearance.current())
-            if json == self.lastAppearance { return }
-            self.lastAppearance = json
-            self.push(channel: "appearance", json: json)
+        startChannel(name: "appearance", observer: AppearanceObserver.shared) {
+            Appearance.current()
         }
-        pushFn()
-        scope.adopt(AppearanceObserver.shared.subscribe(pushFn))
     }
 
     private func startInput() {
-        let pushFn: () -> Void = { [weak self] in
-            guard let self = self else { return }
-            let json = Bridge.jsonify(Input.currentLayout())
-            if json == self.lastInput { return }
-            self.lastInput = json
-            self.push(channel: "inputLayout", json: json)
+        startChannel(name: "inputLayout", observer: InputObserver.shared) {
+            Input.currentLayout()
         }
-        pushFn()
-        scope.adopt(InputObserver.shared.subscribe(pushFn))
     }
 
+    // Multi-channel: one observer (NetworkObserver) feeds three sd.net.*
+    // channels. Each branch independently dedupes against lastState so a wifi
+    // SSID change doesn't refire lan / path. Keeps its bespoke shape rather
+    // than splitting into three observers — the underlying NWPathMonitor is
+    // shared.
     private func startNetwork() {
         let pushFn: () -> Void = { [weak self] in
             guard let self = self else { return }
             let lanJson = Bridge.jsonify(NetLAN.current())
-            if lanJson != self.lastNetLan {
-                self.lastNetLan = lanJson
+            if lanJson != self.lastState["netLan"] {
+                self.lastState["netLan"] = lanJson
                 self.push(channel: "netLan", json: lanJson)
             }
             let wifiJson = Bridge.jsonify(NetWiFi.current())
-            if wifiJson != self.lastNetWifi {
-                self.lastNetWifi = wifiJson
+            if wifiJson != self.lastState["netWifi"] {
+                self.lastState["netWifi"] = wifiJson
                 self.push(channel: "netWifi", json: wifiJson)
+            }
+            // sd.net.path — derived from the same NWPathMonitor (no parallel
+            // monitor). NetworkObserver caches the latest NWPath; the priming
+            // fire() before any path callback can land sees nil, so skip the
+            // push until the first real update arrives. That matches
+            // sd.host.load / sd.touchdevice's "no data yet" handling.
+            if let path = NetworkObserver.shared.latestPath {
+                let pathJson = Bridge.jsonify(NetPath.snapshot(from: path))
+                if pathJson != self.lastState["netPath"] {
+                    self.lastState["netPath"] = pathJson
+                    self.push(channel: "netPath", json: pathJson)
+                }
             }
         }
         pushFn()
@@ -1333,37 +1496,28 @@ final class Bridge: NSObject, WKScriptMessageHandler {
     }
 
     private func startAudio() {
-        let pushFn: () -> Void = { [weak self] in
-            guard let self = self else { return }
-            let json = Bridge.jsonify(Audio.current())
-            if json == self.lastAudio { return }
-            self.lastAudio = json
-            self.push(channel: "audioOutput", json: json)
+        startChannel(name: "audioOutput", observer: AudioObserver.shared) {
+            Audio.current()
         }
-        pushFn()
-        scope.adopt(AudioObserver.shared.subscribe(pushFn))
     }
 
     private func startDisplay() {
-        let pushFn: () -> Void = { [weak self] in
-            guard let self = self else { return }
-            let json = Bridge.jsonify(Display.all())
-            if json == self.lastDisplay { return }
-            self.lastDisplay = json
-            self.push(channel: "displays", json: json)
+        startChannel(name: "displays", observer: DisplayObserver.shared) {
+            Display.all()
         }
-        pushFn()
-        scope.adopt(DisplayObserver.shared.subscribe(pushFn))
     }
 
+    // Async snapshot: Media.nowPlaying delivers the dict on a background
+    // queue, so the dedupe/push hop has to land on main itself. Doesn't fit
+    // the synchronous startChannel helper.
     private func startMedia() {
         let pushFn: () -> Void = { [weak self] in
             Media.nowPlaying { info in
                 guard let self = self else { return }
                 let json = info.map { Bridge.jsonify($0) } ?? "null"
                 DispatchQueue.main.async {
-                    if json == self.lastMedia { return }
-                    self.lastMedia = json
+                    if json == self.lastState["media"] { return }
+                    self.lastState["media"] = json
                     self.push(channel: "media", json: json)
                 }
             }
@@ -1373,27 +1527,24 @@ final class Bridge: NSObject, WKScriptMessageHandler {
     }
 
     private func startPasteboard() {
-        let pushFn: () -> Void = { [weak self] in
-            guard let self = self else { return }
+        startChannel(name: "pasteboard", observer: PasteboardObserver.shared) {
             // The signal payload is the current string (or null) — that's what
             // every consumer (CloudPad URL copy, Palette clipboard verbs,
             // Muse paste-at-caret) actually wants.
             let s = Pasteboard.getString() ?? ""
-            let json = Bridge.jsonify(["text": s, "changeCount": Pasteboard.changeCount])
-            if json == self.lastPasteboard { return }
-            self.lastPasteboard = json
-            self.push(channel: "pasteboard", json: json)
+            return ["text": s, "changeCount": Pasteboard.changeCount]
         }
-        pushFn()
-        scope.adopt(PasteboardObserver.shared.subscribe(pushFn))
     }
 
+    // Custom: snapshot has a side effect (computing the apps.changed delta
+    // vs lastAppsByBundle) and emits a second channel. Doesn't fit
+    // startChannel.
     private func startApps() {
         let pushFn: () -> Void = { [weak self] in
             guard let self = self else { return }
             let snapshot = Apps.running()
             let json = Bridge.jsonify(snapshot)
-            if json == self.lastApps { return }
+            if json == self.lastState["apps"] { return }
 
             // Compute delta vs last snapshot before updating cache. Consumers
             // that only care about transitions (apptimeout, notunes) subscribe
@@ -1434,7 +1585,7 @@ final class Bridge: NSObject, WKScriptMessageHandler {
                 removed.append(app)
             }
             self.lastAppsByBundle = nowByBundle
-            self.lastApps = json
+            self.lastState["apps"] = json
             self.push(channel: "apps", json: json)
             // Only emit a non-empty delta — first-tick "every app added" is
             // noise (consumers already get the same data on sd.apps.running).
@@ -1452,144 +1603,92 @@ final class Bridge: NSObject, WKScriptMessageHandler {
     }
 
     private func startSpaces() {
-        let pushFn: () -> Void = { [weak self] in
-            guard let self = self else { return }
-            let json = Bridge.jsonify(Spaces.all())
-            if json == self.lastSpaces { return }
-            self.lastSpaces = json
-            self.push(channel: "spaces", json: json)
+        startChannel(name: "spaces", observer: SpacesObserver.shared) {
+            Spaces.all()
         }
-        pushFn()
-        scope.adopt(SpacesObserver.shared.subscribe(pushFn))
     }
 
     private func startCaffeinate() {
-        let pushFn: () -> Void = { [weak self] in
-            guard let self = self else { return }
-            let json = Bridge.jsonify(Caffeinate.snapshot())
-            if json == self.lastCaffeinate { return }
-            self.lastCaffeinate = json
-            self.push(channel: "caffeinate", json: json)
+        startChannel(name: "caffeinate", observer: CaffeinateObserver.shared) {
+            Caffeinate.snapshot()
         }
-        pushFn()
-        scope.adopt(CaffeinateObserver.shared.subscribe(pushFn))
     }
 
     private func startDisplayLink() {
-        let pushFn: () -> Void = { [weak self] in
-            guard let self = self else { return }
-            guard let snap = DisplayLink.snapshot() else { return }
-            let json = Bridge.jsonify(snap)
-            if json == self.lastDisplayLink { return }
-            self.lastDisplayLink = json
-            self.push(channel: "displayLink", json: json)
+        // First-tick nil (vsync hasn't landed yet) → snapshot returns nil →
+        // startChannel skips the push.
+        startChannel(name: "displayLink", observer: DisplayLinkObserver.shared) {
+            DisplayLink.snapshot()
         }
-        pushFn()
-        scope.adopt(DisplayLinkObserver.shared.subscribe(pushFn))
     }
 
     private func startSensors() {
-        let pushFn: () -> Void = { [weak self] in
-            guard let self = self else { return }
-            let json = Bridge.jsonify(Sensors.snapshot())
-            if json == self.lastSensors { return }
-            self.lastSensors = json
-            self.push(channel: "sensors", json: json)
+        startChannel(name: "sensors", observer: SensorsObserver.shared) {
+            Sensors.snapshot()
         }
-        pushFn()
-        scope.adopt(SensorsObserver.shared.subscribe(pushFn))
     }
 
     private func startLocation() {
-        let pushFn: () -> Void = { [weak self] in
-            guard let self = self else { return }
-            // snapshot() is nil until authorization + first fix; serialize
-            // explicitly as "null" so the JS channel sees that initial state.
-            let json = Location.snapshot().map(Bridge.jsonify) ?? "null"
-            if json == self.lastLocation { return }
-            self.lastLocation = json
-            self.push(channel: "location", json: json)
+        // snapshot() is nil until authorization + first fix; emit an explicit
+        // "null" so the JS channel sees that initial state instead of staying
+        // un-fired. Wrap in [NSNull()] sentinel to flow through jsonify as
+        // "null".
+        startChannel(name: "location", observer: LocationObserver.shared) {
+            return Location.snapshot() ?? NSNull()
         }
-        pushFn()
-        scope.adopt(LocationObserver.shared.subscribe(pushFn))
     }
 
     private func startUSB() {
-        let pushFn: () -> Void = { [weak self] in
-            guard let self = self else { return }
-            let json = Bridge.jsonify(USB.snapshot())
-            if json == self.lastUSB { return }
-            self.lastUSB = json
-            self.push(channel: "usb", json: json)
+        startChannel(name: "usb", observer: USBObserver.shared) {
+            USB.snapshot()
         }
-        pushFn()
-        scope.adopt(USBObserver.shared.subscribe(pushFn))
     }
 
     private func startCamera() {
-        let pushFn: () -> Void = { [weak self] in
-            guard let self = self else { return }
-            let json = Bridge.jsonify(Camera.snapshot())
-            if json == self.lastCamera { return }
-            self.lastCamera = json
-            self.push(channel: "camera", json: json)
+        startChannel(name: "camera", observer: CameraObserver.shared) {
+            Camera.snapshot()
         }
-        pushFn()
-        scope.adopt(CameraObserver.shared.subscribe(pushFn))
     }
 
     private func startHost() {
-        let pushFn: () -> Void = { [weak self] in
-            guard let self = self else { return }
-            // First tick returns nil — CPU fractions need a prior sample to
-            // diff against. Skip the push; the next 2s tick has the value.
-            guard let snap = Host.loadSnapshot() else { return }
-            let json = Bridge.jsonify(snap)
-            if json == self.lastHostLoad { return }
-            self.lastHostLoad = json
-            self.push(channel: "hostLoad", json: json)
+        // First tick returns nil — CPU fractions need a prior sample to diff
+        // against. startChannel skips the push; the next 2s tick has the value.
+        startChannel(name: "hostLoad", observer: HostObserver.shared) {
+            Host.loadSnapshot()
         }
-        pushFn()
-        scope.adopt(HostObserver.shared.subscribe(pushFn))
     }
 
     private func startTouchDevice() {
-        let pushFn: () -> Void = { [weak self] in
-            guard let self = self else { return }
-            // No-frame state (untouched trackpad before first event) skips
-            // the push — JS sees the channel stay at its null initial.
-            guard let snap = TouchDevice.snapshot() else { return }
-            let json = Bridge.jsonify(snap)
-            if json == self.lastTouchDevice { return }
-            self.lastTouchDevice = json
-            self.push(channel: "touchdevice", json: json)
+        // No-frame state (untouched trackpad before first event) → nil →
+        // startChannel skips. JS sees the channel stay at its null initial.
+        startChannel(name: "touchdevice", observer: TouchDeviceObserver.shared) {
+            TouchDevice.snapshot()
         }
-        pushFn()
-        scope.adopt(TouchDeviceObserver.shared.subscribe(pushFn))
     }
 
-    // App activations come from NSWorkspace; within-app focus / title changes
-    // come from a per-pid AXObserver (FrontmostWindowObserver) that rebinds
-    // on each NSWorkspace.didActivateApplicationNotification. No polling.
+    // Dual-observer: NSWorkspace activations + per-pid FrontmostWindowObserver
+    // for within-app focus/title changes. Emits up to three channels per tick
+    // (frontApp / focusedWindow / windowsAll) gated on the includeApp /
+    // includeWindows flags. Doesn't fit startChannel's single-channel shape.
     private func startWorkspace(includeApp: Bool, includeWindows: Bool) {
         let pushFn: () -> Void = { [weak self] in
             guard let self = self else { return }
             if includeApp, let app = App.frontmostApp() {
                 let json = Bridge.jsonify(app)
-                if json != self.lastFrontApp {
-                    self.lastFrontApp = json
+                if json != self.lastState["frontApp"] {
+                    self.lastState["frontApp"] = json
                     self.push(channel: "frontApp", json: json)
                 }
             }
             if includeWindows {
                 let json = Windows.focused().map(Bridge.jsonify) ?? "null"
-                if json != self.lastFocusedWindow {
-                    self.lastFocusedWindow = json
+                if json != self.lastState["focusedWindow"] {
+                    self.lastState["focusedWindow"] = json
                     self.push(channel: "focusedWindow", json: json)
                 }
                 let allJson = Bridge.jsonify(Windows.all())
-                if allJson != self.lastWindowsAll {
-                    self.lastWindowsAll = allJson
+                if allJson != self.lastState["windowsAll"] {
+                    self.lastState["windowsAll"] = allJson
                     self.push(channel: "windowsAll", json: allJson)
                 }
             }
