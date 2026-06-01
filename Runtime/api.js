@@ -88,6 +88,14 @@ window.__sd_broadcast_fire = (id, payload) => {
   const fn = broadcastHandlers.get(id);
   if (fn) fn(payload);
 };
+// Custom-URL-scheme callbacks routed by mint id. Populated by
+// sd.urlhandler.register. Native fires window.__sd_urlhandler_fire(id, event)
+// on every matching GURL Apple Event for the registered scheme.
+const urlHandlerHandlers = new Map();
+window.__sd_urlhandler_fire = (id, payload) => {
+  const fn = urlHandlerHandlers.get(id);
+  if (fn) fn(payload);
+};
 // Streamed proc callbacks routed by mint id. Populated by sd.proc.stream.
 // Native fires window.__sd_proc_stream_fire(id, {stream, chunk}) for each
 // stdout/stderr chunk and once at exit with {stream:"exit", code, signal?}.
@@ -803,6 +811,48 @@ export const sd = {
     },
     unobserve(id) {
       return unregisterHandler(broadcastHandlers, id, { type: "broadcasts.unobserve", id });
+    }
+  },
+  // Custom URL-scheme handlers. Register a callback for `<scheme>://...`
+  // URLs that other apps open; the callback fires with the parsed URL +
+  // query params each time a matching URL is routed to stackd. Backed by
+  // NSAppleEventManager's GURL handler.
+  //
+  //   const h = await sd.urlhandler.register("myscheme", (event) => {
+  //     console.log(event);
+  //     // → { url: "myscheme://foo/bar?baz=1#x",
+  //     //     scheme: "myscheme", host: "foo", path: "/bar",
+  //     //     query: { baz: "1" }, fragment: "x" }
+  //   });
+  //   ...later...
+  //   await h.unregister();
+  //
+  // Multi-value query keys collapse last-write-wins; re-parse `event.url`
+  // with URLSearchParams if you need every occurrence.
+  //
+  // Important: macOS only routes `myscheme://...` to stackd if the daemon's
+  // Info.plist declares the scheme under CFBundleURLTypes. During development
+  // (running `.build/stackd` directly, no `.app` bundle) custom-scheme URLs
+  // won't reach the handler at all — the API surface is wired and ready for
+  // when stackd ships bundled. The standard `stackd://` scheme is handled
+  // by URLSchemeHandler.swift and is independent of this API.
+  //
+  // Permission: "urlhandler".
+  urlhandler: {
+    async register(scheme, fn) {
+      const id = await registerHandler(urlHandlerHandlers, {
+        type: "urlhandler.register",
+        scheme: String(scheme ?? "")
+      }, fn);
+      if (id == null) return null;
+      return {
+        id,
+        unregister() {
+          return unregisterHandler(urlHandlerHandlers, id, {
+            type: "urlhandler.unregister", id
+          });
+        }
+      };
     }
   },
   // WebKit overlay pinned to a target window the stack doesn't own. The

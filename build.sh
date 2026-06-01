@@ -28,6 +28,7 @@ SWIFT_SOURCES=(
   Sources/DataSources/Input.swift
   Sources/DataSources/Location.swift
   Sources/DataSources/Broadcasts.swift
+  Sources/DataSources/URLHandler.swift
   Sources/DataSources/Menubar.swift
 
 

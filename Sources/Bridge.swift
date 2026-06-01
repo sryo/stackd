@@ -33,6 +33,12 @@ final class Bridge: NSObject, WKScriptMessageHandler {
     // JS-bound DN observers: id → Token. Scope drains them on unload.
     fileprivate var broadcastTokens: [Int: Token] = [:]
     fileprivate var nextBroadcastId: Int = 1
+    // JS-bound URL-scheme handlers: id → Token. Each Token removes this
+    // stack's subscriber from the per-scheme SchemeRouter bucket; scope
+    // drains them on unload so reloading a stack doesn't accumulate
+    // duplicate handlers for the same scheme.
+    fileprivate var urlHandlerTokens: [Int: Token] = [:]
+    fileprivate var nextURLHandlerId: Int = 1
     // sd.overlay handles: id → (handle, displayLink subscription token).
     // Each handle owns a borderless NSPanel + WKWebView pinned to a foreign
     // target wid; the token drives per-vsync reposition + sd.target push via
@@ -296,6 +302,16 @@ final class Bridge: NSObject, WKScriptMessageHandler {
             guard let self = self else { return }
             for (_, t) in self.broadcastTokens { t.cancel() }
             self.broadcastTokens.removeAll()
+        })
+        // Same shape for JS-bound URL-scheme handlers — drop every per-scheme
+        // subscriber this stack added to the process-global SchemeRouter so
+        // reload-then-register doesn't leak handlers (the NSAppleEventManager
+        // slot itself is install-once and stays — SkyLight-style — but the
+        // per-scheme fan-out bucket only keeps entries with live subscribers).
+        scope.adopt(Token { [weak self] in
+            guard let self = self else { return }
+            for (_, t) in self.urlHandlerTokens { t.cancel() }
+            self.urlHandlerTokens.removeAll()
         })
         // Caffeinate assertions — IOPMAssertionRelease every wake-lock this
         // stack took. Stacks that forget to release on unload (or crash
@@ -1360,6 +1376,45 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         .syncBridge("broadcasts.unobserve", permission: "broadcasts", denyValue: false) { b, body in
             guard let id = body["id"] as? Int,
                   let t = b.broadcastTokens.removeValue(forKey: id) else { return false }
+            t.cancel()
+            return true
+        },
+
+        // ── Custom URL scheme handler ──────────────────────────────────────
+        // Register a callback for `<scheme>://…` URLs opened by other apps.
+        // NSAppleEventManager's GURL handler is installed lazily on first
+        // subscribe and stays for the daemon lifetime; per-stack subscribers
+        // live in a SchemeRouter bucket and drain on stack unload.
+        //
+        // Limitation: macOS only ROUTES a custom scheme to stackd if the
+        // daemon's Info.plist declares it under CFBundleURLTypes. Today the
+        // daemon ships as a plain `.build/stackd` binary (no Info.plist),
+        // so the API surface works but URL events won't actually arrive
+        // until stackd ships as an `.app` bundle with the scheme declared.
+        // See Sources/DataSources/URLHandler.swift for the rationale.
+        //
+        // Same mint-id + window-global fire pattern as broadcasts.observe.
+        // Permission: "urlhandler".
+        .custom("urlhandler.register", permission: "urlhandler") { bridge, body, requestId in
+            guard let scheme = body["scheme"] as? String, !scheme.isEmpty else {
+                bridge.respond(requestId: requestId, value: NSNull()); return
+            }
+            let id = bridge.nextURLHandlerId
+            bridge.nextURLHandlerId += 1
+            let token = URLHandler.observe(scheme: scheme) { [weak bridge] payload in
+                guard let webView = bridge?.webView else { return }
+                let json = Bridge.jsonify(payload)
+                DispatchQueue.main.async {
+                    webView.evaluateJavaScript("window.__sd_urlhandler_fire && window.__sd_urlhandler_fire(\(id), \(json));",
+                                               completionHandler: nil)
+                }
+            }
+            bridge.urlHandlerTokens[id] = token
+            bridge.respond(requestId: requestId, value: id)
+        },
+        .syncBridge("urlhandler.unregister", permission: "urlhandler", denyValue: false) { b, body in
+            guard let id = body["id"] as? Int,
+                  let t = b.urlHandlerTokens.removeValue(forKey: id) else { return false }
             t.cancel()
             return true
         },
