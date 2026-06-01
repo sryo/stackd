@@ -32,6 +32,7 @@ TEST_SOURCES=(
   Tests/CameraStreamTests.swift
   Tests/SpeechSTTTests.swift
   Tests/MenubarItemsTests.swift
+  Tests/AppIntentsTests.swift
   Tests/TemplateEngineTests.swift
   Tests/main.swift
 )

@@ -53,6 +53,7 @@ SWIFT_SOURCES=(
   Sources/DataSources/Notify.swift
   Sources/DataSources/Devices.swift
   Sources/DataSources/Camera.swift
+  Sources/DataSources/AppIntents.swift
 )
 
 C_SOURCES=(
@@ -65,6 +66,7 @@ swiftc -O \
   -import-objc-header Sources/C/StackdBridge.h \
   -Xcc -Wno-zero-length-array \
   -framework AppKit \
+  -framework AppIntents \
   -framework AVFoundation \
   -framework Carbon \
   -framework CoreLocation \

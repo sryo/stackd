@@ -1,0 +1,45 @@
+<!doctype html>
+<!--
+  Demo: drive this stack from Shortcuts.app via the `Run stackd bang`
+  AppIntent.
+
+  Setup:
+    1. Build & run stackd (`./build.sh && .build/stackd` once, then leave
+       your usual daemon running — the binary just needs to have launched
+       at least once so Shortcuts can discover the intent).
+    2. Drop this folder into ~/stackd/stacks/ (or symlink it).
+    3. Open Shortcuts.app → New Shortcut → search "Run stackd bang".
+    4. Set parameters:
+         Bang name:      demo.clicked
+         Payload (JSON): {"hello":"world","count":7}
+    5. Run the shortcut. This stack should update with the received
+       payload.
+
+  Equivalent CLI for verification (no Shortcuts needed):
+    stackd bang demo.clicked hello=world count=7
+
+  Why this works: the AppIntent runs inside Shortcuts.app's process and
+  reaches the daemon via the same Unix-socket IPC that the CLI uses, so
+  the bang is fired exactly as if you'd typed the CLI command.
+-->
+<html>
+<head><meta charset="utf-8"></head>
+<body style="margin:0; font-family: -apple-system, system-ui; color: #f5f5f7; background: transparent;">
+  <div style="padding: 12px 14px; background: rgba(30,30,40,0.88); border-radius: 10px; line-height: 1.45;">
+    <div style="font-weight: 600; margin-bottom: 6px;">AppIntents demo</div>
+    <div style="font-size: 12px; opacity: 0.75;">Last bang:</div>
+    <div id="last" style="font-family: ui-monospace, Menlo, monospace; font-size: 12px; word-break: break-all;">
+      (waiting — fire "demo.clicked" from Shortcuts.app)
+    </div>
+  </div>
+  <script type="module">
+    // Bang handlers are window globals: `onBang_<sanitized name>(detail)`.
+    // `demo.clicked` → `onBang_demo_clicked`.
+    window.onBang_demo_clicked = (detail) => {
+      const stamp = new Date().toLocaleTimeString();
+      const body = JSON.stringify(detail || {}, null, 0);
+      document.getElementById("last").textContent = `[${stamp}] ${body}`;
+    };
+  </script>
+</body>
+</html>

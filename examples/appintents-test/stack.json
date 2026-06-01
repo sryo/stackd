@@ -1,0 +1,8 @@
+{
+  "id": "appintents-test",
+  "name": "AppIntents test",
+  "anchor": { "edge": "top-right", "inset": [16, 16] },
+  "size":   { "w": 320, "h": 120 },
+  "handles": ["demo.clicked"],
+  "permissions": []
+}
