@@ -28,13 +28,9 @@ struct EventTapPredicate {
     var keyCodes: Set<Int64>?       // matches CGEventField.keyboardEventKeycode
     var flagsMask: UInt64?          // (event.flags.rawValue & flagsMask) == flagsMask
     var flagsAny: UInt64?           // (event.flags.rawValue & flagsAny) != 0
-    /// Width of a band around any active display's corner. mouseMoved events
-    /// inside the band match. The FrameCorners use case: consume mouseMoved
-    /// when the cursor is in a 2 px band around any registered corner.
-    var inCornerBand: CGFloat?
 
     var isEmpty: Bool {
-        keyCodes == nil && flagsMask == nil && flagsAny == nil && inCornerBand == nil
+        keyCodes == nil && flagsMask == nil && flagsAny == nil
     }
 
     func matches(_ event: CGEvent) -> Bool {
@@ -45,20 +41,6 @@ struct EventTapPredicate {
         let f = event.flags.rawValue
         if let mask = flagsMask, (f & mask) != mask { return false }
         if let any  = flagsAny,  (f & any)  == 0    { return false }
-        if let band = inCornerBand {
-            let loc = event.location
-            var hit = false
-            for screen in NSScreen.screens {
-                guard let cgID = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID else { continue }
-                let b = CGDisplayBounds(cgID)
-                let nearLeft   = loc.x >= b.minX && loc.x <= b.minX + band
-                let nearRight  = loc.x <= b.maxX - 1 && loc.x >= b.maxX - 1 - band
-                let nearTop    = loc.y >= b.minY && loc.y <= b.minY + band
-                let nearBottom = loc.y <= b.maxY - 1 && loc.y >= b.maxY - 1 - band
-                if (nearLeft || nearRight) && (nearTop || nearBottom) { hit = true; break }
-            }
-            if !hit { return false }
-        }
         return true
     }
 }

@@ -50,9 +50,6 @@ final class HotkeyRegistry {
             case "ctrl", "control":          mods |= UInt32(controlKey)
             case "alt", "option", "opt":     mods |= UInt32(optionKey)
             case "shift":                    mods |= UInt32(shiftKey)
-            // skhd aliases — composite modifiers users keep asking for.
-            case "hyper":                    mods |= UInt32(cmdKey | controlKey | optionKey | shiftKey)
-            case "meh":                      mods |= UInt32(controlKey | optionKey | shiftKey)
             case "fn":                       break // No Carbon support; skip.
             default: keyToken = p
             }
