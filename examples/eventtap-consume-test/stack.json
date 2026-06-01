@@ -1,0 +1,12 @@
+{
+  "id": "eventtap-consume-test",
+  "name": "Eventtap consume",
+  "anchor": { "edge": "top-right", "inset": [320, 16] },
+  "size": { "w": 260, "h": 84 },
+  "clickThrough": true,
+  "permissions": [],
+  "eventtap": [
+    { "event": "keyDown", "callback": "onSpace", "consume": true,
+      "if": { "keyCode": 49 } }
+  ]
+}

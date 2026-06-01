@@ -1,0 +1,35 @@
+<!doctype html>
+<html><head><meta charset="utf-8">
+<style>
+  html, body { margin: 0; padding: 0; height: 100%; background: transparent;
+               font: 11px ui-monospace, Menlo, monospace; color: #fff;
+               user-select: none; }
+  .card {
+    height: 100%; box-sizing: border-box;
+    padding: 10px 14px;
+    background: rgba(20, 20, 22, 0.78);
+    border-radius: 12px;
+    -webkit-backdrop-filter: blur(20px) saturate(180%);
+    display: flex; flex-direction: column; gap: 4px; justify-content: center;
+  }
+  .label { font-size: 9px; opacity: 0.55; text-transform: uppercase;
+           letter-spacing: 0.1em; }
+  .big { font-size: 14px; font-variant-numeric: tabular-nums; }
+  .hint { opacity: 0.55; }
+</style>
+</head><body>
+<div class="card">
+  <div class="label">consumed spacebars</div>
+  <div class="big" id="count">0</div>
+  <div class="hint">Focus any other app and hit Space — it should do nothing.</div>
+</div>
+<script type="module">
+  // The manifest registers a consuming tap for keyDown with the predicate
+  // { keyCode: 49 } (49 = Space). The CGEventTap callback drops every
+  // matching event before the focused app sees it, then fires onSpace
+  // asynchronously so we can count what we swallowed.
+  const out = document.getElementById("count");
+  let n = 0;
+  window.onTap_onSpace = () => { out.textContent = String(++n); };
+</script>
+</body></html>
