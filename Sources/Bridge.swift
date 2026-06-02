@@ -1869,12 +1869,19 @@ final class Bridge: NSObject, WKScriptMessageHandler {
                 let token = DisplayLinkObserver.shared.subscribe { [weak bridge] in
                     guard let bridge = bridge,
                           let h = bridge.overlayHandles[id] else { return }
-                    // Skip if the target's gone or hidden — avoids repositioning
-                    // into the void when the user minimizes / closes the
-                    // window mid-overlay. The panel stays alive but stale
-                    // (last frame is offscreen until the target returns).
+                    // Target gone or hidden (user closed / minimized /
+                    // cmd-H'd the underlying window mid-overlay): hide
+                    // the panel and bail. Without this, the panel stayed
+                    // drawn at lastFrame after the target vanished — a
+                    // ghost border floating in space. Show it again on
+                    // the next tick where the target returns (e.g. user
+                    // un-minimizes).
                     guard Overlay.isOrderedIn(h.targetWID),
-                          let frame = Overlay.bounds(of: h.targetWID) else { return }
+                          let frame = Overlay.bounds(of: h.targetWID) else {
+                        if h.panel.isVisible { h.panel.orderOut(nil) }
+                        return
+                    }
+                    if !h.panel.isVisible { h.panel.orderFrontRegardless() }
                     h.tick(targetFrame: frame)
                 }
                 bridge.overlayTokens[id] = token
