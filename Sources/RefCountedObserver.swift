@@ -52,6 +52,25 @@ class RefCountedObserver {
         for cb in Array(subs.values) { cb() }
     }
 
+    /// Lazy fire: only fan out if the supplied hash differs from the last one
+    /// stored under `key`. Use for polling observers where the snapshot
+    /// usually doesn't change between ticks — privacy device list, sensors
+    /// reading, menubar items. The poll still runs (we need the snapshot to
+    /// compute the hash), but Bridge `jsonify` + per-stack `evaluateJavaScript`
+    /// fan-out is skipped on no-op ticks. With many stacks subscribing,
+    /// avoiding the per-stack push dominates the savings; the AX/CoreAudio
+    /// snapshot itself is usually cheap.
+    ///
+    /// Key is per-observer (channel name, conventionally) so a single
+    /// observer can dedup multiple logical streams independently. Hash is
+    /// the caller's choice — `Hasher.combine`-derived ints are standard.
+    private var lastHashByKey: [String: Int] = [:]
+    func fireIfChanged(_ key: String, hash: Int) {
+        if lastHashByKey[key] == hash { return }
+        lastHashByKey[key] = hash
+        fire()
+    }
+
     /// Whether the observer is currently active (has a live native listener).
     /// Exposed for diagnostics; not used by subclasses.
     var isActive: Bool { nativeToken != nil }

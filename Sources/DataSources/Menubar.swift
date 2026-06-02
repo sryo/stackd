@@ -528,7 +528,19 @@ final class MenubarItemsObserver: RefCountedObserver {
 
     override func install() -> Token {
         let t = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
-            self?.fire()
+            guard let self = self else { return }
+            // Lazy fire: when no menubar items change between ticks (the
+            // common case — most apps don't churn the right-side icons),
+            // skip per-stack jsonify + evaluateJavaScript. The AX walk in
+            // `snapshot()` still runs (we need the data to hash), but the
+            // jsonify+push fan-out is the dominant cost when many stacks
+            // subscribe.
+            let snap = self.snapshot()
+            if let data = try? JSONSerialization.data(withJSONObject: snap, options: [.sortedKeys]) {
+                self.fireIfChanged("menubar.items", hash: data.hashValue)
+            } else {
+                self.fire()
+            }
         }
         RunLoop.main.add(t, forMode: .common)
         return Token { t.invalidate() }

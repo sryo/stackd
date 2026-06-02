@@ -216,7 +216,17 @@ final class PrivacyObserver: RefCountedObserver {
 
     override func install() -> Token {
         let t = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
-            self?.fire()
+            guard let self = self else { return }
+            // Lazy fire: snapshot is usually empty (nothing recording). Hash
+            // the JSON-stable form and skip the per-stack push when the
+            // state is unchanged. Sorted-keys ensures dict ordering doesn't
+            // produce spurious diffs.
+            let snap = Privacy.recording()
+            if let data = try? JSONSerialization.data(withJSONObject: snap, options: [.sortedKeys]) {
+                self.fireIfChanged("privacy", hash: data.hashValue)
+            } else {
+                self.fire()
+            }
         }
         RunLoop.main.add(t, forMode: .common)
         return Token { t.invalidate() }

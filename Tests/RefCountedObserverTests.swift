@@ -153,4 +153,60 @@ func registerRefCountedObserverTests() {
         try expect(obs.isActive, "second subscribe succeeded")
         try expectEqual(obs.installCount, 1)
     }
+
+    // MARK: - fireIfChanged (lazy fan-out for poll observers)
+    //
+    // 2026-06-02: added as the dedup primitive for PrivacyObserver,
+    // SensorsObserver, MenubarItemsObserver. Equal hash → no fan-out
+    // (skip per-stack jsonify + evaluateJavaScript). Different hash →
+    // exactly one fan-out, last hash cached for next compare.
+
+    test("fireIfChanged: equal hash suppresses fan-out") {
+        let obs = StubObserver()
+        var callCount = 0
+        let t = obs.subscribe { callCount += 1 }
+        defer { t.cancel(); spinRunLoop(0.05) }
+        // subscribe primes once.
+        try expectEqual(callCount, 1, "subscribe should prime once")
+
+        obs.fireIfChanged("k", hash: 42)
+        try expectEqual(callCount, 2, "first fireIfChanged with new hash fires")
+
+        obs.fireIfChanged("k", hash: 42)
+        try expectEqual(callCount, 2, "same hash must not re-fire")
+
+        obs.fireIfChanged("k", hash: 42)
+        try expectEqual(callCount, 2, "still same hash, still no fire")
+    }
+
+    test("fireIfChanged: changed hash fires exactly once per change") {
+        let obs = StubObserver()
+        var callCount = 0
+        let t = obs.subscribe { callCount += 1 }
+        defer { t.cancel(); spinRunLoop(0.05) }
+        try expectEqual(callCount, 1)
+
+        obs.fireIfChanged("k", hash: 1)
+        obs.fireIfChanged("k", hash: 2)
+        obs.fireIfChanged("k", hash: 3)
+        try expectEqual(callCount, 4, "three distinct hashes → three fires")
+    }
+
+    test("fireIfChanged: per-key isolation (distinct keys dedup independently)") {
+        // The key argument lets a single observer dedup multiple logical
+        // streams. Same hash under different keys should still fire.
+        let obs = StubObserver()
+        var callCount = 0
+        let t = obs.subscribe { callCount += 1 }
+        defer { t.cancel(); spinRunLoop(0.05) }
+        try expectEqual(callCount, 1)
+
+        obs.fireIfChanged("a", hash: 1)
+        obs.fireIfChanged("b", hash: 1)  // same hash, different key → fires
+        try expectEqual(callCount, 3)
+
+        obs.fireIfChanged("a", hash: 1)  // a's last was 1, suppressed
+        obs.fireIfChanged("b", hash: 1)  // b's last was 1, suppressed
+        try expectEqual(callCount, 3, "duplicates under each key remain suppressed")
+    }
 }
