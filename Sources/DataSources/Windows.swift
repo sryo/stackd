@@ -1037,13 +1037,13 @@ enum WindowEvents {
     /// of the process — matches the SpacesObserver pattern.
     static func install() {
         guard !cgsRegistered, let reg = SkyLightWindowEvents.registerNotifyProc else { return }
+        // Only register events that ACTUALLY fire on the current macOS.
+        // Per the kSDWindow* comment block, 804/806/807/808/815/816 are
+        // documented as "Sequoia-/no-fire on Tahoe" — TahoeSynthPoll covers
+        // those via CG diff. Keeping the registration calls created dead
+        // callbacks the OS still bookkeeps. Created/destroyed/focusedByMouse
+        // do fire on Tahoe, so those stay.
         for evt in [
-            kSDWindowClosed,
-            kSDWindowMoved,
-            kSDWindowResized,
-            kSDWindowReordered,
-            kSDWindowDeminimized,
-            kSDWindowMinimized,
             kSDWindowCreated,
             kSDWindowDestroyed,
             kSDWindowFocusedByMouse
