@@ -1,5 +1,4 @@
 :root {
-  --sd-bg: rgba(10, 10, 14, 0.62);
   --sd-fg: #e8e8ea;
   --sd-fg-dim: rgba(232, 232, 234, 0.55);
   --sd-radius: 12px;
@@ -19,13 +18,9 @@ html, body {
 .card {
   height: 100%;
   box-sizing: border-box;
-  background: var(--sd-bg);
   border-radius: var(--sd-radius);
   padding: var(--sd-pad);
   display: flex; flex-direction: column; justify-content: center;
-  -webkit-backdrop-filter: blur(24px) saturate(180%);
-  backdrop-filter: blur(24px) saturate(180%);
-  box-shadow: 0 12px 40px -8px rgba(0,0,0,0.5);
 }
 .label {
   font-size: 9px; color: var(--sd-fg-dim);
@@ -41,8 +36,8 @@ html, body {
 .sep { color: var(--sd-fg-dim); margin: 0 4px; }
 
 @keyframes flash {
-  0%   { background: var(--sd-bg);              box-shadow: 0 12px 40px -8px rgba(0,0,0,0.5); }
-  20%  { background: rgba(255, 200, 50, 0.85);  box-shadow: 0 12px 60px -8px rgba(255,200,50,0.6); }
-  100% { background: var(--sd-bg);              box-shadow: 0 12px 40px -8px rgba(0,0,0,0.5); }
+  0%   { background: transparent; }
+  20%  { background: rgba(255, 200, 50, 0.85); }
+  100% { background: transparent; }
 }
 body.beep .card { animation: flash 480ms ease; }

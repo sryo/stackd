@@ -3,6 +3,8 @@
   "name": "Keypress",
   "anchor": { "edge": "top-right", "inset": [160, 16] },
   "size": { "w": 140, "h": 56 },
+  "material": "glass",
+  "cornerRadius": 12,
   "permissions": [],
   "eventtap": [
     { "event": "keyDown", "callback": "key" },

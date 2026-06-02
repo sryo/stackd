@@ -1,5 +1,4 @@
 :root {
-  --sd-bg: rgba(10, 10, 14, 0.62);
   --sd-fg: #e8e8ea;
   --sd-fg-dim: rgba(232, 232, 234, 0.55);
   --sd-radius: 12px;
@@ -21,14 +20,10 @@ html, body {
 .card {
   height: 100%;
   box-sizing: border-box;
-  background: var(--sd-bg);
   border-radius: var(--sd-radius);
   padding: var(--sd-pad);
   display: flex; flex-direction: column; justify-content: center;
   gap: 2px;
-  -webkit-backdrop-filter: blur(24px) saturate(180%);
-  backdrop-filter: blur(24px) saturate(180%);
-  box-shadow: 0 12px 40px -8px rgba(0,0,0,0.5);
 }
 
 .row {
