@@ -76,6 +76,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             host?.reloadAll()
         }
 
+        // Reposition all stack panels when display geometry changes
+        // (resolution change, monitor hotplug, scale factor flip). Without
+        // this, frameFor's compute-once-at-load contract leaves region:menubar
+        // and region:fullscreen panels stranded at the OLD screen edges
+        // when the new visibleFrame is wider/narrower. reloadAll re-runs
+        // frameFor for every stack — cheap relative to the rarity of the
+        // event (resolution changes ~once per session, hotplug ~once a day).
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.didChangeScreenParametersNotification,
+            object: nil, queue: .main
+        ) { [weak host] _ in
+            log("screen parameters changed → reload to reposition panels")
+            host?.reloadAll()
+        }
+
         // Wire window lifecycle → bangs. Polling at 1s; stacks subscribe via
         // manifest handles: ["sd.window.created" | "destroyed" | "titleChanged"].
         WindowsLifecycleObserver.shared.onCreate = { [weak host] info in
