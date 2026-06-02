@@ -65,6 +65,7 @@ TEST_SOURCES=(
   Tests/SafePredicateTests.swift
   Tests/CLITests.swift
   Tests/TemplateEngineTests.swift
+  Tests/UtilTests.swift
   Tests/main.swift
 )
 

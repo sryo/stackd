@@ -174,7 +174,51 @@ function unregisterHandler(map, id, unbindPayload) {
   return request(unbindPayload);
 }
 
+// Pure-JS helpers — no IPC, no permission. Same shape across every
+// stack: stop reinventing debounce, throttle, and per-screen helpers.
+const util = {
+  // Trailing-edge debounce. Returns a function that delays invoking `fn`
+  // until `ms` has elapsed since the last call. `.cancel()` aborts a
+  // pending call. Used to consolidate sd.windows.* bursts, drag-end
+  // detection, search-as-you-type, etc.
+  //   const onChange = sd.util.debounce(saveLayout, 300);
+  //   sd.windows.all.subscribe(onChange);
+  debounce(fn, ms) {
+    let t = null;
+    const wrapped = function (...args) {
+      if (t) clearTimeout(t);
+      t = setTimeout(() => { t = null; fn.apply(this, args); }, ms);
+    };
+    wrapped.cancel = () => { if (t) { clearTimeout(t); t = null; } };
+    return wrapped;
+  },
+  // Leading-edge throttle. First call fires immediately; subsequent
+  // calls within `ms` are dropped. Trailing edge re-arms after the
+  // window expires.
+  //   const tick = sd.util.throttle(updateHUD, 100);
+  //   sd.mouse.subscribe(tick);
+  throttle(fn, ms) {
+    let last = 0, scheduled = null;
+    return function (...args) {
+      const now = Date.now();
+      const remaining = ms - (now - last);
+      if (remaining <= 0) {
+        last = now;
+        if (scheduled) { clearTimeout(scheduled); scheduled = null; }
+        fn.apply(this, args);
+      } else if (!scheduled) {
+        scheduled = setTimeout(() => {
+          last = Date.now();
+          scheduled = null;
+          fn.apply(this, args);
+        }, remaining);
+      }
+    };
+  }
+};
+
 export const sd = {
+  util,
   // Per-instance screen info, injected before this script runs (see Bridge.swift).
   // Read .current synchronously — items like spacenum + brightness need to
   // know which screen they're rendered on without an async round-trip.

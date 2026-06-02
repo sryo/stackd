@@ -1,6 +1,7 @@
 import Foundation
 
 registerChannelInferenceTests()
+registerUtilTests()
 registerBridgeJsonifyTests()
 registerStackDoctorTests()
 registerUpdateParserTests()
