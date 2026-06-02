@@ -8,5 +8,6 @@
 
 #include "TouchEvents.h"
 #include "../Private/MultitouchSupport.h"
+#import "SafePredicate.h"
 
 #endif

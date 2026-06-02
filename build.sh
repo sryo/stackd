@@ -60,6 +60,7 @@ SWIFT_SOURCES=(
 
 C_SOURCES=(
   Sources/C/TouchEvents.c
+  Sources/C/SafePredicate.m
 )
 
 swiftc -O \

@@ -52,12 +52,15 @@ enum Spotlight {
         }
 
         // NSPredicate.init(format:) raises NSInvalidArgumentException on a
-        // malformed format string. We can't catch Objective-C exceptions
-        // from Swift, so the daemon would crash on bad input. Mitigation:
-        // require the JS caller to provide valid predicates; document this
-        // in the api.js comment. The cost of a richer guard (objc shim)
-        // isn't worth it for a one-shot query.
-        let predicate = NSPredicate(format: predicateStr)
+        // malformed format string. Swift can't catch ObjC exceptions, so
+        // StackdSafeNSPredicate (Sources/C/SafePredicate.m) wraps it in
+        // @try/@catch and returns nil on parse failure. Bad predicates
+        // log + return empty instead of crashing the daemon.
+        var parseError: NSString?
+        guard let predicate = StackdSafeNSPredicate(predicateStr, &parseError) else {
+            FileHandle.standardError.write(Data("stackd: spotlight.find bad predicate '\(predicateStr)': \(parseError ?? "")\n".utf8))
+            completion([]); return
+        }
         let query = NSMetadataQuery()
         query.predicate = predicate
 
@@ -124,10 +127,15 @@ enum Spotlight {
                 return nil
             }
 
-            // Same NSPredicate caveat as Spotlight.find: a malformed format
-            // string raises NSInvalidArgumentException and crashes the
-            // daemon. Caller validates.
-            let predicate = NSPredicate(format: predicateStr)
+            // StackdSafeNSPredicate guards against NSInvalidArgumentException
+            // (see Spotlight.find() for the explanation). LiveQuery's
+            // failable init returns nil on parse failure — caller gets a
+            // null handle that quietly never emits.
+            var parseError: NSString?
+            guard let predicate = StackdSafeNSPredicate(predicateStr, &parseError) else {
+                FileHandle.standardError.write(Data("stackd: spotlight.subscribe bad predicate '\(predicateStr)': \(parseError ?? "")\n".utf8))
+                return nil
+            }
             let query = NSMetadataQuery()
             query.predicate = predicate
 
