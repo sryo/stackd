@@ -271,11 +271,18 @@ final class StackHost {
 
         if manifest.region == "menubar" {
             // Full-bleed top bar that covers the system menu bar. screen.frame
-            // includes the menu-bar region; visibleFrame excludes it. Auto-grow
-            // to the actual menu bar height (~24 / ~39 notched / 57 "More Space").
+            // includes the menu-bar region; visibleFrame excludes it.
+            //
+            // Sizing modes:
+            //   size.h == 0 (or unset) → exactly match THIS display's menubar
+            //     height. With "display": "all" + multi-monitor (notched
+            //     MacBook + external), each instance is sized per-display
+            //     (~39px notched, ~24px standard, ~57px "More Space" mode).
+            //   size.h > 0 → max(h, menuBarHeight) — legacy behavior, keeps
+            //     stacks that want a guaranteed minimum unaffected.
             let full = screen.frame
             let menuBarHeight = full.size.height - screen.visibleFrame.size.height
-            let height = max(h, menuBarHeight)
+            let height = h > 0 ? max(h, menuBarHeight) : menuBarHeight
             return NSRect(x: full.minX, y: full.maxY - height, width: full.size.width, height: height)
         }
 
