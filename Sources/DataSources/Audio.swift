@@ -581,7 +581,15 @@ enum Media {
     /// Resolves the latest now-playing snapshot. Returns nil if MediaRemote
     /// isn't loadable, or no app is currently broadcasting.
     static func nowPlaying(completion: @escaping ([String: Any]?) -> Void) {
-        guard let fn = MediaRemote.getNowPlayingInfo else { completion(nil); return }
+        guard let fn = MediaRemote.getNowPlayingInfo else {
+            // Match the success path's queue: MediaRemote's callback fires
+            // completion(out) on the global utility queue. Without this hop
+            // the bail path would fire inline, which Bridge.respond would
+            // immediately re-enter — also a re-entrancy hazard if a stack
+            // chains calls. Same shape as the Vision.runRequest fix.
+            DispatchQueue.global(qos: .utility).async { completion(nil) }
+            return
+        }
         fn(.global(qos: .utility)) { info in
             guard !info.isEmpty else { completion(nil); return }
             var out: [String: Any] = [:]

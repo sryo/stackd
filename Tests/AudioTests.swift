@@ -180,4 +180,15 @@ func registerAudioTests() {
         try expect(n != nil && !(n!.isEmpty),
                    "default output device should have a non-empty name, got \(String(describing: n))")
     }
+
+    test("Media.nowPlaying: completion is async, never fires inline") {
+        // Whether MediaRemote.getNowPlayingInfo is loadable or not, the
+        // completion must hop a queue before firing — Bridge.respond would
+        // otherwise be re-entered before the dispatch tool returned, and
+        // chained sd.media.* calls could see inverted ordering. Same
+        // contract as Vision/Thumbnails (different queue, same async-ness).
+        var fired = false
+        Media.nowPlaying { _ in fired = true }
+        try expect(!fired, "Media.nowPlaying completion must not fire synchronously")
+    }
 }
