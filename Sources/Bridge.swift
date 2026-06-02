@@ -2055,8 +2055,21 @@ final class Bridge: NSObject, WKScriptMessageHandler {
             guard let name = body["name"] as? String else { return false }
             if let interval = body["interval"] as? Double, interval > 0 {
                 b.channelIntervals[name] = interval
+                // Touchdevice's native coalescer rate is normally fixed at
+                // 30Hz; for that one channel, slowing the per-stack push
+                // is wasted work because we still re-poll the device every
+                // 33ms. Route the request down to the observer so the
+                // coalescer matches. Last-writer-wins across stacks for
+                // now — fine for the common case (one gesture stack).
+                if name == "touchdevice" {
+                    TouchDeviceObserver.shared.setCoalesceInterval(ms: Int(interval))
+                }
             } else {
                 b.channelIntervals.removeValue(forKey: name)
+                if name == "touchdevice" {
+                    // Restore default 30Hz when the gate is cleared.
+                    TouchDeviceObserver.shared.setCoalesceInterval(ms: 33)
+                }
             }
             return true
         },

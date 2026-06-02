@@ -852,6 +852,11 @@ final class TouchDeviceObserver: RefCountedObserver {
 
     private var device: UnsafeMutableRawPointer?
     private var coalescerTimer: Timer?
+    /// Active coalescer interval in seconds. Defaults to 1/30s (30 Hz);
+    /// `setCoalesceInterval` can drop it for stacks that don't need
+    /// frame-rate gestures. Held under `lock` because the install path
+    /// and any setInterval call can race.
+    private var coalesceInterval: TimeInterval = 1.0 / 30.0
 
     // Keeps the singleton retained through Unmanaged.passRetained so the
     // refcon pointer the C callback receives is always valid — the install
@@ -899,18 +904,46 @@ final class TouchDeviceObserver: RefCountedObserver {
             return nil
         }
 
-        // 30 Hz coalescer. Reads pendingFrame under the lock, diffs against
-        // lastEmittedFrame, fires subscribers only when the snapshot
-        // actually changes. Empty-touches frames still count as a change
-        // when the previous frame had touches — that's the "all fingers
-        // lifted" edge JS-side state machines need.
-        let timer = Timer.scheduledTimer(withTimeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in
+        // Default 30 Hz coalescer; can be retuned via setCoalesceInterval
+        // (wired from Bridge's channel.setInterval). Reads pendingFrame under
+        // the lock, diffs against lastEmittedFrame, fires subscribers only
+        // when the snapshot actually changes. Empty-touches frames still
+        // count as a change when the previous frame had touches — that's
+        // the "all fingers lifted" edge JS-side state machines need.
+        startCoalescer()
+
+        return Token { [weak self] in self?.teardown() }
+    }
+
+    /// Recreate the coalescer timer at a new interval. Safe to call before
+    /// or after install(); only does anything when the observer is active.
+    /// Multiple subscribers calling this is last-writer-wins for now —
+    /// per-subscriber min-reduction is a planned follow-up.
+    func setCoalesceInterval(ms: Int) {
+        let clamped = max(8, min(1000, ms))   // clamp 8ms (~120Hz) to 1s
+        lock.lock()
+        coalesceInterval = TimeInterval(clamped) / 1000.0
+        let hadTimer = coalescerTimer != nil
+        lock.unlock()
+        if hadTimer { startCoalescer() }
+    }
+
+    /// (Re)create the coalescer timer at the current `coalesceInterval`.
+    /// Called from install() and setCoalesceInterval(). Cancels the prior
+    /// timer first so a rapid sequence of setInterval calls doesn't pile
+    /// up timers.
+    private func startCoalescer() {
+        lock.lock()
+        coalescerTimer?.invalidate()
+        let interval = coalesceInterval
+        lock.unlock()
+        let timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
             self?.coalesce()
         }
         RunLoop.main.add(timer, forMode: .common)
-        self.coalescerTimer = timer
-
-        return Token { [weak self] in self?.teardown() }
+        lock.lock()
+        coalescerTimer = timer
+        lock.unlock()
     }
 
     private func coalesce() {
