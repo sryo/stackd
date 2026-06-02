@@ -238,4 +238,39 @@ func registerStorageTests() {
         try expect(opened == nil, "readonly open of nonexistent file should return nil, got \(String(describing: opened))")
         try expect(!FileManager.default.fileExists(atPath: dbPath), "readonly open should not create the file")
     }
+
+    // MARK: - PasteboardObserver
+    //
+    // 2026-06-02: the 0.2s polling timer was replaced with a distributed
+    // notification (`com.apple.pasteboard.notify.changed`) plus a 1.5s
+    // safety-net timer. These tests pin the subscriber-gating contract that
+    // makes the whole RefCountedObserver pattern load-bearing — if a future
+    // refactor accidentally installs the timer at module-load time, idle
+    // CPU regresses silently.
+
+    test("PasteboardObserver: inactive at startup (no subscribers)") {
+        // RefCountedObserver only installs native plumbing on 0→1 subscribe.
+        // If something module-loads the singleton's listener, this fails.
+        try expect(!PasteboardObserver.shared.isActive,
+                   "PasteboardObserver must not be active before any stack subscribes")
+    }
+
+    test("PasteboardObserver: activates on subscribe, deactivates after debounce") {
+        // 0→1: native install happens immediately. 1→0: 5s debounce then
+        // teardown. We spin briefly past the teardown to verify the timer +
+        // distributed-notification observer both stop. The 5.2s ceiling is
+        // generous slack on the documented 5.0s teardown.
+        let token = PasteboardObserver.shared.subscribe { }
+        try expect(PasteboardObserver.shared.isActive,
+                   "subscribe should activate the observer")
+        token.cancel()
+        // Spin runloop for 5.2s so DispatchQueue.main.asyncAfter teardown work
+        // item fires. Pattern mirrors RefCountedObserverTests.spinRunLoop.
+        let deadline = Date().addingTimeInterval(5.2)
+        while PasteboardObserver.shared.isActive && Date() < deadline {
+            RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.05))
+        }
+        try expect(!PasteboardObserver.shared.isActive,
+                   "PasteboardObserver must deactivate ≤5.2s after last unsubscribe")
+    }
 }

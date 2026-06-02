@@ -370,26 +370,60 @@ enum Pasteboard {
     static var changeCount: Int { NSPasteboard.general.changeCount }
 }
 
-/// 200ms poll for NSPasteboard.changeCount. AppKit has no notification
-/// for pasteboard changes; this is the standard Cocoa pattern.
+/// Pasteboard-change observer.
+///
+/// Primary: `com.apple.pasteboard.notify.changed` distributed notification.
+/// AppKit's pasteboard write path posts this on Sonoma/Sequoia (and
+/// likely earlier); event-driven so a paste fires the callback within ~50ms
+/// instead of waiting for the next poll tick.
+///
+/// Safety net: a 1.5s timer with the existing `changeCount` dedup. Catches
+/// (a) macOS versions or write paths that don't fire the DN, (b) any future
+/// rename of the notification. 1.5s vs the previous 0.2s is 7.5× fewer
+/// timer wakeups; combined with the DN on the happy path, idle wakeups
+/// drop to one every 1.5s + zero CPU per wakeup when nothing's changed
+/// (changeCount is a single Mach property read).
 final class PasteboardObserver: RefCountedObserver {
     static let shared = PasteboardObserver()
     private override init() { super.init() }
 
+    private var lastChangeCount: Int = 0
+
     override func install() -> Token {
-        // AppKit has no pasteboard-change notification; standard pattern is to
-        // poll changeCount. While *no* stack subscribes, the timer is gone and
-        // we don't pay this 5 Hz cost at all.
-        var lastChangeCount = NSPasteboard.general.changeCount
-        let t = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { [weak self] _ in
+        lastChangeCount = NSPasteboard.general.changeCount
+
+        // Primary: distributed notification. The `installNotifications` helper
+        // on RefCountedObserver wires a Token that removes the observer on
+        // teardown — same shape MenubarObserver and others use.
+        let dnToken = installNotifications([
+            (DistributedNotificationCenter.default(),
+             Notification.Name("com.apple.pasteboard.notify.changed"),
+             { [weak self] _ in
+                 guard let self = self else { return }
+                 let cc = NSPasteboard.general.changeCount
+                 if cc != self.lastChangeCount {
+                     self.lastChangeCount = cc
+                     self.fire()
+                 }
+             })
+        ])
+
+        // Safety net: poll changeCount every 1.5s. Catches writes that
+        // bypass the DN (rare). Dedup against lastChangeCount keeps the
+        // happy path cost-free — one Mach call per wakeup, no fan-out.
+        let t = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] _ in
+            guard let self = self else { return }
             let cc = NSPasteboard.general.changeCount
-            if cc != lastChangeCount {
-                lastChangeCount = cc
-                self?.fire()
+            if cc != self.lastChangeCount {
+                self.lastChangeCount = cc
+                self.fire()
             }
         }
         RunLoop.main.add(t, forMode: .common)
-        return Token { t.invalidate() }
+        return Token {
+            dnToken.cancel()
+            t.invalidate()
+        }
     }
 }
 
