@@ -195,6 +195,24 @@ final class Bridge: NSObject, WKScriptMessageHandler {
             guard let cf = CGDisplayCreateUUIDFromDisplayID(id)?.takeRetainedValue() else { return "" }
             return CFUUIDCreateString(nil, cf) as String? ?? ""
         }()
+        // Notch geometry: NSScreen exposes auxiliaryTopLeftArea /
+        // auxiliaryTopRightArea on notched displays (macOS 12+). Width of
+        // the notch = rightArea.origin.x - leftArea.size.width. On
+        // external/non-notched displays both are nil; we return null so
+        // stacks can branch on it.
+        var notchPayload: Any = NSNull()
+        if #available(macOS 12.0, *) {
+            if let lArea = screen.auxiliaryTopLeftArea,
+               let rArea = screen.auxiliaryTopRightArea,
+               lArea.width > 0, rArea.origin.x > lArea.width {
+                notchPayload = [
+                    "leftWidth":  Int(lArea.width),
+                    "rightX":     Int(rArea.origin.x),
+                    "width":      Int(rArea.origin.x - lArea.width),
+                    "safeAreaTop": Int(screen.safeAreaInsets.top)
+                ] as [String: Any]
+            }
+        }
         // Top-left, matching sd.display.all and every other xy in sd.*.
         let cgFrame = CGDisplayBounds(id)
         let nsFrame = screen.frame, nsVisible = screen.visibleFrame
@@ -213,7 +231,8 @@ final class Bridge: NSObject, WKScriptMessageHandler {
             "displayID":    Int(id),
             "index":        index,
             "frame":        rect(cgFrame),
-            "visibleFrame": rect(cgVisible)
+            "visibleFrame": rect(cgVisible),
+            "notch":        notchPayload
         ]
     }
 
