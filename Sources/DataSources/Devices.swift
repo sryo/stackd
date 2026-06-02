@@ -371,7 +371,12 @@ extension Camera {
             device = AVCaptureDevice.default(for: .video)
         }
         guard let device = device else {
-            completion(nil); return
+            // Hop to main so callers can rely on the same "always async"
+            // contract the OneShotGrabber success path provides via its
+            // sample-buffer delegate. Firing inline would force every caller
+            // to handle two completion-timing flavors.
+            DispatchQueue.main.async { completion(nil) }
+            return
         }
 
         let grabber = OneShotGrabber(

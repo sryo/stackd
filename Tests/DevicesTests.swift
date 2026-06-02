@@ -164,4 +164,17 @@ func registerDevicesTests() {
             if let v = row["internal"]  { try expect(v is Bool,   "internal should be Bool") }
         }
     }
+
+    test("Camera.frame: bogus deviceId bail completion is async (never inline)") {
+        // Same pinning as VisionTests' bail-path checks: passing a deviceId
+        // that AVCaptureDevice(uniqueID:) can't resolve must NOT fire the
+        // completion synchronously. Frame is otherwise async; sync-bail
+        // would force callers to handle two completion-timing flavors and
+        // could re-enter the JS bridge mid-call.
+        var fired = false
+        Camera.frame(deviceId: "not-a-real-camera-uniqueID-\(UUID().uuidString)") { _ in
+            fired = true
+        }
+        try expect(!fired, "Camera.frame completion must not fire synchronously on the bail path")
+    }
 }

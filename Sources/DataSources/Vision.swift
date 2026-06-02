@@ -148,7 +148,11 @@ enum Vision {
     static func subjectMask(image source: Any?,
                             completion: @escaping ([String: Any]?) -> Void) {
         guard #available(macOS 14.0, *) else {
-            completion(nil); return
+            // Match the "completion always async on main" contract that the
+            // rest of Vision (and Thumbnails) honors. Firing inline here would
+            // let JS callbacks re-enter the bridge mid-call on older OSes.
+            DispatchQueue.main.async { completion(nil) }
+            return
         }
         runRequest(image: source, completion: completion) {
             VNGenerateForegroundInstanceMaskRequest()
