@@ -441,6 +441,39 @@ export const sd = {
     // stack's fanout (event-driven re-fires still arrive):
     //   sd.display.all.subscribe(d => updateUI(d), { interval: 10 });
     all:        channel("displays"),
+    // Display lookup helpers — read sd.display.all's last-pushed value and
+    // return the display whose frame contains the given point/window.
+    // Replaces the ~5 copies of this loop sitting in cursor-overlay stacks
+    // (framemaster, timetrail, sideswipe, windowscape, cloudpad). Returns
+    // null if no display matches; caller can fall back to the primary
+    // display via `(sd.display.all.peek() || [])[0]`.
+    //   const d = sd.display.forPoint(m.x, m.y);
+    //   if (d) draw(m.x - d.frame.x, m.y - d.frame.y);
+    forPoint(x, y) {
+      const list = (sd.display.all.peek && sd.display.all.peek()) || [];
+      for (const d of list) {
+        const f = d && d.frame;
+        if (!f) continue;
+        if (x >= f.x && x < f.x + f.w && y >= f.y && y < f.y + f.h) return d;
+      }
+      return null;
+    },
+    // forWindow accepts either a window object (with .frame) or a CGWindowID.
+    //   sd.display.forWindow(focused) → display
+    //   sd.display.forWindow(50)      → display (queries sd.windows.frame(50))
+    forWindow(w) {
+      if (typeof w === "number") {
+        // Caller passed an id. Resolve via the windows API; await is fine
+        // because most callers are already in an async handler.
+        return sd.windows.frame(w).then(f => {
+          if (!f) return null;
+          return sd.display.forPoint(f.x + f.w / 2, f.y + f.h / 2);
+        });
+      }
+      if (!w || !w.frame) return null;
+      return sd.display.forPoint(w.frame.x + w.frame.w / 2,
+                                 w.frame.y + w.frame.h / 2);
+    },
     // setBrightness(displayID, value) or setBrightness(value, { displayId })
     //
     // Accepts two call shapes for back-compat:
