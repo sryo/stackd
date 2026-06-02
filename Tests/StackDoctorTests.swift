@@ -75,6 +75,70 @@ func registerStackDoctorTests() {
         try expectEqual(StackDoctor.check(stackDir: dir), 0)
     }
 
+    test("doctor: known material values pass without issue") {
+        let parent = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        try? FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: parent) }
+        let cases = ["glass", "glass.clear", "glass.tinted(#ff8800)",
+                     "sidebar", "hud", "vibrancy.popover", "none"]
+        for (i, mat) in cases.enumerated() {
+            let dir = parent.appendingPathComponent("ok\(i)").path
+            try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+            write("""
+            { "id": "ok\(i)", "name": "ok", "size": {"h": 24},
+              "permissions": [], "material": "\(mat)" }
+            """, to: dir + "/stack.json")
+            write("<div/>", to: dir + "/index.html")
+            try expectEqual(StackDoctor.check(stackDir: dir), 0, "material '\(mat)' should pass")
+        }
+    }
+
+    test("doctor: unknown material flagged as issue") {
+        let parent = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        try? FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true)
+        let dir = parent.appendingPathComponent("bad").path
+        try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: parent) }
+        write("""
+        { "id": "bad", "name": "bad", "size": {"h": 24},
+          "permissions": [], "material": "lava" }
+        """, to: dir + "/stack.json")
+        write("<div/>", to: dir + "/index.html")
+        try expectEqual(StackDoctor.check(stackDir: dir), 1)
+    }
+
+    test("doctor: cornerRadius numeric is accepted") {
+        let parent = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        try? FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true)
+        let dir = parent.appendingPathComponent("rad").path
+        try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: parent) }
+        write("""
+        { "id": "rad", "name": "rad", "size": {"h": 24},
+          "permissions": [], "cornerRadius": 12 }
+        """, to: dir + "/stack.json")
+        write("<div/>", to: dir + "/index.html")
+        try expectEqual(StackDoctor.check(stackDir: dir), 0)
+    }
+
+    test("doctor: cornerRadius non-numeric is rejected") {
+        let parent = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        try? FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true)
+        let dir = parent.appendingPathComponent("badcr").path
+        try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: parent) }
+        write("""
+        { "id": "badcr", "name": "badcr", "size": {"h": 24},
+          "permissions": [], "cornerRadius": "twelve" }
+        """, to: dir + "/stack.json")
+        write("<div/>", to: dir + "/index.html")
+        try expectEqual(StackDoctor.check(stackDir: dir), 1)
+    }
+
     test("doctor: id-folder mismatch is a warning, not an issue") {
         let parent = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString)

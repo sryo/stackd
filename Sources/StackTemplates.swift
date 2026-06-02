@@ -66,7 +66,14 @@ enum StackTemplates {
         """
     ]
 
-    // MARK: - glass (native LiquidGlass-style material panel)
+    // MARK: - glass (native Liquid Glass material panel)
+    //
+    // The `material: "glass"` manifest field installs an NSGlassEffectView
+    // (macOS 26 Tahoe / Liquid Glass) behind the WebView, falling back to
+    // NSVisualEffectView.hudWindow on older OSes. The HTML body MUST stay
+    // transparent — no CSS `backdrop-filter`, no rgba overlays — because the
+    // system material is now providing the glass look. CSS blur on top of a
+    // system material double-filters and looks muddy.
 
     private static let glassTemplate: [String: String] = [
         "stack.json": """
@@ -99,8 +106,9 @@ enum StackTemplates {
 
         """,
         "index.css": """
-        /* No background on body — let the native NSVisualEffectView material
-           show through. CSS backdrop-filter would double-blur. */
+        /* No background on body — the native NSGlassEffectView material
+           provides the glass look. CSS backdrop-filter / rgba overlays would
+           double-filter and look muddy on top of system material. */
         html, body { margin: 0; padding: 0; background: transparent; height: 100%; }
         body { font-family: -apple-system, "SF Pro Text", system-ui, sans-serif; color: #f5f5f7; }
         body[data-theme="light"] { color: #1d1d1f; }
@@ -262,6 +270,41 @@ enum StackDoctor {
         if !FileManager.default.fileExists(atPath: stackDir + "/index.html") {
             print("⚠️  \(dirName): no index.html — stack will load nothing")
             issues += 1
+        }
+
+        // Material allowlist. Mirrors the values accepted by
+        // `StackMaterial.parse`. Keep this in sync when new material kinds
+        // ship — same-commit rule (see CLAUDE.md doctor allowlist note).
+        if let mat = dict["material"] as? String {
+            let known: Set<String> = [
+                // none / explicit no-backing
+                "none",
+                // glass (Liquid Glass on macOS 26+, hudWindow fallback)
+                "glass", "glass.clear",
+                // legacy bare vibrancy aliases
+                "sidebar", "hud", "popover", "menu", "titlebar",
+                "sheet", "window", "header", "selection",
+                // explicit vibrancy.* form
+                "vibrancy.sidebar", "vibrancy.hud", "vibrancy.popover",
+                "vibrancy.menu", "vibrancy.titlebar", "vibrancy.sheet",
+                "vibrancy.window", "vibrancy.header", "vibrancy.selection"
+            ]
+            let lower = mat.lowercased()
+            let okGlassTinted = lower.hasPrefix("glass.tinted(") && lower.hasSuffix(")")
+            if !known.contains(lower) && !okGlassTinted {
+                print("⚠️  \(dirName): unknown material '\(mat)' — known: \(known.sorted().joined(separator: ", ")), or glass.tinted(#RRGGBB)")
+                issues += 1
+            }
+        } else if dict["material"] != nil {
+            print("❌ \(dirName): 'material' must be a string, got \(type(of: dict["material"]!))")
+            issues += 1
+        }
+
+        if let cr = dict["cornerRadius"] {
+            if !(cr is NSNumber) {
+                print("❌ \(dirName): 'cornerRadius' must be a number, got \(type(of: cr))")
+                issues += 1
+            }
         }
 
         if issues == 0 { print("✓  \(dirName)") }

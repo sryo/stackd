@@ -16,7 +16,17 @@ struct StackManifest: Decodable {
     let display: String?            // "primary" (default) | "all" | "<index>"
     let invocable: Bool?            // window starts hidden + can take key on .invoke()
     let level: String?              // semantic tier or numeric override — see resolveLevel below
-    let material: String?           // "glass" | "sidebar" | "hud" | "popover" | "menu" | "titlebar" | "sheet" | "window" — native NSVisualEffectView under WebView (LiquidGlass via NSGlassEffectView on macOS 26+)
+    /// Unified material model — see `StackMaterial`. Accepted forms:
+    ///   - missing / null / "none" → no backing
+    ///   - "vibrancy.<key>" or legacy bare key ("sidebar", "hud", "popover",
+    ///     "menu", "titlebar", "sheet", "window", "header", "selection") →
+    ///     NSVisualEffectView
+    ///   - "glass" / "glass.clear" / "glass.tinted(#RRGGBB)" → NSGlassEffectView
+    ///     on macOS 26+, falls back to vibrancy.hudWindow on older OSes.
+    let material: String?
+    /// Optional corner radius applied to the WebView (and the material layer
+    /// when one is installed). Applies regardless of `material`.
+    let cornerRadius: Double?
 
     struct Anchor: Decodable { let edge: String; let inset: [Int] }
     struct Size: Decodable { let w: Int?; let h: Int }
@@ -249,7 +259,8 @@ final class StackHost {
             schemeHandler: schemeHandler,
             level: level,
             invocable: invocable,
-            material: manifest.material
+            material: StackMaterial.parse(manifest.material),
+            cornerRadius: StackCornerRadius.parse(manifest.cornerRadius)
         )
         let bridge = Bridge(webView: win.webView, screen: screen, screenIndex: screenIndex)
         bridge.start(manifest: manifest)

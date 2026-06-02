@@ -8,6 +8,7 @@ SWIFT_SOURCES=(
   Sources/main.swift
   Sources/AppDelegate.swift
   Sources/StackWindow.swift
+  Sources/StackMaterial.swift
   Sources/StackHost.swift
   Sources/StackSource.swift
   Sources/URLSchemeHandler.swift

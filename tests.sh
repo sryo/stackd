@@ -67,6 +67,7 @@ TEST_SOURCES=(
   Tests/TemplateEngineTests.swift
   Tests/UtilTests.swift
   Tests/DisplayHelpersTests.swift
+  Tests/MaterialTests.swift
   Tests/main.swift
 )
 

@@ -17,7 +17,8 @@ final class StackWindow: NSPanel, WKNavigationDelegate {
         schemeHandler: StackdSchemeHandler,
         level: NSWindow.Level = .statusBar,
         invocable: Bool = false,
-        material: String? = nil
+        material: StackMaterial = .none,
+        cornerRadius: Double? = nil
     ) {
         self.invocable = invocable
         let config = WKWebViewConfiguration()
@@ -60,22 +61,33 @@ final class StackWindow: NSPanel, WKNavigationDelegate {
         self.isMovableByWindowBackground = false
 
         // Optional native material backing. Without it the window stays pure
-        // transparent (current default) and stacks use CSS backdrop-filter for
-        // blur. With it, an NSVisualEffectView sits behind the WebView so the
-        // window shows system-blessed material that adapts to wallpaper /
-        // appearance automatically. WebView's drawsBackground=false above
-        // lets the material show through wherever the HTML hasn't painted.
-        if let material = material {
+        // transparent (`.none`) and stacks render however their HTML paints.
+        // With it, a system-blessed material view sits behind the WebView
+        // (NSVisualEffectView for `.vibrancy`, NSGlassEffectView for `.glass`
+        // on macOS 26+, NSVisualEffectView.hudWindow fallback on older OSes).
+        // WebView's drawsBackground=false above lets the material show through
+        // wherever the HTML hasn't painted.
+        //
+        // `cornerRadius` applies regardless of material — masking the WebView
+        // layer rounds the rendered HTML; masking the effect layer rounds the
+        // backing material so the corners are consistent.
+        if case .none = material, (cornerRadius ?? 0) <= 0 {
+            self.contentView = webView
+        } else {
             let container = NSView(frame: NSRect(origin: .zero, size: frame.size))
             container.autoresizingMask = [.width, .height]
-            let effect = StackWindow.makeEffectView(material: material, frame: container.bounds)
-            container.addSubview(effect)
+            if let effect = StackWindow.makeEffectView(material: material, frame: container.bounds, cornerRadius: cornerRadius) {
+                container.addSubview(effect)
+            }
             webView.frame = container.bounds
             webView.autoresizingMask = [.width, .height]
+            if let r = cornerRadius, r > 0 {
+                webView.wantsLayer = true
+                webView.layer?.cornerRadius = CGFloat(r)
+                webView.layer?.masksToBounds = true
+            }
             container.addSubview(webView)
             self.contentView = container
-        } else {
-            self.contentView = webView
         }
         webView.navigationDelegate = self
 
@@ -111,33 +123,58 @@ final class StackWindow: NSPanel, WKNavigationDelegate {
         webView.evaluateJavaScript(js, completionHandler: nil)
     }
 
-    /// Build an NSVisualEffectView with the requested material. Manifest
-    /// names map to AppKit materials; "glass" picks the closest "system glass"
-    /// material per OS version (LiquidGlass arrives as a distinct NSGlassEffectView
-    /// on macOS 26+ — we keep this as NSVisualEffectView until that API is
-    /// stable in the SDK we ship with).
-    private static func makeEffectView(material name: String, frame: NSRect) -> NSVisualEffectView {
-        let v = NSVisualEffectView(frame: frame)
-        v.autoresizingMask = [.width, .height]
-        v.blendingMode = .behindWindow
-        v.state = .active
-        v.material = {
-            switch name {
-            case "sidebar":  return .sidebar
-            case "hud":      return .hudWindow
-            case "popover":  return .popover
-            case "menu":     return .menu
-            case "titlebar": return .titlebar
-            case "sheet":    return .sheet
-            case "window":   return .windowBackground
-            case "header":   return .headerView
-            case "selection": return .selection
-            // "glass" → hudWindow today (the most "glassy" public material);
-            // promote to NSGlassEffectView once macOS 26 SDK lands.
-            default:         return .hudWindow
+    /// Build the backing material view (NSVisualEffectView for `.vibrancy`,
+    /// NSGlassEffectView for `.glass` on macOS 26+; NSVisualEffectView with
+    /// `.hudWindow` fallback on older OSes). Returns nil for `.none` — caller
+    /// handles the no-backing case.
+    private static func makeEffectView(material: StackMaterial, frame: NSRect, cornerRadius: Double?) -> NSView? {
+        switch material {
+        case .none:
+            return nil
+        case .vibrancy(let m):
+            let v = NSVisualEffectView(frame: frame)
+            v.autoresizingMask = [.width, .height]
+            v.blendingMode = .behindWindow
+            v.state = .active
+            v.material = m
+            if let r = cornerRadius, r > 0 {
+                v.wantsLayer = true
+                v.layer?.cornerRadius = CGFloat(r)
+                v.layer?.masksToBounds = true
             }
-        }()
-        return v
+            return v
+        case .glass(let variant):
+            if #available(macOS 26.0, *) {
+                let g = NSGlassEffectView(frame: frame)
+                g.autoresizingMask = [.width, .height]
+                switch variant {
+                case .regular:
+                    g.style = .regular
+                case .clear:
+                    g.style = .clear
+                case .tinted(let color):
+                    g.style = .regular
+                    g.tintColor = color
+                }
+                if let r = cornerRadius, r > 0 {
+                    g.cornerRadius = CGFloat(r)
+                }
+                return g
+            } else {
+                // Pre-Tahoe fallback: hudWindow is the closest public material.
+                let v = NSVisualEffectView(frame: frame)
+                v.autoresizingMask = [.width, .height]
+                v.blendingMode = .behindWindow
+                v.state = .active
+                v.material = .hudWindow
+                if let r = cornerRadius, r > 0 {
+                    v.wantsLayer = true
+                    v.layer?.cornerRadius = CGFloat(r)
+                    v.layer?.masksToBounds = true
+                }
+                return v
+            }
+        }
     }
 
     override var canBecomeKey: Bool { invocable }
