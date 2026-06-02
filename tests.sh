@@ -68,6 +68,7 @@ TEST_SOURCES=(
   Tests/UtilTests.swift
   Tests/DisplayHelpersTests.swift
   Tests/MaterialTests.swift
+  Tests/WindowLifecycleTests.swift
   Tests/main.swift
 )
 

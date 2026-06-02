@@ -11,6 +11,28 @@ final class StackWindow: NSPanel, WKNavigationDelegate {
     // dedupe against the prior frame so we only emit on real geometry changes.
     private var lastObservedFrame: CGRect = .zero
 
+    // First-paint gate. The panel is held at alphaValue=0 from `orderFront`
+    // until WKWebView's `didFinishNavigation` callback fires, then revealed
+    // in one runloop tick. This replaces the old 50ms `asyncAfter` band-aid
+    // that papered over the race between orderFront and first WebKit paint —
+    // visible as a "flash" of empty material (especially with `.glass` /
+    // `.vibrancy`) before the HTML rendered.
+    //
+    // Subsequent loads inside the same window (sd.window.load, JS navigation)
+    // don't re-hide/re-reveal — `gate.state` stays `.revealed` after the first
+    // transition. Hot-reload via FileWatcher tears down the whole StackWindow,
+    // so a brand new instance gets a fresh gate.
+    private var gate = FirstPaintGate()
+    private var revealFallbackTimer: Timer?
+
+    /// Maximum time we'll hold the panel hidden waiting for first paint
+    /// before revealing anyway. NOT a timing-based correctness mechanism —
+    /// `didFinishNavigation` (or `didFail*`) is the real signal. This is a
+    /// safety net for the pathological case of a StackWindow that's ordered
+    /// in but never has any content loaded into it (defensive — better to
+    /// show an empty panel than to hide it forever).
+    static let firstPaintFallback: TimeInterval = 2.0
+
     init(
         frame: NSRect,
         clickThrough: Bool,
@@ -32,10 +54,11 @@ final class StackWindow: NSPanel, WKNavigationDelegate {
             configuration: config
         )
         webView.setValue(false, forKey: "drawsBackground")
-        // drawsBackground=false stops WebKit painting, but the CALayer can
-        // still composite white between orderFront and first paint (~50ms on
-        // a fullscreen reload). Force the layer non-opaque so the unset
-        // back-store doesn't flash as opaque on the first frame.
+        // drawsBackground=false stops WebKit painting; the non-opaque CALayer
+        // settings below are belt-and-suspenders so the unset back-store
+        // can't flash as opaque on the first frame. The primary fix for the
+        // orderFront-vs-first-paint race lives in the FirstPaintGate below
+        // (panel held at alphaValue=0 until didFinishNavigation).
         webView.wantsLayer = true
         webView.layer?.isOpaque = false
         webView.layer?.backgroundColor = NSColor.clear.cgColor
@@ -108,6 +131,7 @@ final class StackWindow: NSPanel, WKNavigationDelegate {
     }
 
     deinit {
+        revealFallbackTimer?.invalidate()
         NotificationCenter.default.removeObserver(self)
     }
 
@@ -180,6 +204,54 @@ final class StackWindow: NSPanel, WKNavigationDelegate {
     override var canBecomeKey: Bool { invocable }
     override var canBecomeMain: Bool { false }
 
+    // MARK: - First-paint gating
+
+    /// Stamp the panel hidden on the first show so the WKWebView has a
+    /// chance to produce a frame before the compositor sees us. Schedules
+    /// the safety-net reveal timer. Idempotent — subsequent calls are no-ops.
+    private func armFirstPaintGate() {
+        guard gate.shouldArmOnShow() else { return }
+        self.alphaValue = 0
+        revealFallbackTimer?.invalidate()
+        revealFallbackTimer = Timer.scheduledTimer(
+            withTimeInterval: StackWindow.firstPaintFallback, repeats: false
+        ) { [weak self] _ in
+            guard let self = self else { return }
+            if self.gate.fallbackFired() { self.revealNow() }
+        }
+    }
+
+    /// Reveal the panel and tear down the fallback timer. Called from the
+    /// `didFinishNavigation` callback (first paint), `didFail*` (so a broken
+    /// stack still becomes visible rather than invisible forever), or the
+    /// safety-net timer.
+    private func revealNow() {
+        revealFallbackTimer?.invalidate()
+        revealFallbackTimer = nil
+        // One runloop tick of stagger — gives the just-finished navigation's
+        // composited frame time to land in the back-store before the panel
+        // becomes opaque. `RunLoop.main.perform` (vs `DispatchQueue.main.async`)
+        // hands back to the current runloop iteration's tail, not a future one.
+        RunLoop.main.perform { [weak self] in
+            self?.alphaValue = 1
+        }
+    }
+
+    override func orderFront(_ sender: Any?) {
+        armFirstPaintGate()
+        super.orderFront(sender)
+    }
+
+    override func orderFrontRegardless() {
+        armFirstPaintGate()
+        super.orderFrontRegardless()
+    }
+
+    override func makeKeyAndOrderFront(_ sender: Any?) {
+        armFirstPaintGate()
+        super.makeKeyAndOrderFront(sender)
+    }
+
     /// Show + take keyboard focus. **Never activate the stackd process** —
     /// the project rule is "stackd is never the frontmost app." The window's
     /// `.nonactivatingPanel` style mask + `canBecomeKey = true` lets this
@@ -201,11 +273,70 @@ final class StackWindow: NSPanel, WKNavigationDelegate {
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         FileHandle.standardError.write(Data("stackd: webview did-finish \(webView.url?.absoluteString ?? "?")\n".utf8))
         webView.evaluateJavaScript("window.dispatchEvent(new Event('stackd:load'))", completionHandler: nil)
+        // First-paint signal: WKWebView's CALayer has the initial frame
+        // committed by the time didFinishNavigation fires. Reveal once;
+        // later navigations within the same window are no-ops.
+        if gate.shouldRevealOnLoadFinish() { revealNow() }
     }
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
         FileHandle.standardError.write(Data("stackd: webview did-fail \(error)\n".utf8))
+        // Reveal a broken stack instead of leaving it permanently hidden —
+        // visible-but-empty is more debuggable than silently invisible.
+        if gate.shouldRevealOnLoadFail() { revealNow() }
     }
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
         FileHandle.standardError.write(Data("stackd: webview did-fail-provisional \(error)\n".utf8))
+        if gate.shouldRevealOnLoadFail() { revealNow() }
+    }
+}
+
+// MARK: - FirstPaintGate
+
+/// Pure state machine for the first-paint reveal gate. Extracted from
+/// StackWindow so its decision logic can be unit-tested without driving a
+/// real WKWebView. Three states, monotonic forward:
+///
+///   .idle      — created, never shown
+///   .armed     — orderFront fired, alphaValue=0, waiting for first paint
+///   .revealed  — first paint (or failure / fallback) fired; stays revealed
+///
+/// All transitions are one-way: once revealed, every signal becomes a no-op.
+/// This is what lets reloads-within-window not re-hide the panel.
+struct FirstPaintGate {
+    enum State { case idle, armed, revealed }
+    private(set) var state: State = .idle
+
+    /// Called from orderFront / orderFrontRegardless / makeKeyAndOrderFront.
+    /// Returns true the first time only — caller should set alphaValue=0
+    /// and schedule the fallback timer. Subsequent calls return false so
+    /// re-ordering an already-revealed window doesn't hide it again.
+    mutating func shouldArmOnShow() -> Bool {
+        guard state == .idle else { return false }
+        state = .armed
+        return true
+    }
+
+    /// Called from WKNavigationDelegate.didFinishNavigation. Returns true
+    /// only on the transition .armed → .revealed; later navigations within
+    /// the same window (e.g. JS-driven reloads) are no-ops.
+    mutating func shouldRevealOnLoadFinish() -> Bool {
+        guard state == .armed else { return false }
+        state = .revealed
+        return true
+    }
+
+    /// Called from didFail / didFailProvisionalNavigation. Same transition
+    /// as load-finish — we'd rather show a broken stack than a hidden one.
+    mutating func shouldRevealOnLoadFail() -> Bool {
+        guard state == .armed else { return false }
+        state = .revealed
+        return true
+    }
+
+    /// Called when the fallback timer fires. Same transition.
+    mutating func fallbackFired() -> Bool {
+        guard state == .armed else { return false }
+        state = .revealed
+        return true
     }
 }
