@@ -174,6 +174,21 @@ function unregisterHandler(map, id, unbindPayload) {
   return request(unbindPayload);
 }
 
+// Wrap a bang name as a subscribe-able signal. Installs a
+// window.onBang_<bangSlug> handler that pushes detail into the channel.
+// Used by sd.windows.{created,destroyed,...}. The bangSlug is the sanitized
+// name (Bridge.swift lowercases + replaces non-alphanumerics with _), so
+// 'sd_window_created' here matches the daemon's onBang_sd_window_created
+// dispatch path.
+function __windowBang(bangSlug) {
+  const ch = signal(null, "bang:" + bangSlug);
+  const slot = "onBang_" + bangSlug;
+  // First subscriber wins the slot; secondary callers chain via .subscribe.
+  // Idempotent: re-install on hot-reload picks up the latest channel ref.
+  window[slot] = (detail) => { ch.value = detail; };
+  return ch;
+}
+
 // Pure-JS helpers — no IPC, no permission. Same shape across every
 // stack: stop reinventing debounce, throttle, and per-screen helpers.
 const util = {
@@ -242,6 +257,24 @@ export const sd = {
   windows:    {
     focused: channel("focusedWindow"),
     all:     channel("windowsAll"),
+    // Lifecycle channels — sugar over the sd.window.* bangs. Stack must
+    // declare `handles: ["sd.window.created", ...]` in stack.json for the
+    // daemon to route the bang to it. Each .subscribe(fn) re-fires whenever
+    // the matching bang lands.
+    //   sd.windows.created.subscribe(({id, app, frame}) => ...);
+    //   sd.windows.destroyed.subscribe(({id}) => ...);
+    //   sd.windows.moved.subscribe(({id, frame}) => ...);
+    //   sd.windows.resized.subscribe(({id, frame}) => ...);
+    //   sd.windows.minimized.subscribe(({id}) => ...);
+    //   sd.windows.deminimized.subscribe(({id}) => ...);
+    // The underlying bang names are still legal; this just removes the
+    // window.onBang_sd_window_* boilerplate.
+    created:      __windowBang("sd_window_created"),
+    destroyed:    __windowBang("sd_window_destroyed"),
+    moved:        __windowBang("sd_window_moved"),
+    resized:      __windowBang("sd_window_resized"),
+    minimized:    __windowBang("sd_window_minimized"),
+    deminimized:  __windowBang("sd_window_deminimized"),
     // F15 split — granular per-event-type channels alongside the legacy
     // union `focused` channel. Each fires the moment AX reports the matching
     // notification, so stacks can subscribe to exactly what they need.

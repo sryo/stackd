@@ -3,6 +3,7 @@ import Foundation
 registerChannelInferenceTests()
 registerUtilTests()
 registerDisplayHelpersTests()
+registerWindowChannelTests()
 registerBridgeJsonifyTests()
 registerStackDoctorTests()
 registerUpdateParserTests()
