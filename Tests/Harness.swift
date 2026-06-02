@@ -14,10 +14,11 @@ func expect(_ cond: @autoclosure () -> Bool, _ msg: String = "expectation failed
     if !cond() { throw Expectation(message: "\(file):\(line): \(msg)") }
 }
 
-func expectEqual<T: Equatable>(_ actual: T, _ expected: T,
+func expectEqual<T: Equatable>(_ actual: T, _ expected: T, _ msg: String = "",
                                file: StaticString = #file, line: UInt = #line) throws {
     if actual != expected {
-        throw Expectation(message: "\(file):\(line): expected \(expected), got \(actual)")
+        let prefix = msg.isEmpty ? "" : "\(msg): "
+        throw Expectation(message: "\(file):\(line): \(prefix)expected \(expected), got \(actual)")
     }
 }
 

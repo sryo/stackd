@@ -57,6 +57,11 @@ TEST_SOURCES=(
   Tests/LocationTests.swift
   Tests/BroadcastsTests.swift
   Tests/URLHandlerTests.swift
+  Tests/URLSchemeHandlerTests.swift
+  Tests/RefCountedObserverTests.swift
+  Tests/StackScopeTests.swift
+  Tests/FileWatcherTests.swift
+  Tests/StackSourceTests.swift
   Tests/TemplateEngineTests.swift
   Tests/main.swift
 )
