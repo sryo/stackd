@@ -122,20 +122,42 @@ final class DisplayObserver: RefCountedObserver {
             (NotificationCenter.default, NSApplication.didChangeScreenParametersNotification)
         ])
 
-        // Brightness has no notification; poll every 2s while at least one
-        // stack subscribes. Bridge's lastDisplay JSON dedup absorbs no-ops.
-        // Per-stack fanout can be slowed further via
-        // `sd.display.all.subscribe(fn, { interval })` (see
-        // Bridge.channelIntervals); the native 2s timer stays because hot-plug
-        // / arrangement changes still drive fire() on its own NotificationCenter
-        // path.
-        let timer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
+        // Brightness-change distributed notifications. The macOS bezel UI
+        // (the small overlay that appears when you press F1/F2 or move the
+        // brightness slider in System Settings) posts a DN that we can hook
+        // for instant pushes. Multiple names because the bezel implementation
+        // moved between BezelServices and BezelUI across macOS versions —
+        // observing all known names is cheap and covers both paths.
+        //
+        // Programmatic brightness changes that bypass the bezel still need
+        // the safety-net poll below; on a typical Mac, F1/F2 + System
+        // Settings cover ~all user-driven brightness changes, so the live
+        // path handles the cases the user actually notices.
+        let dn = DistributedNotificationCenter.default()
+        let brightnessTokens: [(NSObjectProtocol)] = [
+            "com.apple.BezelUI.BSBrightnessNotification",
+            "com.apple.BezelServices.BSBrightnessNotification",
+            "com.apple.brightness.changed",
+        ].map { name in
+            dn.addObserver(forName: Notification.Name(name),
+                           object: nil, queue: .main) { [weak self] _ in
+                self?.fire()
+            }
+        }
+
+        // Safety net: 1s poll (tightened from 2s). Catches programmatic
+        // brightness changes that bypass the bezel notifications + drives
+        // external-display readings (DDC-CI brightness can't be observed).
+        // Bridge's lastDisplay JSON dedup absorbs no-ops, so the cost when
+        // brightness is stable is one CGDirectDisplay read + a hash compare.
+        let timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
             self?.fire()
         }
         RunLoop.main.add(timer, forMode: .common)
 
         return Token {
             ncToken.cancel()
+            for t in brightnessTokens { dn.removeObserver(t) }
             timer.invalidate()
         }
     }

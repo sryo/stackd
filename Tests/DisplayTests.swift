@@ -150,4 +150,32 @@ func registerDisplayTests() {
             try expect(v >= 0 && v <= 255, "accent.\(key) out of range: \(v)")
         }
     }
+
+    // MARK: - DisplayObserver subscriber-gating
+    //
+    // 2026-06-02: DisplayObserver added distributed-notification observers
+    // for brightness change (BezelUI / BezelServices / com.apple.brightness)
+    // plus a tightened 1s safety-net poll. The contract that makes any of
+    // that worthwhile is RefCountedObserver gating — if a future refactor
+    // wires the timer at module-load time, idle CPU regresses silently.
+
+    test("DisplayObserver: inactive at startup (no subscribers)") {
+        try expect(!DisplayObserver.shared.isActive,
+                   "DisplayObserver must not be active before any stack subscribes")
+    }
+
+    test("DisplayObserver: activates on subscribe, deactivates after debounce") {
+        let token = DisplayObserver.shared.subscribe { }
+        try expect(DisplayObserver.shared.isActive,
+                   "subscribe should activate the observer")
+        token.cancel()
+        // 5s teardown debounce per RefCountedObserver. Spin the runloop
+        // past it so the asyncAfter work item fires.
+        let deadline = Date().addingTimeInterval(5.2)
+        while DisplayObserver.shared.isActive && Date() < deadline {
+            RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.05))
+        }
+        try expect(!DisplayObserver.shared.isActive,
+                   "DisplayObserver must deactivate ≤5.2s after last unsubscribe")
+    }
 }
