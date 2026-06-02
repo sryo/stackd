@@ -24,6 +24,14 @@ enum Location {
     /// mean "not measured" — see CLLocation docs); we coerce those to NSNull.
     static func snapshot() -> [String: Any]? {
         guard let loc = LocationObserver.shared.lastFix else { return nil }
+        return dictFromFix(loc)
+    }
+
+    /// Map a CLLocation into the JS-side dict shape. Extracted so the
+    /// sentinel-handling (CLLocation surfaces "unmeasured" as < 0 for
+    /// altitude / heading / speed) is hammerable without authorization
+    /// + a live CLLocationManager.
+    internal static func dictFromFix(_ loc: CLLocation) -> [String: Any] {
         var dict: [String: Any] = [
             "lat":       loc.coordinate.latitude,
             "lon":       loc.coordinate.longitude,

@@ -100,4 +100,110 @@ func registerLocationTests() {
         let b = LocationObserver.shared
         try expect(a === b, "LocationObserver.shared returned distinct instances")
     }
+
+    // MARK: - Location.dictFromFix (CLLocation → JS dict mapping)
+    //
+    // 2026-06-02: the CLLocation-to-dict mapping moved out of snapshot()
+    // into `dictFromFix(_ loc:)` (internal static) so the sentinel
+    // handling for altitude/heading/speed is testable without going
+    // through CLLocationManager + TCC. Construct a CLLocation with the
+    // public initializer and assert the mapping.
+
+    test("dictFromFix: complete fix maps every documented key with correct types") {
+        let loc = CLLocation(
+            coordinate: CLLocationCoordinate2D(latitude: 37.7749, longitude: -122.4194),
+            altitude:           42.0,
+            horizontalAccuracy: 5.0,
+            verticalAccuracy:   3.0,    // >= 0 → altitude is real
+            course:             90.0,   // >= 0 → heading is real
+            speed:              1.5,    // >= 0 → speed is real
+            timestamp:          Date(timeIntervalSince1970: 1_700_000_000)
+        )
+        let dict = Location.dictFromFix(loc)
+        try expectEqual(dict["lat"]      as? Double, 37.7749)
+        try expectEqual(dict["lon"]      as? Double, -122.4194)
+        try expectEqual(dict["accuracy"] as? Double, 5.0)
+        try expectEqual(dict["altitude"] as? Double, 42.0)
+        try expectEqual(dict["heading"]  as? Double, 90.0)
+        try expectEqual(dict["speed"]    as? Double, 1.5)
+        try expectEqual(dict["timestamp"] as? Double, 1_700_000_000.0)
+    }
+
+    test("dictFromFix: negative verticalAccuracy coerces altitude to NSNull") {
+        // CLLocation surfaces verticalAccuracy < 0 as the "altitude not
+        // measured" sentinel. The mapping must turn that into JS null
+        // (NSNull bridges to null via JSONSerialization), not bleed a
+        // bogus altitude value into the dict.
+        let loc = CLLocation(
+            coordinate: CLLocationCoordinate2D(latitude: 0, longitude: 0),
+            altitude:           0,
+            horizontalAccuracy: 5.0,
+            verticalAccuracy:   -1.0,
+            course:              90.0,
+            speed:               1.5,
+            timestamp:           Date()
+        )
+        let dict = Location.dictFromFix(loc)
+        try expect(dict["altitude"] is NSNull, "altitude must be NSNull when verticalAccuracy < 0")
+        // heading + speed still come through since their sentinels weren't tripped.
+        try expectEqual(dict["heading"] as? Double, 90.0)
+        try expectEqual(dict["speed"]   as? Double, 1.5)
+    }
+
+    test("dictFromFix: negative course coerces heading to NSNull") {
+        let loc = CLLocation(
+            coordinate: CLLocationCoordinate2D(latitude: 0, longitude: 0),
+            altitude:           10,
+            horizontalAccuracy: 5.0,
+            verticalAccuracy:   3.0,
+            course:             -1.0,
+            speed:               1.5,
+            timestamp:           Date()
+        )
+        let dict = Location.dictFromFix(loc)
+        try expect(dict["heading"] is NSNull, "heading must be NSNull when course < 0")
+        try expectEqual(dict["altitude"] as? Double, 10.0)
+        try expectEqual(dict["speed"]    as? Double, 1.5)
+    }
+
+    test("dictFromFix: negative speed coerces speed to NSNull") {
+        let loc = CLLocation(
+            coordinate: CLLocationCoordinate2D(latitude: 0, longitude: 0),
+            altitude:           10,
+            horizontalAccuracy: 5.0,
+            verticalAccuracy:   3.0,
+            course:              90.0,
+            speed:              -1.0,
+            timestamp:           Date()
+        )
+        let dict = Location.dictFromFix(loc)
+        try expect(dict["speed"] is NSNull, "speed must be NSNull when speed < 0")
+        try expectEqual(dict["altitude"] as? Double, 10.0)
+        try expectEqual(dict["heading"]  as? Double, 90.0)
+    }
+
+    test("dictFromFix: all three sentinels tripped simultaneously") {
+        // A stationary indoor fix with no altitude / heading / speed —
+        // most realistic case where CoreLocation returns sentinels for
+        // all three. The dict must still carry the keys (with NSNull),
+        // not omit them — JS consumers do `dict.altitude ?? "n/a"` and
+        // missing keys would surface as undefined rather than null.
+        let loc = CLLocation(
+            coordinate: CLLocationCoordinate2D(latitude: 0, longitude: 0),
+            altitude:           0,
+            horizontalAccuracy: 5.0,
+            verticalAccuracy:   -1.0,
+            course:             -1.0,
+            speed:              -1.0,
+            timestamp:           Date()
+        )
+        let dict = Location.dictFromFix(loc)
+        try expect(dict["altitude"] is NSNull)
+        try expect(dict["heading"]  is NSNull)
+        try expect(dict["speed"]    is NSNull)
+        try expect(dict["lat"]       != nil, "core fields still present")
+        try expect(dict["lon"]       != nil, "core fields still present")
+        try expect(dict["accuracy"]  != nil, "core fields still present")
+        try expect(dict["timestamp"] != nil, "core fields still present")
+    }
 }
