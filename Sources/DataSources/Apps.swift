@@ -152,7 +152,14 @@ enum Apps {
     /// AXMenuBarItem / submenu items so consumers can distinguish "no
     /// submenu" from "menu was unreadable".
     private static func walkMenu(_ el: AXUIElement) -> [String: Any] {
-        AXUIElementSetMessagingTimeout(el, 0.1)
+        // 100ms was too aggressive — apps with large/dynamic menubars
+        // (Xcode, Safari with many extensions, anything driving NSMenu via
+        // delegate-populated lazy sections) silently dropped items because
+        // individual attribute reads on a busy main thread can take longer
+        // than that. 1s gives the slow path room to complete while still
+        // bounding worst-case hang if an app is fully wedged. Net effect
+        // on happy path: invisible (AX responds in <10ms when responsive).
+        AXUIElementSetMessagingTimeout(el, 1.0)
         var out: [String: Any] = [:]
         if let title = axString(el, kAXTitleAttribute) { out["title"] = title }
         if let role  = axString(el, kAXRoleAttribute)  { out["role"]  = role }
