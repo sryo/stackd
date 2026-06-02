@@ -87,9 +87,13 @@ enum CLI {
         return 0
     }
 
-    private static func isSafeId(_ s: String) -> Bool {
+    /// Stack IDs become the host component of `sd://<id>/index.html`. RFC 3986
+    /// requires the host to be ASCII; allowing `c.isLetter` (which accepts
+    /// CJK / accented / emoji-letter characters) would silently break the
+    /// URL scheme handler for those stacks. ASCII-only.
+    internal static func isSafeId(_ s: String) -> Bool {
         guard !s.isEmpty, !s.hasPrefix(".") else { return false }
-        for c in s where !(c.isLetter || c.isNumber || c == "-" || c == "_") { return false }
+        for c in s where !(c.isASCII && (c.isLetter || c.isNumber || c == "-" || c == "_")) { return false }
         return true
     }
 
@@ -151,7 +155,7 @@ enum CLI {
         let prop = String(assignment[..<eq])
         let value = String(assignment[assignment.index(after: eq)...])
 
-        let targets = matchStacks(selector: selector, host: host)
+        let targets = matchStacks(selector: selector, candidates: host.listStacks())
         if targets.isEmpty {
             return "error: no stack matched: \(selector)\n"
         }
@@ -176,15 +180,22 @@ enum CLI {
         return "fired '\(name)' to \(count) stack(s)\n"
     }
 
-    private static func matchStacks(selector: String, host: StackHost) -> [String] {
+    /// Resolve a selector (`<id>` or `/regex/`) against a candidate list.
+    /// Decoupled from StackHost so the matching logic is testable without
+    /// constructing a host. Caller passes `host.listStacks()` as candidates.
+    internal static func matchStacks(selector: String, candidates: [String]) -> [String] {
         if selector.hasPrefix("/") && selector.hasSuffix("/") && selector.count >= 2 {
             let pattern = String(selector.dropFirst().dropLast())
+            // `//` (empty regex) would compile successfully and match every
+            // candidate — a footgun for the destructive `set` verb. Treat as
+            // empty selection. Use `/.*/` if you really want "all stacks".
+            if pattern.isEmpty { return [] }
             guard let re = try? NSRegularExpression(pattern: pattern) else { return [] }
-            return host.listStacks().filter { id in
+            return candidates.filter { id in
                 let r = NSRange(id.startIndex..., in: id)
                 return re.firstMatch(in: id, range: r) != nil
             }
         }
-        return host.listStacks().contains(selector) ? [selector] : []
+        return candidates.contains(selector) ? [selector] : []
     }
 }

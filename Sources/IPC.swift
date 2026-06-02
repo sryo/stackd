@@ -113,7 +113,13 @@ final class IPCServer {
             response = self?.dispatcher?(argv) ?? "error: no dispatcher\n"
             sem.signal()
         }
-        sem.wait()
+        // Hard cap: if the dispatcher hangs (a stack's bang handler stuck on a
+        // blocking call, main runloop saturated, etc.), don't wedge the worker
+        // thread forever. 10s is generous for any legitimate dispatch; reload
+        // of many stacks is the worst legitimate case and that's well under.
+        if sem.wait(timeout: .now() + 10) == .timedOut {
+            response = "error: dispatcher timed out (>10s)\n"
+        }
 
         response.withCString { ptr in _ = write(fd, ptr, strlen(ptr)) }
     }

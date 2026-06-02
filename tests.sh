@@ -63,6 +63,7 @@ TEST_SOURCES=(
   Tests/FileWatcherTests.swift
   Tests/StackSourceTests.swift
   Tests/SafePredicateTests.swift
+  Tests/CLITests.swift
   Tests/TemplateEngineTests.swift
   Tests/main.swift
 )

@@ -43,8 +43,11 @@ enum Notify {
     }
 
     /// AppleScript string literal: wrap in double quotes, escape backslashes
-    /// then double quotes. Keeps the rest of the body intact.
-    private static func escape(_ s: String) -> String {
+    /// then double quotes. Keeps the rest of the body intact. Order matters —
+    /// backslashes MUST be escaped before quotes, otherwise the `\"` we
+    /// produce for a quote would itself get re-escaped to `\\"` and break
+    /// the AppleScript parser.
+    internal static func escape(_ s: String) -> String {
         let escaped = s
             .replacingOccurrences(of: "\\", with: "\\\\")
             .replacingOccurrences(of: "\"", with: "\\\"")
