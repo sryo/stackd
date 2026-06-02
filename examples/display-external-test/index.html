@@ -1,0 +1,86 @@
+<!doctype html>
+<html><head><meta charset="utf-8">
+<style>
+  body {
+    margin: 0; padding: 12px 14px;
+    font: 11px -apple-system, system-ui, sans-serif;
+    color: #fff;
+    background: rgba(20, 20, 22, 0.78);
+    border-radius: 10px;
+    -webkit-backdrop-filter: blur(20px);
+  }
+  h1 { font-size: 10px; margin: 0 0 8px; opacity: 0.55; text-transform: uppercase; letter-spacing: 0.08em; }
+  .display { margin-bottom: 10px; }
+  .row { display: flex; align-items: center; gap: 8px; }
+  .name { flex: 1; opacity: 0.85; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .tag { font-size: 9px; padding: 1px 5px; border-radius: 3px; background: rgba(255,255,255,0.12); opacity: 0.7; }
+  .tag.ext { background: rgba(120, 180, 255, 0.18); color: #aac8ff; }
+  input[type=range] { flex: 1; -webkit-appearance: none; height: 3px; background: rgba(255,255,255,0.15); border-radius: 2px; }
+  input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; width: 11px; height: 11px; border-radius: 50%; background: #fff; }
+  .pct { width: 36px; text-align: right; opacity: 0.7; font-variant-numeric: tabular-nums; }
+  .note { font-size: 9px; opacity: 0.45; margin-top: 6px; line-height: 1.4; }
+</style>
+</head><body>
+<h1>display brightness · ddc-ci</h1>
+<div id="list"></div>
+<div class="note">External monitors route through DDC/CI over IOAVService.
+Read often returns null (most monitors stub VCP-read) — UI then falls back
+to an optimistic local value.</div>
+<script type="module">
+  import { sd } from "sd://runtime/api.js";
+
+  const list = document.getElementById("list");
+
+  // Initial paint + re-paint on screen-arrangement change. The slider's
+  // own input listener handles the per-second drag updates without
+  // re-fetching the whole list each time.
+  sd.display.all.subscribe(async (displays) => {
+    list.innerHTML = "";
+    for (const d of displays) {
+      const row = document.createElement("div");
+      row.className = "display";
+
+      // Header row: name + builtin/external tag.
+      const header = document.createElement("div");
+      header.className = "row";
+      const name = document.createElement("span");
+      name.className = "name";
+      name.textContent = d.name || `Display ${d.displayID}`;
+      const tag = document.createElement("span");
+      tag.className = d.builtin ? "tag" : "tag ext";
+      tag.textContent = d.builtin ? "BUILT-IN" : "EXTERNAL";
+      header.append(name, tag);
+
+      // Slider row.
+      const ctl = document.createElement("div");
+      ctl.className = "row";
+      const slider = document.createElement("input");
+      slider.type = "range";
+      slider.min = 0; slider.max = 100;
+      const pct = document.createElement("span");
+      pct.className = "pct";
+
+      // Seed from getBrightness, falling back to the snapshot in the
+      // displays array (which is also nil-on-DDC-read-fail).
+      const cur = await sd.display.getBrightness({ displayId: d.displayID });
+      const seed = cur ?? d.brightness;
+      const initial = seed != null ? Math.round(seed * 100) : 50;
+      slider.value = initial;
+      pct.textContent = `${initial}%`;
+
+      // Live drag — sends every input event. setBrightness is sync on
+      // the daemon side, so dropped frames just mean a slightly older
+      // value reaches the monitor.
+      slider.addEventListener("input", () => {
+        const v = Number(slider.value);
+        pct.textContent = `${v}%`;
+        sd.display.setBrightness(v / 100, { displayId: d.displayID });
+      });
+
+      ctl.append(slider, pct);
+      row.append(header, ctl);
+      list.appendChild(row);
+    }
+  });
+</script>
+</body></html>

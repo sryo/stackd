@@ -9,8 +9,11 @@ import UniformTypeIdentifiers
 // Per-display info + brightness. Brightness on Apple Silicon's built-in
 // display requires the private DisplayServices framework — loaded via
 // dlopen so a missing framework degrades to nil instead of failing the build.
-// External-display brightness control (DDC/CI) is out of scope; that's
-// Lunar's job, not the daemon's.
+//
+// External-display brightness uses DDC/CI over the IOAVService private
+// SPI; see DisplayDDC.swift. setBrightness routes by CGDisplayIsBuiltin —
+// internal hits DisplayServices, external hits DDC. Both code paths
+// degrade to a `false` return if the underlying SPI doesn't load.
 
 enum Display {
     // `frame`/`visibleFrame` are serialized as CG top-left to match every other
@@ -47,16 +50,35 @@ enum Display {
     }
 
     static func brightness(of displayID: CGDirectDisplayID) -> Float? {
-        guard let getter = DisplayServicesShim.getBrightness else { return nil }
-        var v: Float = 0
-        return getter(displayID, &v) == 0 ? v : nil
+        // Built-in panel: DisplayServices reports a normalized 0..1 directly.
+        // External: DDC-CI VCP read returns an integer 0..100 (and many
+        // monitors don't actually implement the read side, so this often
+        // returns nil — JS surfaces that as null and the UI falls back to
+        // an optimistic local value).
+        if CGDisplayIsBuiltin(displayID) != 0 {
+            guard let getter = DisplayServicesShim.getBrightness else { return nil }
+            var v: Float = 0
+            return getter(displayID, &v) == 0 ? v : nil
+        }
+        guard let pct = DisplayDDC.getBrightness(displayID: displayID) else { return nil }
+        return Float(pct) / 100.0
     }
 
     @discardableResult
     static func setBrightness(displayID: CGDirectDisplayID, _ value: Float) -> Bool {
-        guard let setter = DisplayServicesShim.setBrightness else { return false }
         let clamped: Float = max(0, min(1, value))
-        return setter(displayID, clamped) == 0
+        if CGDisplayIsBuiltin(displayID) != 0 {
+            // Internal display: CoreDisplay/DisplayServices SPI. Takes the
+            // normalized 0..1 value as-is — no I²C round-trip.
+            guard let setter = DisplayServicesShim.setBrightness else { return false }
+            return setter(displayID, clamped) == 0
+        }
+        // External display: VESA MCCS brightness over DDC/CI. v1 assumes
+        // the monitor uses a 0..100 scale (the common case); monitors that
+        // declare a larger max via the capabilities string will see this
+        // as "always low" until a v2 caps-string fetch lands.
+        let percent = Int((clamped * 100).rounded())
+        return DisplayDDC.setBrightness(displayID: displayID, percent: percent)
     }
 
     private static func uuidString(for id: CGDirectDisplayID) -> String? {

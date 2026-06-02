@@ -397,8 +397,40 @@ export const sd = {
     // stack's fanout (event-driven re-fires still arrive):
     //   sd.display.all.subscribe(d => updateUI(d), { interval: 10 });
     all:        channel("displays"),
-    setBrightness(displayID, value) {
+    // setBrightness(displayID, value) or setBrightness(value, { displayId })
+    //
+    // Accepts two call shapes for back-compat:
+    //   sd.display.setBrightness(0.5)                — main display
+    //   sd.display.setBrightness(displayID, 0.5)     — legacy positional
+    //   sd.display.setBrightness(0.5, { displayId }) — preferred
+    //
+    // value is 0..1 (normalized). External monitors route through DDC/CI
+    // over IOAVService — returns false if the IOAVService SPI can't load
+    // or no monitor matches the displayId.
+    setBrightness(a, b) {
+      let displayID, value;
+      if (typeof b === "object" && b !== null) {
+        // New shape: (value, { displayId })
+        value = a;
+        displayID = b.displayId ?? b.displayID ?? 0;
+      } else if (typeof b === "number") {
+        // Legacy positional: (displayID, value)
+        displayID = a;
+        value = b;
+      } else {
+        // Single-arg: (value) — main display
+        value = a;
+        displayID = 0;
+      }
       return request({ type: "display.setBrightness", displayID, value });
+    },
+    // Reads the current brightness back. Returns a Promise<number|null>
+    // in 0..1; external monitors that don't implement the DDC read side
+    // resolve to null. Main display when displayId omitted.
+    getBrightness(opts) {
+      const o = opts || {};
+      const displayID = o.displayId ?? o.displayID ?? 0;
+      return request({ type: "display.getBrightness", displayID });
     },
     // Single-frame pixel capture. Returns { dataURL, width, height } or null.
     //   await sd.display.snapshot()                       // main display, PNG

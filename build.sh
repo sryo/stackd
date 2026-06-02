@@ -35,6 +35,7 @@ SWIFT_SOURCES=(
   Sources/DataSources/Network.swift
   Sources/DataSources/Audio.swift
   Sources/DataSources/Display.swift
+  Sources/DataSources/DisplayDDC.swift
   Sources/DataSources/Sensors.swift
 
   Sources/DataSources/Storage.swift

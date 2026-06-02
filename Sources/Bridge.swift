@@ -627,10 +627,34 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         },
 
         // Display
+        //
+        // `displayID` is the CGDirectDisplayID returned by sd.display.all.
+        // When 0 / missing, falls back to CGMainDisplayID so single-display
+        // callers can just pass the value without enumerating screens.
+        // Routing between internal (DisplayServices) and external (DDC/CI
+        // via IOAVService) happens inside Display.setBrightness.
         .sync("display.setBrightness", permission: "display", denyValue: false) { body in
-            Display.setBrightness(
-                displayID: CGDirectDisplayID((body["displayID"] as? Int) ?? 0),
+            let id: CGDirectDisplayID
+            if let raw = body["displayID"] as? Int, raw != 0 {
+                id = CGDirectDisplayID(raw)
+            } else {
+                id = CGMainDisplayID()
+            }
+            return Display.setBrightness(
+                displayID: id,
                 Float((body["value"] as? Double) ?? 0))
+        },
+        // Mirror of setBrightness — reads back current brightness as a 0..1
+        // Double or null. External monitors often nil out (DDC-read is
+        // optional in the spec); built-in always returns a value.
+        .sync("display.getBrightness", permission: "display", denyValue: NSNull()) { body in
+            let id: CGDirectDisplayID
+            if let raw = body["displayID"] as? Int, raw != 0 {
+                id = CGDirectDisplayID(raw)
+            } else {
+                id = CGMainDisplayID()
+            }
+            return Display.brightness(of: id).map { Double($0) } ?? NSNull()
         },
 
         // Display snapshot — single-frame ScreenCaptureKit grab (14+) or

@@ -34,6 +34,7 @@ TEST_SOURCES=(
   Tests/MenubarItemsTests.swift
   Tests/AppIntentsTests.swift
   Tests/PrivacyRecordingTests.swift
+  Tests/DisplayDDCTests.swift
   Tests/TemplateEngineTests.swift
   Tests/main.swift
 )

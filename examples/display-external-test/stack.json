@@ -1,0 +1,7 @@
+{
+  "id": "display-external-test",
+  "name": "External display brightness",
+  "anchor": { "edge": "top-right", "inset": [40, 40] },
+  "size": { "w": 320, "h": 240 },
+  "permissions": ["display"]
+}
