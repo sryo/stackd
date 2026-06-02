@@ -17,21 +17,28 @@ enum Broadcasts {
         let observerToken = center.addObserver(
             forName: Notification.Name(name),
             object: nil, queue: .main
-        ) { notif in
-            var payload: [String: Any] = ["name": notif.name.rawValue]
-            if let obj = notif.object as? String { payload["object"] = obj }
-            if let info = notif.userInfo {
-                for (k, v) in info {
-                    guard let key = k as? String else { continue }
-                    // Only forward JSON-able scalars. Drop NSData / arbitrary objects
-                    // so jsonify doesn't choke on something WKWebView can't eval.
-                    if v is String || v is NSNumber || v is Bool { payload[key] = v }
-                }
-            }
-            callback(payload)
-        }
+        ) { notif in callback(payload(from: notif)) }
         return Token {
             center.removeObserver(observerToken)
         }
+    }
+
+    /// Pure Notification → JS-payload mapping. Extracted from the observer
+    /// closure so the JSON-ability filter is testable without listening on
+    /// the real DistributedNotificationCenter. JS consumers receive this
+    /// dict via Bridge.jsonify → WKWebView eval, so anything that isn't a
+    /// JSON scalar would either crash JSONSerialization (Date, raw nil) or
+    /// arrive as an unhelpful "[object Object]" string. Drop them at the
+    /// boundary instead.
+    internal static func payload(from notif: Notification) -> [String: Any] {
+        var payload: [String: Any] = ["name": notif.name.rawValue]
+        if let obj = notif.object as? String { payload["object"] = obj }
+        if let info = notif.userInfo {
+            for (k, v) in info {
+                guard let key = k as? String else { continue }
+                if v is String || v is NSNumber || v is Bool { payload[key] = v }
+            }
+        }
+        return payload
     }
 }
