@@ -15,7 +15,7 @@ struct StackManifest: Decodable {
     let eventtap: [EventTap]?
     let display: String?            // "primary" (default) | "all" | "<index>"
     let invocable: Bool?            // window starts hidden + can take key on .invoke()
-    let level: String?              // "high" → above default .statusBar (for toasts on fullscreen stacks)
+    let level: String?              // semantic tier or numeric override — see resolveLevel below
     let material: String?           // "glass" | "sidebar" | "hud" | "popover" | "menu" | "titlebar" | "sheet" | "window" — native NSVisualEffectView under WebView (LiquidGlass via NSGlassEffectView on macOS 26+)
 
     struct Anchor: Decodable { let edge: String; let inset: [Int] }
@@ -241,21 +241,8 @@ final class StackHost {
     private func spawnInstance(manifest: StackManifest, key: String, screen: NSScreen, screenIndex: Int) {
         let frame = frameFor(manifest: manifest, screen: screen)
 
-        // Default HUDs sit at .statusBar (25), below the macOS menu bar which
-        // composites at a higher visual level. region:"menubar" needs to draw
-        // OVER the menu bar — bump to .screenSaver (1000), same trick
-        // SketchyBar uses. Invocable stacks (palettes / choosers) need to
-        // take key, which a click-through HUD can't.
         let invocable = manifest.invocable ?? false
-        // Fullscreen stacks all share level .statusBar, so multiple fullscreens
-        // (TimeTrail + UndoClose, future cursor overlays) get z-order set by
-        // load order. For HUDs that need to win against ambient fullscreens,
-        // manifest can set `level: "high"` to use .screenSaver-1.
-        let level: NSWindow.Level = {
-            if manifest.region == "menubar" { return .screenSaver }
-            if manifest.level == "high"     { return NSWindow.Level(rawValue: 999) }
-            return .statusBar
-        }()
+        let level = StackHost.resolveLevel(manifest: manifest)
         let win = StackWindow(
             frame: frame,
             clickThrough: invocable ? false : (manifest.clickThrough ?? true),
@@ -318,6 +305,34 @@ final class StackHost {
         case "right":        return NSRect(x: vf.maxX - w,          y: vf.minY,              width: w,        height: vf.height)
         default:             return NSRect(x: vf.midX - w/2,        y: vf.midY - h/2,        width: w,        height: h)
         }
+    }
+
+    /// Resolve the per-stack window level. Semantic tiers ascending:
+    ///   "bar"     900 — topbars / menubar replacements (above ordinary windows,
+    ///                    below HUDs so tooltips render on top of the bar)
+    ///   "overlay" 950 — default for HUDs (toasts, badges, frame outlines)
+    ///   "tooltip" 1000 — hover hints that should sit on top of overlays
+    ///                    (FrameMaster corner labels, dock-style indicators)
+    ///   "cursor"  1050 — cursor-anchored layers that must beat everything
+    ///                    else (TimeTrail trail, BubbleCursor)
+    /// A numeric string (e.g. "1234") overrides the tier table. Legacy
+    /// "high" maps to 999 for compatibility. Default with no level field:
+    /// "bar" if region == "menubar" (otherwise the bar would render below
+    /// the system menubar), "overlay" otherwise.
+    static func resolveLevel(manifest: StackManifest) -> NSWindow.Level {
+        if let s = manifest.level, !s.isEmpty {
+            if let n = Int(s) { return NSWindow.Level(rawValue: n) }
+            switch s {
+            case "bar":     return NSWindow.Level(rawValue: 900)
+            case "overlay": return NSWindow.Level(rawValue: 950)
+            case "tooltip": return NSWindow.Level(rawValue: 1000)
+            case "cursor":  return NSWindow.Level(rawValue: 1050)
+            case "high":    return NSWindow.Level(rawValue: 999) // legacy
+            default: break
+            }
+        }
+        if manifest.region == "menubar" { return NSWindow.Level(rawValue: 900) }
+        return NSWindow.Level(rawValue: 950)
     }
 
     private static func screensFor(displaySpec: String) -> [(Int, NSScreen)] {
