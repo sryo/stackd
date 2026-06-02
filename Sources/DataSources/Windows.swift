@@ -189,7 +189,14 @@ enum Windows {
     // if the SPI symbol fails to resolve. Each entry carries `onscreen: Bool` so
     // consumers that want only visible windows can filter without losing the
     // option to see the full inventory.
-    static func all() -> [[String: Any]] {
+    /// Own-pid cache — stackd's own panels show up in CGWindowList alongside
+    /// real user windows and pollute every consumer that iterates them
+    /// (windowscape tiling, framemaster border-drawing, custom switchers,
+    /// etc.). Exclude them by default; stacks that genuinely need to enumerate
+    /// stackd's own panels can opt in.
+    private static let ownPid: Int = Int(ProcessInfo.processInfo.processIdentifier)
+
+    static func all(includeOwn: Bool = false) -> [[String: Any]] {
         // SLSCopyWindowsWithOptionsAndTags is the yabai-style "authoritative"
         // path but crashes inside SkyLight on macOS 26 (Tahoe) — repro: any
         // stack with `windows` permission segfaults at startWorkspace's
@@ -199,10 +206,10 @@ enum Windows {
             [.optionAll, .excludeDesktopElements],
             kCGNullWindowID
         ) else { return [] }
-        return decode(raw as! [[String: Any]])
+        return decode(raw as! [[String: Any]], includeOwn: includeOwn)
     }
 
-    private static func decode(_ list: [[String: Any]]) -> [[String: Any]] {
+    private static func decode(_ list: [[String: Any]], includeOwn: Bool) -> [[String: Any]] {
         list.compactMap { info -> [String: Any]? in
             guard let num   = info[kCGWindowNumber as String]    as? Int,
                   let layer = info[kCGWindowLayer  as String]    as? Int,
@@ -211,6 +218,7 @@ enum Windows {
                   let pid   = info[kCGWindowOwnerPID  as String] as? Int,
                   let bounds = info[kCGWindowBounds as String]   as? [String: CGFloat]
             else { return nil }
+            if !includeOwn && pid == ownPid { return nil }
             let onscreen = (info[kCGWindowIsOnscreen as String] as? Int) ?? 0
             return [
                 "id": num,
