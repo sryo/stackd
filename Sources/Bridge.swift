@@ -1511,6 +1511,11 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         .ax("windows.byId.cornerHints", permission: "windows") { _, body in
             WindowsByID.cornerHints(windowID: CGWindowID((body["id"] as? Int) ?? 0))
         },
+        // Batch reader — one AX lookup, all curated readers in one payload.
+        // Replaces 4-9 sequential round-trips at attach/render time.
+        .ax("windows.byId.info",        permission: "windows") { _, body in
+            WindowsByID.info(windowID: CGWindowID((body["id"] as? Int) ?? 0)) as Any? ?? NSNull()
+        },
         // Curated AX readers — per-window properties without round-tripping
         // through `sd.ax.*`. Each maps 1:1 to a WindowsByID static; `.ax`
         // because AX queries must hop to main. nil/false results pass through

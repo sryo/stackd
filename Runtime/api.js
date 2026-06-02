@@ -291,6 +291,15 @@ export const sd = {
     //             ? 0 : h.toolbarPresent ? 26 : 16;
     // matching Tahoe's WindowServer rounding.
     cornerHints(id) { return request({ type: "windows.byId.cornerHints", id }); },
+    // Batch reader: one round-trip → all curated properties at once.
+    // Returns null when the window is unaddressable; otherwise:
+    //   { frame, title, role, subrole, isMinimized, isFullscreen, isMain,
+    //     isStandard, hasToolbar, cornerHints }
+    // Use this instead of 4-9 sequential calls (`frame`, `title`,
+    // `isStandard`, `cornerHints`, ...) when a stack needs several
+    // properties at attach/render time. overlay-border was 4 RPCs
+    // per focus change; sd.windows.info collapses that to 1.
+    info(id) { return request({ type: "windows.byId.info", id }); },
     // Curated AX readers — per-window properties straight off WindowsByID,
     // so stacks don't have to round-trip through `sd.ax.*` for the common
     // cases. Permission: "windows" (each gates on the same key as the

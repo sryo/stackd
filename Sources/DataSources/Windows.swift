@@ -564,6 +564,57 @@ enum WindowsByID {
         subrole(windowID: windowID) == (kAXStandardWindowSubrole as String)
     }
 
+    /// Batch reader — one AXUIElement lookup, all properties returned.
+    /// Replaces 4-9 individual round-trips when a stack wants several
+    /// curated readers for the same window (overlay-border at attach time:
+    /// isStandard + cornerHints + frame + title — was 4 RPCs, now 1).
+    ///
+    /// Returns nil when the window is unaddressable. Each field is best-
+    /// effort: a missing property is null/false, not a hard failure.
+    static func info(windowID: CGWindowID) -> [String: Any]? {
+        guard let el = elementFor(windowID: windowID) else { return nil }
+        AXUIElementSetMessagingTimeout(el, 0.1)
+        // frame
+        var posRef: AnyObject?, sizeRef: AnyObject?
+        AXUIElementCopyAttributeValue(el, kAXPositionAttribute as CFString, &posRef)
+        AXUIElementCopyAttributeValue(el, kAXSizeAttribute as CFString, &sizeRef)
+        var pt = CGPoint.zero, sz = CGSize.zero
+        if let p = posRef { AXValueGetValue(p as! AXValue, .cgPoint, &pt) }
+        if let s = sizeRef { AXValueGetValue(s as! AXValue, .cgSize,  &sz) }
+        let frame: [String: Int] = [
+            "x": Int(pt.x), "y": Int(pt.y), "w": Int(sz.width), "h": Int(sz.height)
+        ]
+        // String attrs (nil → NSNull so JSON.stringify yields null)
+        let titleVal:   Any = axStringAttribute(el, kAXTitleAttribute   as String) ?? NSNull()
+        let roleVal:    Any = axStringAttribute(el, kAXRoleAttribute    as String) ?? NSNull()
+        let subroleVal: Any = axStringAttribute(el, kAXSubroleAttribute as String) ?? NSNull()
+        // Bool attrs
+        var minRef: AnyObject?, fsRef: AnyObject?, mainRef: AnyObject?
+        AXUIElementCopyAttributeValue(el, kAXMinimizedAttribute as CFString, &minRef)
+        AXUIElementCopyAttributeValue(el, "AXFullScreen" as CFString,        &fsRef)
+        AXUIElementCopyAttributeValue(el, kAXMainAttribute as CFString,      &mainRef)
+        let isMin = (minRef as? Bool) ?? false
+        let isFs  = (fsRef  as? Bool) ?? false
+        // hasToolbar — same AXToolbar probe as the curated reader.
+        var toolbarRef: AnyObject?
+        AXUIElementCopyAttributeValue(el, "AXToolbar" as CFString, &toolbarRef)
+        let hasToolbar = toolbarRef != nil
+        // isStandard derived from subrole
+        let isStd = (subroleVal as? String) == (kAXStandardWindowSubrole as String)
+        return [
+            "frame":        frame,
+            "title":        titleVal,
+            "role":         roleVal,
+            "subrole":      subroleVal,
+            "isMinimized":  isMin,
+            "isFullscreen": isFs,
+            "isMain":       (mainRef as? Bool) ?? false,
+            "isStandard":   isStd,
+            "hasToolbar":   hasToolbar,
+            "cornerHints":  cornerHints(windowID: windowID)
+        ]
+    }
+
     /// Per-window tab list. Walks the window's direct children for an
     /// `AXTabGroup` (browsers, Finder, terminals all use it); returns
     /// `[{title, selected}]` from the tab group's `AXChildren` (typically

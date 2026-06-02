@@ -228,4 +228,16 @@ func registerWindowsTests() {
         WindowsByID.invalidateCache(pid: 999999)
         try expect(true, "invalidateCache(pid:) did not crash for unknown pids")
     }
+
+    // MARK: - WindowsByID.info — batch reader
+
+    test("WindowsByID.info returns nil for an unaddressable windowID") {
+        // info() consolidates frame/title/role/subrole/isMinimized/isFullscreen
+        // /isStandard/hasToolbar/cornerHints into one AX lookup. For an id
+        // that doesn't resolve via elementFor, the contract is nil (not a
+        // partial dict). Mirrors WindowsByID.frame's nil contract; lets
+        // callers fall through to a no-op cleanly.
+        let result = WindowsByID.info(windowID: 0)
+        try expect(result == nil, "info(0) returned non-nil: \(String(describing: result))")
+    }
 }
