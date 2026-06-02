@@ -80,7 +80,9 @@
     stopBtn.disabled  = false;
 
     handle = sd.speech.listen({ locale: "en-US" });
-    handle.subscribe(({ text, isFinal, error }) => {
+    handle.subscribe((event) => {
+      if (!event) return;  // signals fire null first; wait for real data
+      const { text, isFinal, error } = event;
       if (error) {
         statusEl.textContent = "error";
         scriptEl.textContent = error;
