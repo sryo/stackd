@@ -35,6 +35,28 @@ TEST_SOURCES=(
   Tests/AppIntentsTests.swift
   Tests/PrivacyRecordingTests.swift
   Tests/DisplayDDCTests.swift
+  Tests/AppsTests.swift
+  Tests/AudioTests.swift
+  Tests/AXTests.swift
+  Tests/DevicesTests.swift
+  Tests/DisplayTests.swift
+  Tests/InputTests.swift
+  Tests/NetworkTests.swift
+  Tests/NLPTests.swift
+  Tests/NotifyTests.swift
+  Tests/StorageTests.swift
+  Tests/ThumbnailsTests.swift
+  Tests/VisionTests.swift
+  Tests/WindowsTests.swift
+  Tests/OverlayTests.swift
+  Tests/ProcTests.swift
+  Tests/SensorsTests.swift
+  Tests/SpeechTTSTests.swift
+  Tests/SpotlightOneShotTests.swift
+  Tests/HTTPServerTests.swift
+  Tests/LocationTests.swift
+  Tests/BroadcastsTests.swift
+  Tests/URLHandlerTests.swift
   Tests/TemplateEngineTests.swift
   Tests/main.swift
 )

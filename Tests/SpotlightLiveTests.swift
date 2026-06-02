@@ -72,4 +72,24 @@ func registerSpotlightLiveTests() {
         try expectEqual(Spotlight.jsonableValue("hello") as? String, "hello")
         try expectEqual(Spotlight.jsonableValue(42) as? Int, 42)
     }
+
+    // ── LiveQuery construction guard ─────────────────────────────────────
+    // The "live" flavor differs from one-shot in that it keeps the
+    // NSMetadataQuery alive after the initial gather and re-pushes on
+    // every NSMetadataQueryDidUpdate. We can't drive that loop here (it
+    // needs a real Spotlight index + main runloop), but the failable
+    // initializer's predicate guard IS synchronous and deterministic — it
+    // mirrors find()'s empty-predicate short-circuit and is the only safe
+    // observation we can make without spinning up a query.
+    test("LiveQuery init returns nil on nil predicate") {
+        let q = Spotlight.LiveQuery(predicate: nil, scopes: nil,
+                                    attributes: nil, limit: nil) { _ in }
+        try expect(q == nil, "expected nil LiveQuery for nil predicate")
+    }
+
+    test("LiveQuery init returns nil on empty predicate") {
+        let q = Spotlight.LiveQuery(predicate: "", scopes: nil,
+                                    attributes: nil, limit: nil) { _ in }
+        try expect(q == nil, "expected nil LiveQuery for empty predicate")
+    }
 }

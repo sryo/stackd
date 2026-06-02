@@ -222,7 +222,12 @@ enum Vision {
         decode: @escaping (R, CGImage) -> [String: Any]?
     ) {
         guard let cgImage = decodeImage(source) else {
-            completion(nil); return
+            // Bail path must also hop to main so callers can rely on a single
+            // "completion is always async on main" contract — mirrors
+            // Thumbnails.generate. Firing inline here would let JS callbacks
+            // re-enter the bridge mid-request.
+            DispatchQueue.main.async { completion(nil) }
+            return
         }
         DispatchQueue.global(qos: .userInitiated).async {
             let request = build()
