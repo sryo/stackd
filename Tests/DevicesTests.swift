@@ -165,16 +165,24 @@ func registerDevicesTests() {
         }
     }
 
-    test("Camera.frame: bogus deviceId bail completion is async (never inline)") {
-        // Same pinning as VisionTests' bail-path checks: passing a deviceId
-        // that AVCaptureDevice(uniqueID:) can't resolve must NOT fire the
-        // completion synchronously. Frame is otherwise async; sync-bail
-        // would force callers to handle two completion-timing flavors and
-        // could re-enter the JS bridge mid-call.
+    test("Camera.frame: bogus deviceId bail completion is async AND does fire") {
+        // Two asserts: completion must not fire INLINE (would re-enter
+        // Bridge before the dispatch returned) AND it must eventually fire
+        // (otherwise the fix dropped the completion entirely, which is a
+        // different bug — the JS caller would hang forever waiting).
         var fired = false
-        Camera.frame(deviceId: "not-a-real-camera-uniqueID-\(UUID().uuidString)") { _ in
+        var arg: [String: Any]? = nil
+        Camera.frame(deviceId: "not-a-real-camera-uniqueID-\(UUID().uuidString)") { result in
             fired = true
+            arg = result
         }
         try expect(!fired, "Camera.frame completion must not fire synchronously on the bail path")
+        // Spin the runloop so the DispatchQueue.main.async work item fires.
+        let deadline = Date().addingTimeInterval(0.25)
+        while !fired && Date() < deadline {
+            RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.01))
+        }
+        try expect(fired, "Camera.frame completion must fire within 250ms on bail path")
+        try expect(arg == nil, "bail path delivers nil result (not crash)")
     }
 }
