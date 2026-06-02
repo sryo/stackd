@@ -133,6 +133,11 @@ final class DisplayObserver: RefCountedObserver {
         // the safety-net poll below; on a typical Mac, F1/F2 + System
         // Settings cover ~all user-driven brightness changes, so the live
         // path handles the cases the user actually notices.
+        // Verified on this user's macOS (2026-06-02): the three bezel DN
+        // names below never fire during F1/F2 keypress or System Settings
+        // slider movement. Keeping them in case a future macOS adds them or
+        // a third-party tool posts them — they're cheap. The 1s safety
+        // poll is what actually catches brightness changes today.
         let dn = DistributedNotificationCenter.default()
         let brightnessTokens: [(NSObjectProtocol)] = [
             "com.apple.BezelUI.BSBrightnessNotification",
@@ -145,11 +150,10 @@ final class DisplayObserver: RefCountedObserver {
             }
         }
 
-        // Safety net: 1s poll (tightened from 2s). Catches programmatic
-        // brightness changes that bypass the bezel notifications + drives
-        // external-display readings (DDC-CI brightness can't be observed).
-        // Bridge's lastDisplay JSON dedup absorbs no-ops, so the cost when
-        // brightness is stable is one CGDirectDisplay read + a hash compare.
+        // 1s poll catches brightness changes (built-in DisplayServices SPI
+        // returns the live value on demand). Bridge's lastDisplay JSON dedup
+        // absorbs no-op ticks, so the cost when brightness is stable is one
+        // CGDirectDisplay read + a hash compare per active subscriber.
         let timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
             self?.fire()
         }
