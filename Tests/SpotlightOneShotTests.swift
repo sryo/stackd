@@ -119,4 +119,23 @@ func registerSpotlightOneShotTests() {
         }
         try expectEqual(callCount, 1)
     }
+
+    test("find with a malformed predicate falls back to [] (no crash)") {
+        // Production path: StackdSafeNSPredicate catches the NSException that
+        // NSPredicate.init(format:) raises, find logs + returns []. This is
+        // the contract a future refactor would silently break if someone
+        // removed the SafePredicate wrap — Swift `try?` does NOT catch
+        // NSExceptions, so the daemon would crash on user-authored bad
+        // predicate strings.
+        var result: [[String: Any]]? = nil
+        var fired = false
+        Spotlight.find(predicate: "$$$ malformed predicate $$$",
+                       scopes: nil, attributes: nil, limit: nil) { r in
+            result = r
+            fired = true
+        }
+        try expect(fired, "completion should fire even on bad predicate")
+        try expect(result != nil, "result should be [] not nil on bad predicate")
+        try expectEqual(result?.count, 0, "bad predicate yields empty result set")
+    }
 }
