@@ -107,6 +107,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // handles the bang. See Sources/DataSources/WindowEvents.swift for
         // event IDs and payload decoding.
         WindowEvents.install()
+        // macOS 26 (Tahoe) lost CGS events 806/807/815/816 — moved, resized,
+        // minimized, deminimized. Without these, drag-to-resize and the
+        // minimize-bang-driven exclusion in tilers can't work. A 250ms CG
+        // diff loop synthesizes the same bangs; idempotent on pre-Tahoe
+        // where the native events still fire.
+        WindowEvents.startTahoeSynthPoll()
 
         // Display hotplug bangs (added/removed/reconfigured). Same lifetime
         // pattern as WindowEvents — install once at startup; CG fans out per

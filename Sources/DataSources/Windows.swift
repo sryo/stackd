@@ -1145,6 +1145,75 @@ enum WindowEvents {
         ]
     }
 
+    // MARK: - TahoeSynth: synthetic moved/resized/minimized via CG poll
+    //
+    // CGS events 806 (moved), 807 (resized), 815 (deminimized), 816 (minimized)
+    // stopped firing on macOS 26 (Tahoe). Hammerspoon side-steps this by
+    // installing per-window AXObservers (kAXWindowMovedNotification etc.) — a
+    // heavy plumbing extension here. Pragmatic shim: a single 250ms diff
+    // against CGWindowListCopyWindowInfo bridges what userland code expects.
+    // Latency is acceptable for drag-to-resize / drag-to-reorder (which already
+    // batch on mouse-up) and for windowscape's minimize-bang tracking.
+    //
+    // No-op on prior macOS where the native CGS events still fire — the
+    // duplicate bangs are idempotent on the JS side (sd.window.moved consumers
+    // dedupe by frame; minimizedIds.add() / delete() are also idempotent).
+    fileprivate static var tahoePollPrev: [CGWindowID: (frame: CGRect, onscreen: Bool)] = [:]
+    fileprivate static var tahoePollTimer: Timer?
+
+    static func startTahoeSynthPoll() {
+        guard tahoePollTimer == nil else { return }
+        // Seed prev so the first tick doesn't fire bangs for every existing window.
+        tahoePollPrev = snapshotCGWindowState()
+        tahoePollTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { _ in
+            tahoePollTick()
+        }
+    }
+
+    private static func snapshotCGWindowState() -> [CGWindowID: (frame: CGRect, onscreen: Bool)] {
+        guard let raw = CGWindowListCopyWindowInfo(
+            [.optionAll, .excludeDesktopElements], kCGNullWindowID
+        ) else { return [:] }
+        let list = raw as! [[String: Any]]
+        var out: [CGWindowID: (frame: CGRect, onscreen: Bool)] = [:]
+        for info in list {
+            guard let num = info[kCGWindowNumber as String] as? Int,
+                  let layer = info[kCGWindowLayer as String] as? Int, layer == 0,
+                  let bounds = info[kCGWindowBounds as String] as? [String: CGFloat]
+            else { continue }
+            let frame = CGRect(
+                x: bounds["X"] ?? 0, y: bounds["Y"] ?? 0,
+                width: bounds["Width"] ?? 0, height: bounds["Height"] ?? 0
+            )
+            let onscreen = ((info[kCGWindowIsOnscreen as String] as? Int) ?? 0) != 0
+            out[CGWindowID(num)] = (frame: frame, onscreen: onscreen)
+        }
+        return out
+    }
+
+    private static func tahoePollTick() {
+        guard let host = AppDelegate.shared?.host else { return }
+        let next = snapshotCGWindowState()
+        for (wid, cur) in next {
+            guard let p = tahoePollPrev[wid] else { continue }
+            if p.frame.origin != cur.frame.origin {
+                var d: [String: Any] = ["id": Int(wid)]
+                d["frame"] = frameDict(cur.frame)
+                host.bang(name: "sd.window.moved", detail: d)
+            }
+            if p.frame.size != cur.frame.size {
+                var d: [String: Any] = ["id": Int(wid)]
+                d["frame"] = frameDict(cur.frame)
+                host.bang(name: "sd.window.resized", detail: d)
+            }
+            if p.onscreen != cur.onscreen {
+                let name = cur.onscreen ? "sd.window.deminimized" : "sd.window.minimized"
+                host.bang(name: name, detail: ["id": Int(wid)])
+            }
+        }
+        tahoePollPrev = next
+    }
+
     /// Build a sd.window.created detail dict via CGWindowList lookup. One CG
     /// call per creation is fine — events fire on the order of one per app
     /// launch / new-window, not per frame.
