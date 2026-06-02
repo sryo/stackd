@@ -79,15 +79,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Reposition all stack panels when display geometry changes
         // (resolution change, monitor hotplug, scale factor flip). Without
         // this, frameFor's compute-once-at-load contract leaves region:menubar
-        // and region:fullscreen panels stranded at the OLD screen edges
-        // when the new visibleFrame is wider/narrower. reloadAll re-runs
-        // frameFor for every stack — cheap relative to the rarity of the
-        // event (resolution changes ~once per session, hotplug ~once a day).
+        // and region:fullscreen panels stranded at the OLD screen edges.
+        //
+        // Dedupe: macOS fires didChangeScreenParameters on events that don't
+        // actually change geometry (cursor moves between displays, dock
+        // collapse/expand on some macOS versions). Without a guard we'd
+        // re-spawn every WKWebView ~10 times per session for nothing —
+        // every stack reboots its JS context, sqlite re-opens, timers
+        // restart from zero. Hash the screen layout and skip the reload
+        // when nothing relevant changed.
+        var lastScreenSig: String = ""
         NotificationCenter.default.addObserver(
             forName: NSApplication.didChangeScreenParametersNotification,
             object: nil, queue: .main
         ) { [weak host] _ in
-            log("screen parameters changed → reload to reposition panels")
+            let sig = NSScreen.screens.map { s in
+                let f = s.frame, vf = s.visibleFrame
+                return "\(Int(f.minX)),\(Int(f.minY)),\(Int(f.width)),\(Int(f.height)):"
+                     + "\(Int(vf.minX)),\(Int(vf.minY)),\(Int(vf.width)),\(Int(vf.height))"
+            }.joined(separator: "|")
+            if sig == lastScreenSig { return }
+            lastScreenSig = sig
+            log("screen parameters changed (sig=\(sig.prefix(60))…) → reload")
             host?.reloadAll()
         }
 
