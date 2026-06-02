@@ -28,17 +28,28 @@ final class FileWatcher {
         )
 
         let streamCallback: FSEventStreamCallback = {
-            _, info, numEvents, eventPaths, _, _ in
+            _, info, numEvents, eventPaths, eventFlags, _ in
             guard let info = info else { return }
             let watcher = Unmanaged<FileWatcher>.fromOpaque(info).takeUnretainedValue()
             let paths = Unmanaged<CFArray>
                 .fromOpaque(eventPaths)
                 .takeUnretainedValue() as! [String]
-            for path in paths.prefix(numEvents) {
-                let ext = (path as NSString).pathExtension.lowercased()
+            // Reload triggers: (a) a file with a stack-source extension, or
+            // (b) a directory create/rename/remove anywhere under a watched
+            // root. (b) catches `cp -r examples/foo ~/stackd/stacks/foo` —
+            // FSEvents coalesces the inner file events under the new dir
+            // path on initial creation, so checking the parent dir event is
+            // the only way to notice a new stack folder appeared.
+            let dirFlag = UInt32(kFSEventStreamEventFlagItemIsDir)
+            for i in 0..<numEvents {
+                let path  = paths[i]
+                let flags = eventFlags[i]
+                let ext   = (path as NSString).pathExtension.lowercased()
                 if FileWatcher.reloadExtensions.contains(ext) {
-                    watcher.scheduleFire()
-                    return
+                    watcher.scheduleFire(); return
+                }
+                if (flags & dirFlag) != 0 {
+                    watcher.scheduleFire(); return
                 }
             }
         }
