@@ -479,6 +479,18 @@ final class Bridge: NSObject, WKScriptMessageHandler {
               let type = body["type"] as? String,
               let primitive = Bridge.dispatch[type] else { return }
         let requestId = body["requestId"] as? Int ?? -1
+        // Trace every primitive call. Throttled per (stack, type) pair so
+        // a stack that polls sd.host.diskIO every 1s doesn't drown the log;
+        // first call always prints, subsequent identical calls within
+        // rpcLogThrottleSec are suppressed. Lets log-based verification see
+        // which primitives a stack actually exercises.
+        let rpcKey = "\(stackId)|\(type)"
+        let now = Date().timeIntervalSince1970
+        let lastLogged = Bridge.lastRpcLogged[rpcKey] ?? 0
+        if now - lastLogged >= Bridge.rpcLogThrottleSec {
+            Bridge.lastRpcLogged[rpcKey] = now
+            FileHandle.standardError.write(Data("stackd: rpc \(stackId) → \(type)\n".utf8))
+        }
         if let perm = primitive.permission, !permissions.contains(perm) {
             // Single-line guidance: the manifest is right there in the stack
             // folder; this tells the author exactly what to add.
@@ -491,6 +503,18 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         }
         primitive.handler(self, body, requestId)
     }
+
+    // Per-(stack, type) throttle table for rpc trace logging. Static because
+    // Bridge instances are per-stack; the table key already includes stackId
+    // so we don't get cross-stack collisions, and a global table lets the
+    // throttle survive stack reloads (avoids a flood right after reload).
+    private static var lastRpcLogged: [String: TimeInterval] = [:]
+    private static let rpcLogThrottleSec: TimeInterval = 10.0
+    // Same throttle for channel pushes (push() below). Per-channel keyed,
+    // so first push after a quiet period always prints and high-rate
+    // channels like mouse / windows.moved settle into 1 line every N s.
+    private static var lastPushLogged: [String: TimeInterval] = [:]
+    private static let pushLogThrottleSec: TimeInterval = 5.0
 
     /// JSON-encode a value (or "null") and fire window.__sd_response(requestId, value).
     fileprivate func respond(requestId: Int, value: Any?) {
@@ -2613,6 +2637,18 @@ final class Bridge: NSObject, WKScriptMessageHandler {
 
     private func push(channel: String, json: String) {
         guard let webView = webView else { return }
+        // Trace every channel push so log-only verification can confirm a
+        // subscribe is actually receiving data. Throttled per channel — the
+        // first push after a quiet window always prints, subsequent pushes
+        // within pushLogThrottleSec collapse to silence (high-rate channels
+        // like sd.mouse + sd.windows.moved would otherwise spam stderr).
+        let now = Date().timeIntervalSince1970
+        let lastLogged = Bridge.lastPushLogged[channel] ?? 0
+        if now - lastLogged >= Bridge.pushLogThrottleSec {
+            Bridge.lastPushLogged[channel] = now
+            let preview = json.count > 120 ? String(json.prefix(117)) + "..." : json
+            FileHandle.standardError.write(Data("stackd: push \(channel) (\(json.count)B) \(preview)\n".utf8))
+        }
         let script = "window.__sd_push && window.__sd_push(\"\(channel)\", \(json));"
         DispatchQueue.main.async { webView.evaluateJavaScript(script, completionHandler: nil) }
     }
