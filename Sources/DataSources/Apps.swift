@@ -217,12 +217,55 @@ enum Apps {
         return out
     }
 
+    /// Count every titled leaf in the walked tree so the stderr log can
+    /// quantify what the AX walk produced — invaluable when "palette only
+    /// shows a few items" reports come in and we need to know whether the
+    /// problem is at the Swift/AX boundary or in the JS flattener.
+    private static func countLeaves(_ node: [String: Any]) -> Int {
+        if let kids = node["children"] as? [[String: Any]], !kids.isEmpty {
+            return kids.reduce(0) { $0 + countLeaves($1) }
+        }
+        // A node with no children-array (or empty) is a leaf if it has a
+        // non-empty title. Wrappers (AXMenu containers with no title) get
+        // 0 here, which mirrors what collectMenuLeaves on the JS side does.
+        if let t = node["title"] as? String, !t.isEmpty { return 1 }
+        return 0
+    }
+
     /// Full menu-bar tree as a nested dict. Root is the AXMenuBar (carries
     /// `children` of top-level menus). Returns nil if the app has no menu bar
     /// (background helpers, agents).
     static func menu(pid: pid_t) -> [String: Any]? {
         guard let bar = menuBarElement(pid: pid) else { return nil }
-        return walkMenu(bar)
+        // Some apps (notably Terminal pre-warmup) won't populate AXMenu
+        // children attribute until they're queried with the "enhanced UI"
+        // hint set — same trick Hammerspoon, VoiceOver and Shortcuts use
+        // to walk a full menubar without simulating a click. Set on the
+        // app element, not per menu item. Restore after walking so we
+        // don't permanently mutate the target app's AX behavior (some
+        // apps lay out controls differently when this is on).
+        let appEl = AXUIElementCreateApplication(pid)
+        AXUIElementSetMessagingTimeout(appEl, 1.0)
+        var priorRef: AnyObject?
+        var hadPrior = false
+        if AXUIElementCopyAttributeValue(appEl, "AXEnhancedUserInterface" as CFString, &priorRef) == .success {
+            hadPrior = true
+        }
+        AXUIElementSetAttributeValue(appEl, "AXEnhancedUserInterface" as CFString, kCFBooleanTrue)
+        defer {
+            // Restore — kCFBooleanFalse if we don't have a prior, else the
+            // exact prior value (Bool / NSNumber / whatever it returned).
+            let restore: CFTypeRef = hadPrior ? (priorRef as CFTypeRef) : kCFBooleanFalse
+            AXUIElementSetAttributeValue(appEl, "AXEnhancedUserInterface" as CFString, restore)
+        }
+        let tree = walkMenu(bar)
+        // Telemetry: log the walk size to stderr. If the user reports
+        // "palette only shows a few menu items", this tells us up-front
+        // whether the AX walk produced 200 items (problem is downstream)
+        // or 5 (problem is here — likely the app didn't respond to the
+        // AXEnhancedUserInterface hint).
+        log("apps.menu(pid:\(pid)) — walked \(countLeaves(tree)) leaf(s)")
+        return tree
     }
 
     /// Resolve a menu path (["File", "Save As…"]) to a leaf AXUIElement by
