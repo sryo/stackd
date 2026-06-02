@@ -48,6 +48,7 @@
   const browser = sd.bonjour.browse("_http._tcp");
 
   browser.subscribe(services => {
+    if (!services) return;  // signals fire null first; wait for real data
     status.textContent = `${services.length} service${services.length === 1 ? "" : "s"}`;
     list.innerHTML = "";
     if (services.length === 0) {

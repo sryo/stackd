@@ -35,6 +35,7 @@ to an optimistic local value.</div>
   // own input listener handles the per-second drag updates without
   // re-fetching the whole list each time.
   sd.display.all.subscribe(async (displays) => {
+    if (!displays) return;  // signals fire null first; wait for real data
     list.innerHTML = "";
     for (const d of displays) {
       const row = document.createElement("div");

@@ -64,7 +64,9 @@
 
   const stream = sd.camera.stream({ fps: 10, format: "jpeg", quality: 0.7 });
 
-  stream.subscribe(({ dataURL, width, height }) => {
+  stream.subscribe((frame) => {
+    if (!frame) return;  // signals fire null first; wait for real data
+    const { dataURL, width, height } = frame;
     frameEl.src = dataURL;
     sizeEl.textContent = `${width}×${height}`;
 

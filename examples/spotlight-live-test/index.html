@@ -32,10 +32,15 @@
   // result-set — render directly, no diffing needed. Same shape as
   // sd.spotlight.find().
   //
-  // Predicate uses Spotlight's NSPredicate format. Date comparisons against
-  // $time.today(-1) target "anything modified since yesterday". Bad
-  // predicate syntax crashes the daemon (NSException isn't catchable from
-  // Swift) — test your predicate before shipping.
+  // Predicate uses standard NSPredicate format. Bad syntax used to crash
+  // the daemon (NSException isn't catchable from Swift); StackdSafeNSPredicate
+  // (Sources/C/SafePredicate.m) now intercepts the throw and returns nil
+  // → the subscribe call quietly never emits and the daemon logs the parse
+  // error to stderr. Still: test your predicate.
+  //
+  // Spotlight's `mdfind` accepts `$time.today(-1)` shorthand but NSPredicate
+  // does NOT — we precompute the cutoff as seconds-since-the-NSDate-reference-
+  // date (2001-01-01 UTC) and inject it via CAST.
   //
   // Pairs with sd.fs for follow-up reads on the matched paths.
 
@@ -43,17 +48,19 @@
   const status = document.getElementById("status");
 
   // Predicate: anything whose Spotlight path starts with the user's
-  // Downloads dir AND was modified in the last 24h. We embed the path
-  // in the predicate rather than the `scopes` array so the example stays
-  // dependency-free (no extra fs/env primitive needed) — and because
-  // NSMetadataQuery scopes don't auto-expand `~`. macOS Spotlight indexes
-  // every user under /Users; the LIKE constrains to the right home.
+  // Downloads dir AND was modified in the last 24h. Path embedded in
+  // the predicate rather than the scopes[] array — NSMetadataQuery scopes
+  // don't auto-expand ~ and there's no env primitive yet. macOS Spotlight
+  // indexes every user under /Users; the LIKE narrows to the right home.
+  const NSDATE_EPOCH = 978307200; // seconds between Unix epoch and 2001-01-01 UTC
+  const cutoff = (Date.now() / 1000) - 86400 - NSDATE_EPOCH;
   const q = sd.spotlight.subscribe({
-    predicate: "kMDItemPath LIKE[c] '/Users/*/Downloads/*' && kMDItemFSContentChangeDate > $time.today(-1)",
+    predicate: `kMDItemPath LIKE[c] '/Users/*/Downloads/*' && kMDItemFSContentChangeDate > CAST(${cutoff}, 'NSDate')`,
     limit:     50
   });
 
   q.subscribe(files => {
+    if (!files) return;  // signals fire null first; wait for real data
     status.textContent = `${files.length} file${files.length === 1 ? "" : "s"} · live`;
     list.innerHTML = "";
     if (files.length === 0) {
