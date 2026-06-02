@@ -137,4 +137,27 @@ func registerPrivacyRecordingTests() {
         try expect(!Privacy.hasChanged(old: partial, new: empty),
                    "missing keys should be treated as empty arrays")
     }
+
+    // MARK: - PrivacyObserver subscriber-gating
+    //
+    // 2026-06-02 (lazy-fire refactor): the 2s poll now includes a
+    // JSONSerialization hash compute. Idle-state gating is what keeps
+    // that cost off the CPU when nothing's subscribed.
+
+    test("PrivacyObserver: inactive at startup") {
+        try expect(!PrivacyObserver.shared.isActive,
+                   "PrivacyObserver must not be active before any stack subscribes")
+    }
+
+    test("PrivacyObserver: activates on subscribe, deactivates after debounce") {
+        let token = PrivacyObserver.shared.subscribe { }
+        try expect(PrivacyObserver.shared.isActive)
+        token.cancel()
+        let deadline = Date().addingTimeInterval(5.2)
+        while PrivacyObserver.shared.isActive && Date() < deadline {
+            RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.05))
+        }
+        try expect(!PrivacyObserver.shared.isActive,
+                   "PrivacyObserver must deactivate ≤5.2s after last unsubscribe")
+    }
 }

@@ -205,4 +205,27 @@ func registerSensorsTests() {
         let result = Caffeinate.release(id: IOPMAssertionID(kIOPMNullAssertionID))
         try expectEqual(result, false)
     }
+
+    // MARK: - SensorsObserver subscriber-gating
+    //
+    // 2026-06-02 (lazy-fire refactor): SensorsObserver now JSON-encodes
+    // its snapshot to compute a dedup hash on every 2s tick. The gating
+    // contract keeps that work off the CPU when no stack subscribes.
+
+    test("SensorsObserver: inactive at startup") {
+        try expect(!SensorsObserver.shared.isActive,
+                   "SensorsObserver must not be active before any stack subscribes")
+    }
+
+    test("SensorsObserver: activates on subscribe, deactivates after debounce") {
+        let token = SensorsObserver.shared.subscribe { }
+        try expect(SensorsObserver.shared.isActive)
+        token.cancel()
+        let deadline = Date().addingTimeInterval(5.2)
+        while SensorsObserver.shared.isActive && Date() < deadline {
+            RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.05))
+        }
+        try expect(!SensorsObserver.shared.isActive,
+                   "SensorsObserver must deactivate ≤5.2s after last unsubscribe")
+    }
 }
