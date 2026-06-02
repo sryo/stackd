@@ -2566,16 +2566,17 @@ final class Bridge: NSObject, WKScriptMessageHandler {
                 }
             }
         }
-        // Install the granular per-event-type callbacks on the shared observer.
-        // These are process-global slots — Bridge is the only consumer, set
-        // once per stack-load. Each fires alongside the union `fire()` so the
-        // legacy pushFn keeps pumping focusedWindow / windowsAll for back-compat.
+        // Install granular per-event-type callbacks. FrontmostWindowObserver
+        // is multi-subscriber: append our handlers, scope-drain the tokens
+        // on stack unload. The previous design used single-slot callbacks
+        // and the LAST Bridge to set them won — every other stack's
+        // focusedChanged / titleChanged silently stopped firing.
         if includeApp {
-            FrontmostWindowObserver.shared.onAppActivated = pushAppActivated
+            scope.adopt(FrontmostWindowObserver.shared.appendAppActivated(pushAppActivated))
         }
         if includeWindows {
-            FrontmostWindowObserver.shared.onFocusedChanged = pushFocusedChanged
-            FrontmostWindowObserver.shared.onTitleChanged = pushTitleChanged
+            scope.adopt(FrontmostWindowObserver.shared.appendFocusedChanged(pushFocusedChanged))
+            scope.adopt(FrontmostWindowObserver.shared.appendTitleChanged(pushTitleChanged))
         }
         // Prime each granular channel so subscribers don't wait for the first
         // AX nudge to see a value.

@@ -781,13 +781,44 @@ final class FrontmostWindowObserver: RefCountedObserver {
 
     private var currentTokens: [Token] = []
 
-    /// Per-event-type callbacks, set once at startup by Bridge. The observer
-    /// is process-global; only one stack-driving consumer (Bridge) sets these.
-    /// Each fires in addition to (not instead of) the union `fire()` so the
-    /// legacy `sd.windows.focused` channel keeps working.
-    var onAppActivated:  (() -> Void)?
-    var onFocusedChanged: (() -> Void)?
-    var onTitleChanged:  (() -> Void)?
+    /// Per-event-type callbacks. Multi-subscriber: every Bridge that calls
+    /// startWorkspace appends its own handler; we fire ALL of them on each
+    /// event. The original single-slot design assumed only one Bridge would
+    /// ever set these, but in practice every stack with the "windows"
+    /// permission gets its own Bridge that calls startWorkspace — the LAST
+    /// to set the slot won, and all other stacks silently lost focusedChanged
+    /// events. Symptom that surfaced this: overlay-border (the focused-
+    /// window outline drawer) stopped following focus changes whenever any
+    /// other "windows"-permission stack reloaded after it, because that
+    /// stack's startWorkspace overwrote overlay-border's handler.
+    ///
+    /// Bridge calls append* on startWorkspace and detach via the returned
+    /// Token in its scope drain. Each fires in addition to the union
+    /// `fire()` so the legacy `sd.windows.focused` channel keeps working.
+    private var appActivatedHandlers: [Int: () -> Void] = [:]
+    private var focusedChangedHandlers: [Int: () -> Void] = [:]
+    private var titleChangedHandlers:  [Int: () -> Void] = [:]
+    private var nextHandlerId: Int = 1
+
+    func appendAppActivated(_ fn: @escaping () -> Void) -> Token {
+        let id = nextHandlerId; nextHandlerId += 1
+        appActivatedHandlers[id] = fn
+        return Token { [weak self] in self?.appActivatedHandlers.removeValue(forKey: id) }
+    }
+    func appendFocusedChanged(_ fn: @escaping () -> Void) -> Token {
+        let id = nextHandlerId; nextHandlerId += 1
+        focusedChangedHandlers[id] = fn
+        return Token { [weak self] in self?.focusedChangedHandlers.removeValue(forKey: id) }
+    }
+    func appendTitleChanged(_ fn: @escaping () -> Void) -> Token {
+        let id = nextHandlerId; nextHandlerId += 1
+        titleChangedHandlers[id] = fn
+        return Token { [weak self] in self?.titleChangedHandlers.removeValue(forKey: id) }
+    }
+
+    private func fireAppActivated()  { for fn in appActivatedHandlers.values  { fn() } }
+    private func fireFocusedChanged(){ for fn in focusedChangedHandlers.values{ fn() } }
+    private func fireTitleChanged()  { for fn in titleChangedHandlers.values  { fn() } }
 
     override func install() -> Token? {
         let ncToken = installNotifications([
@@ -801,11 +832,11 @@ final class FrontmostWindowObserver: RefCountedObserver {
                  // Activation itself counts as a focus change — fire so consumers
                  // pick up the new frontmost-app window without waiting for the
                  // first within-app AX notification.
-                 self.onAppActivated?()
+                 self.fireAppActivated()
                  // Focus changes with the app switch — pump the focused-window
                  // channel too so stacks that only listen to focusedChanged
                  // don't miss the cross-app transition.
-                 self.onFocusedChanged?()
+                 self.fireFocusedChanged()
                  self.fire()
              })
         ])
@@ -839,9 +870,9 @@ final class FrontmostWindowObserver: RefCountedObserver {
             guard let self = self else { return }
             switch notif {
             case kAXFocusedWindowChangedNotification, kAXMainWindowChangedNotification:
-                self.onFocusedChanged?()
+                self.fireFocusedChanged()
             case kAXTitleChangedNotification:
-                self.onTitleChanged?()
+                self.fireTitleChanged()
             default:
                 break
             }
