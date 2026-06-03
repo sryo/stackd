@@ -483,8 +483,12 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         // Overlays — cancel each per-overlay displayLink subscription, then
         // detach each handle (closes the overlay NSPanel). Mirrors the
         // statusItems / hotkeyTokens drain shape so a hot-reload doesn't
-        // leak panels. NSPanel.close must run on main, so the detach hop
-        // matches the per-call overlay.detach path.
+        // leak panels. NSPanel.close must run on main; we sync-hop
+        // (matching the per-call overlay.detach path) so the panels are
+        // actually torn down before the new stack instance has a chance
+        // to attach its own — otherwise a hot-reload of overlay-border
+        // produces two visible outlines until the OS gets around to
+        // running the async block.
         scope.adopt(Token { [weak self] in
             guard let self = self else { return }
             for (_, t) in self.overlayTokens { t.cancel() }
@@ -492,8 +496,12 @@ final class Bridge: NSObject, WKScriptMessageHandler {
             let handles = Array(self.overlayHandles.values)
             self.overlayHandles.removeAll()
             self.overlayInFlight.removeAll()
-            DispatchQueue.main.async {
+            if Thread.isMainThread {
                 for h in handles { h.detach() }
+            } else {
+                DispatchQueue.main.sync {
+                    for h in handles { h.detach() }
+                }
             }
         })
     }
@@ -2027,7 +2035,18 @@ final class Bridge: NSObject, WKScriptMessageHandler {
             guard let id = body["id"] as? Int else { return false }
             if let token = b.overlayTokens.removeValue(forKey: id) { token.cancel() }
             if let handle = b.overlayHandles.removeValue(forKey: id) {
-                DispatchQueue.main.async { handle.detach() }
+                // Synchronous teardown — the JS-side await must not resolve
+                // until the NSPanel is actually gone. The old async path
+                // returned success while the panel was still onscreen, so
+                // a follow-up attach (focus change, hot-reload) produced
+                // two overlays visible at the same time. handle.detach is
+                // already main-thread-safe (it sync-hops if needed); we
+                // sync-hop here too rather than fire-and-forget.
+                if Thread.isMainThread {
+                    handle.detach()
+                } else {
+                    DispatchQueue.main.sync { handle.detach() }
+                }
             }
             b.overlayInFlight.remove(id)
             return true
