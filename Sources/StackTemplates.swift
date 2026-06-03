@@ -307,6 +307,26 @@ enum StackDoctor {
             }
         }
 
+        // Shape allowlist. Mirrors values accepted by `StackShape.parse`.
+        // Keep in sync when new shapes ship — same-commit rule.
+        if let sh = dict["shape"] as? String {
+            let knownShapes: Set<String> = ["rect", "rectangle", "rounded", "capsule"]
+            if !knownShapes.contains(sh.lowercased()) {
+                print("⚠️  \(dirName): unknown shape '\(sh)' — known: \(knownShapes.sorted().joined(separator: ", "))")
+                issues += 1
+            }
+        } else if dict["shape"] != nil {
+            print("❌ \(dirName): 'shape' must be a string, got \(type(of: dict["shape"]!))")
+            issues += 1
+        }
+
+        if let pd = dict["padding"] {
+            if !(pd is NSNumber) {
+                print("❌ \(dirName): 'padding' must be a number, got \(type(of: pd))")
+                issues += 1
+            }
+        }
+
         if issues == 0 { print("✓  \(dirName)") }
         return issues
     }

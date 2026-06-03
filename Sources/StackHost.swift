@@ -25,8 +25,18 @@ struct StackManifest: Decodable {
     ///     on macOS 26+, falls back to vibrancy.hudWindow on older OSes.
     let material: String?
     /// Optional corner radius applied to the WebView (and the material layer
-    /// when one is installed). Applies regardless of `material`.
+    /// when one is installed). Applies regardless of `material`. Ignored when
+    /// `shape == "capsule"` — capsule derives its radius from min(w,h)/2.
     let cornerRadius: Double?
+    /// Outer shape of the material backing. `"rect"` (default) honors
+    /// `cornerRadius`; `"capsule"` produces a pill (or circle when w==h),
+    /// ignoring `cornerRadius`. See `StackShape` for the resolution rule.
+    let shape: String?
+    /// Inner inset between the material edge and the WebView, in points.
+    /// Default 0 (WebView fills the material). When > 0, the WebView's
+    /// corners are auto-computed to stay CONCENTRIC with the outer material
+    /// edge (mirrors SwiftUI's `RoundedRectangularShapeCorners.concentric`).
+    let padding: Double?
 
     struct Anchor: Decodable { let edge: String; let inset: [Int] }
     struct Size: Decodable { let w: Int?; let h: Int }
@@ -253,16 +263,23 @@ final class StackHost {
 
         let invocable = manifest.invocable ?? false
         let level = StackHost.resolveLevel(manifest: manifest)
+        let resolvedMaterial = StackMaterial.parse(manifest.material)
+        let resolvedRadius = StackCornerRadius.parse(manifest.cornerRadius)
+        let resolvedPadding = StackPadding.effectivePadding(
+            manifest: manifest.padding,
+            material: resolvedMaterial,
+            cornerRadius: resolvedRadius)
         let win = StackWindow(
             frame: frame,
             clickThrough: invocable ? false : (manifest.clickThrough ?? true),
             schemeHandler: schemeHandler,
             level: level,
             invocable: invocable,
-            material: StackMaterial.parse(manifest.material),
-            cornerRadius: StackCornerRadius.parse(manifest.cornerRadius)
+            material: resolvedMaterial,
+            cornerRadius: resolvedRadius,
+            shape: StackShape.parse(manifest.shape)
         )
-        let bridge = Bridge(webView: win.webView, screen: screen, screenIndex: screenIndex)
+        let bridge = Bridge(webView: win.webView, screen: screen, screenIndex: screenIndex, padding: resolvedPadding)
         bridge.start(manifest: manifest)
         bridges[key] = bridge
 

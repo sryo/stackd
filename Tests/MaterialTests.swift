@@ -150,6 +150,166 @@ func registerMaterialTests() {
         try expectEqual(StackCornerRadius.parse(-5.0), 0.0)
     }
 
+    // MARK: StackShape — capsule vs rect outer-radius decision
+    //
+    // Capsule shape ignores the manifest cornerRadius and uses min(w,h)/2 so
+    // the window is a pill (horizontal or vertical) or circle. Rect uses the
+    // manifest radius verbatim.
+
+    test("shape: parse 'capsule' → .capsule") {
+        try expectEqual(StackShape.parse("capsule"), .capsule)
+    }
+    test("shape: parse 'rect' → .rect") {
+        try expectEqual(StackShape.parse("rect"), .rect)
+    }
+    test("shape: parse 'rectangle' (alias) → .rect") {
+        try expectEqual(StackShape.parse("rectangle"), .rect)
+    }
+    test("shape: parse nil → .rect (default)") {
+        try expectEqual(StackShape.parse(nil), .rect)
+    }
+    test("shape: parse empty → .rect (default)") {
+        try expectEqual(StackShape.parse(""), .rect)
+    }
+    test("shape: parse unknown → .rect (fallback, no crash)") {
+        try expectEqual(StackShape.parse("blob"), .rect)
+    }
+    test("shape: parse is case-insensitive") {
+        try expectEqual(StackShape.parse("CAPSULE"), .capsule)
+        try expectEqual(StackShape.parse("Capsule"), .capsule)
+    }
+
+    test("shape.outerRadius: rect honors manifest radius") {
+        try expectEqual(
+            StackShape.rect.outerRadius(frame: CGSize(width: 200, height: 100), manifestRadius: 24),
+            24)
+    }
+    test("shape.outerRadius: rect with nil manifest radius → 0") {
+        try expectEqual(
+            StackShape.rect.outerRadius(frame: CGSize(width: 200, height: 100), manifestRadius: nil),
+            0)
+    }
+    test("shape.outerRadius: rect with negative manifest radius → 0") {
+        try expectEqual(
+            StackShape.rect.outerRadius(frame: CGSize(width: 200, height: 100), manifestRadius: -5),
+            0)
+    }
+    test("shape.outerRadius: capsule on wide frame → height/2 (horizontal pill)") {
+        try expectEqual(
+            StackShape.capsule.outerRadius(frame: CGSize(width: 200, height: 60), manifestRadius: nil),
+            30)
+    }
+    test("shape.outerRadius: capsule on tall frame → width/2 (vertical pill)") {
+        try expectEqual(
+            StackShape.capsule.outerRadius(frame: CGSize(width: 80, height: 200), manifestRadius: nil),
+            40)
+    }
+    test("shape.outerRadius: capsule on square frame → side/2 (circle)") {
+        try expectEqual(
+            StackShape.capsule.outerRadius(frame: CGSize(width: 100, height: 100), manifestRadius: nil),
+            50)
+    }
+    test("shape.outerRadius: capsule ignores manifest radius") {
+        try expectEqual(
+            StackShape.capsule.outerRadius(frame: CGSize(width: 200, height: 60), manifestRadius: 999),
+            30)
+    }
+
+    // MARK: StackPadding — concentric inner-corner formula
+    //
+    // When a WebView is inset by P inside a material with outer cornerRadius
+    // R, its inner cornerRadius is max(0, R - P) — parallel arcs sharing a
+    // center. Mirrors SwiftUI's RoundedRectangularShapeCorners.concentric.
+
+    test("padding: parse nil → 0") {
+        try expectEqual(StackPadding.parse(nil), 0)
+    }
+    test("padding: parse positive passes through") {
+        try expectEqual(StackPadding.parse(8), 8)
+    }
+    test("padding: parse zero passes through") {
+        try expectEqual(StackPadding.parse(0), 0)
+    }
+    test("padding: parse negative clamps to 0") {
+        try expectEqual(StackPadding.parse(-3), 0)
+    }
+
+    // MARK: StackPadding.effectivePadding — daemon-side auto-default
+    //
+    // Stacks don't have to hand-tune padding to get a visible glass rim. When
+    // the manifest omits `padding` on a glass material with cornerRadius > 0,
+    // the daemon auto-defaults to cornerRadius/2 — padding == innerRadius for
+    // pleasing symmetry. Explicit manifest values (including 0) are
+    // respected verbatim. Non-glass materials default to 0 (flush).
+
+    test("effectivePadding: explicit value wins over auto-default") {
+        try expectEqual(
+            StackPadding.effectivePadding(manifest: 6, material: .glass(.regular), cornerRadius: 24),
+            6)
+    }
+    test("effectivePadding: explicit 0 wins (opt out of auto-default)") {
+        try expectEqual(
+            StackPadding.effectivePadding(manifest: 0, material: .glass(.regular), cornerRadius: 24),
+            0)
+    }
+    test("effectivePadding: explicit negative clamps to 0") {
+        try expectEqual(
+            StackPadding.effectivePadding(manifest: -5, material: .glass(.regular), cornerRadius: 24),
+            0)
+    }
+    test("effectivePadding: glass + cornerRadius → cornerRadius/2 (auto)") {
+        try expectEqual(
+            StackPadding.effectivePadding(manifest: nil, material: .glass(.regular), cornerRadius: 24),
+            12)
+    }
+    test("effectivePadding: glass.clear + cornerRadius → cornerRadius/2 (auto)") {
+        try expectEqual(
+            StackPadding.effectivePadding(manifest: nil, material: .glass(.clear), cornerRadius: 16),
+            8)
+    }
+    test("effectivePadding: glass.tinted + cornerRadius → cornerRadius/2 (auto)") {
+        let c = NSColor(srgbRed: 1, green: 0, blue: 0, alpha: 1)
+        try expectEqual(
+            StackPadding.effectivePadding(manifest: nil, material: .glass(.tinted(c)), cornerRadius: 30),
+            15)
+    }
+    test("effectivePadding: glass with no cornerRadius → 0 (nothing to inset from)") {
+        try expectEqual(
+            StackPadding.effectivePadding(manifest: nil, material: .glass(.regular), cornerRadius: nil),
+            0)
+    }
+    test("effectivePadding: glass with cornerRadius=0 → 0") {
+        try expectEqual(
+            StackPadding.effectivePadding(manifest: nil, material: .glass(.regular), cornerRadius: 0),
+            0)
+    }
+    test("effectivePadding: vibrancy → 0 (no auto-default for vibrancy)") {
+        try expectEqual(
+            StackPadding.effectivePadding(manifest: nil, material: .vibrancy(.hudWindow), cornerRadius: 24),
+            0)
+    }
+    test("effectivePadding: .none → 0 (no material, no rim)") {
+        try expectEqual(
+            StackPadding.effectivePadding(manifest: nil, material: .none, cornerRadius: 24),
+            0)
+    }
+
+    test("concentric: outer=24 padding=8 → inner=16") {
+        try expectEqual(StackPadding.concentricInnerRadius(outer: 24, padding: 8), 16)
+    }
+    test("concentric: outer=24 padding=0 → inner=24") {
+        try expectEqual(StackPadding.concentricInnerRadius(outer: 24, padding: 0), 24)
+    }
+    test("concentric: outer=24 padding=24 → inner=0 (collapse at parity)") {
+        try expectEqual(StackPadding.concentricInnerRadius(outer: 24, padding: 24), 0)
+    }
+    test("concentric: outer=24 padding=40 → inner=0 (padding exceeds outer)") {
+        try expectEqual(StackPadding.concentricInnerRadius(outer: 24, padding: 40), 0)
+    }
+    test("concentric: outer=0 padding=0 → inner=0 (sharp content in sharp container)") {
+        try expectEqual(StackPadding.concentricInnerRadius(outer: 0, padding: 0), 0)
+    }
+
     // MARK: MaterialAttachment.mode — view-hierarchy decision
     //
     // Liquid Glass needs the WebView embedded INSIDE NSGlassEffectView's

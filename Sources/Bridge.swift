@@ -170,7 +170,7 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         return WKUserScript(source: source, injectionTime: .atDocumentEnd, forMainFrameOnly: true)
     }()
 
-    init(webView: WKWebView, screen: NSScreen? = nil, screenIndex: Int = 0) {
+    init(webView: WKWebView, screen: NSScreen? = nil, screenIndex: Int = 0, padding: Double = 0) {
         self.webView = webView
         super.init()
         let ucc = webView.configuration.userContentController
@@ -185,6 +185,42 @@ final class Bridge: NSObject, WKScriptMessageHandler {
             let payload = Bridge.jsonify(Bridge.screenInfo(screen: scr, index: screenIndex))
             let source = "window.__sd_screen = \(payload);"
             let inject = WKUserScript(source: source, injectionTime: .atDocumentStart, forMainFrameOnly: true)
+            ucc.addUserScript(inject)
+        }
+        // Padding via CSS — content-layer spacing that pushes HTML inward
+        // from the glass edge, mirroring SwiftUI's `.padding().glassEffect()`
+        // pattern. Sets a `--sd-padding` custom property for stacks that
+        // want to reference it (gap, child padding, etc.) and applies a
+        // default `body { padding: var(--sd-padding); box-sizing: border-box }`
+        // so the default look gets the inset for free. Stacks that already
+        // own their body padding can override via their own CSS — last
+        // declaration wins.
+        //
+        // Note: this REPLACES the previous geometric WebView-inset approach,
+        // which was invisible because both the rim and the WebView showed
+        // the same glass through the transparent body. Content-layer padding
+        // produces visible space because the HTML doesn't draw there.
+        if padding > 0 {
+            let style = """
+            :root{--sd-padding:\(padding)px;}
+            body{padding:var(--sd-padding);box-sizing:border-box;}
+            """
+            let source = """
+            (function(){
+              var s = document.createElement('style');
+              s.setAttribute('data-sd', 'padding');
+              s.textContent = \(Bridge.jsonify(style));
+              (document.head || document.documentElement).appendChild(s);
+            })();
+            """
+            // .atDocumentEnd so our <style> appends AFTER the stack's own
+            // <link rel="stylesheet"> elements. CSS cascade resolves on
+            // declaration order at equal specificity — last wins — so this
+            // ensures the daemon-injected padding overrides a stack's own
+            // `body { padding: 0 }`. Stacks that want zero padding can opt
+            // out via the manifest (`"padding": 0`) instead of fighting the
+            // cascade.
+            let inject = WKUserScript(source: source, injectionTime: .atDocumentEnd, forMainFrameOnly: true)
             ucc.addUserScript(inject)
         }
     }

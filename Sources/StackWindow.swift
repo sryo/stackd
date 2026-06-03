@@ -48,8 +48,7 @@ final class StackWindow: NSPanel, WKNavigationDelegate {
         invocable: Bool = false,
         material: StackMaterial = .none,
         cornerRadius: Double? = nil,
-        shape: StackShape = .rect,
-        padding: Double = 0
+        shape: StackShape = .rect
     ) {
         self.invocable = invocable
         let config = WKWebViewConfiguration()
@@ -107,17 +106,13 @@ final class StackWindow: NSPanel, WKNavigationDelegate {
         let attachment = MaterialAttachment.mode(
             material: material, cornerRadius: cornerRadius, supportsGlass: supportsGlass)
 
-        // Resolve outer (material) and inner (WebView) corner radii.
-        //  - `outerRadius` honors `shape` — capsule overrides manifest radius
-        //    with min(w,h)/2; rect uses the manifest radius (or 0).
-        //  - `innerRadius` keeps the WebView's corners CONCENTRIC with the
-        //    material edge when `padding > 0`. Mirrors SwiftUI's
-        //    `RoundedRectangularShapeCorners.concentric`: parallel arcs sharing
-        //    a center. Collapses to 0 when padding ≥ outerRadius (sharp
-        //    content inside a smaller-radius container — matches SwiftUI).
+        // Resolve the outer cornerRadius honoring `shape` — capsule overrides
+        // manifest radius with min(w,h)/2; rect uses the manifest radius. The
+        // WebView matches the same cornerRadius (no inset) — content-layer
+        // padding (CSS injected by Bridge) handles the visible inset because
+        // a geometric WebView inset is invisible on a transparent body
+        // (glass shows through identically on both sides of the edge).
         let outerRadius = shape.outerRadius(frame: frame.size, manifestRadius: cornerRadius)
-        let innerRadius = StackPadding.concentricInnerRadius(outer: outerRadius, padding: padding)
-        let inset = CGFloat(padding)
 
         switch attachment {
         case .directContent:
@@ -142,17 +137,11 @@ final class StackWindow: NSPanel, WKNavigationDelegate {
                 if outerRadius > 0 {
                     glass.cornerRadius = CGFloat(outerRadius)
                 }
-                webView.frame = glass.bounds.insetBy(dx: inset, dy: inset)
+                webView.frame = glass.bounds
                 webView.autoresizingMask = [.width, .height]
-                if innerRadius > 0 {
+                if outerRadius > 0 {
                     webView.wantsLayer = true
-                    webView.layer?.cornerRadius = CGFloat(innerRadius)
-                    // NSGlassEffectView uses continuous (squircle) corners per
-                    // Apple's design system. CALayer defaults to .circular —
-                    // a perfect arc — which makes the WebView's inner corner
-                    // visibly diverge from the glass's outer corner even when
-                    // their radii are concentric. Match the curve so the rim
-                    // reads as a true concentric inset.
+                    webView.layer?.cornerRadius = CGFloat(outerRadius)
                     webView.layer?.cornerCurve = .continuous
                     webView.layer?.masksToBounds = true
                 }
@@ -168,11 +157,11 @@ final class StackWindow: NSPanel, WKNavigationDelegate {
             if let effect = StackWindow.makeEffectView(material: material, frame: container.bounds, cornerRadius: outerRadius > 0 ? outerRadius : nil) {
                 container.addSubview(effect)
             }
-            webView.frame = container.bounds.insetBy(dx: inset, dy: inset)
+            webView.frame = container.bounds
             webView.autoresizingMask = [.width, .height]
-            if innerRadius > 0 {
+            if outerRadius > 0 {
                 webView.wantsLayer = true
-                webView.layer?.cornerRadius = CGFloat(innerRadius)
+                webView.layer?.cornerRadius = CGFloat(outerRadius)
                 webView.layer?.cornerCurve = .continuous
                 webView.layer?.masksToBounds = true
             }

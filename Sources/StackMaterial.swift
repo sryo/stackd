@@ -138,6 +138,89 @@ enum StackCornerRadius {
     }
 }
 
+/// Outer shape of a stack window's material backing.
+///
+///   - `.rect`     — uses the manifest `cornerRadius` (default).
+///   - `.capsule`  — cornerRadius = min(width, height) / 2 → horizontal pill
+///                   when w > h, vertical pill when h > w, circle when w == h.
+///                   Ignores manifest `cornerRadius`. Computed at window-init
+///                   time only — doesn't track live resizes (v1 limitation).
+///
+/// Mirrors SwiftUI's `Capsule`/`RoundedRectangle` shape distinction, exposed
+/// as a manifest primitive so stacks can opt into pill-shaped glass without
+/// computing radii themselves.
+enum StackShape: String {
+    case rect
+    case capsule
+
+    static func parse(_ raw: String?) -> StackShape {
+        switch raw?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "capsule": return .capsule
+        case "rect", "rectangle", "rounded", nil, "": return .rect
+        default:
+            log("stack shape: unknown value '\(raw ?? "")' — falling back to rect")
+            return .rect
+        }
+    }
+
+    /// Resolve the OUTER cornerRadius given the window's frame size and any
+    /// manifest-supplied radius. For `.capsule` the manifest radius is
+    /// ignored — capsule shape is defined by its frame.
+    func outerRadius(frame: CGSize, manifestRadius: Double?) -> Double {
+        switch self {
+        case .rect:
+            return max(0, manifestRadius ?? 0)
+        case .capsule:
+            return Double(min(frame.width, frame.height)) / 2.0
+        }
+    }
+}
+
+/// Inner inset between the material edge and the WebView, in points.
+///
+/// Enables concentric corners: when the WebView is inset by P inside a
+/// material with outer cornerRadius R, the WebView's own cornerRadius
+/// becomes `max(0, R - P)` so the inner curve is concentric with the outer
+/// (parallel arcs sharing a center). Mirrors SwiftUI's
+/// `RoundedRectangularShapeCorners.concentric` / `ConcentricRectangle`.
+///
+/// Apple's HIG guidance: when the inset exceeds the outer radius, the
+/// inner corners collapse to 0 (sharp). Matches the SwiftUI implementation.
+enum StackPadding {
+    static func parse(_ raw: Double?) -> Double {
+        guard let raw = raw else { return 0 }
+        return max(0, raw)
+    }
+
+    /// Resolve the EFFECTIVE padding for a stack given the manifest value,
+    /// material, and outer cornerRadius.
+    ///
+    ///   - Explicit manifest value (even 0) → use it verbatim (clamped ≥ 0).
+    ///   - Missing/nil on a glass material with cornerRadius > 0 →
+    ///     auto-default to `cornerRadius / 2`. This keeps the glass rim
+    ///     visible without each stack having to hand-tune it: the rim
+    ///     thickness equals the inner WebView's cornerRadius, producing a
+    ///     pleasing geometric symmetry (padding == innerRadius).
+    ///   - Missing/nil on non-glass or radius-less → 0 (no inset).
+    ///
+    /// Tying the default to cornerRadius (vs a fixed constant) means stacks
+    /// that opt into bigger corners automatically get proportionally bigger
+    /// rims — matches the "stack composes, daemon ships primitives" rule.
+    static func effectivePadding(manifest: Double?, material: StackMaterial, cornerRadius: Double?) -> Double {
+        if let m = manifest { return max(0, m) }
+        if case .glass = material, let r = cornerRadius, r > 0 {
+            return r / 2.0
+        }
+        return 0
+    }
+
+    /// Pure concentric inner-radius formula. `padding ≥ outer` → 0 (collapses
+    /// to a sharp corner, matching SwiftUI's behavior).
+    static func concentricInnerRadius(outer: Double, padding: Double) -> Double {
+        return max(0, outer - padding)
+    }
+}
+
 /// Where the WebView should be attached relative to the backing material.
 ///
 /// Glass and vibrancy require different view hierarchies — this enum lifts the
