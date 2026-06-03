@@ -396,8 +396,11 @@ final class EventTapRegistry {
             (1 << CGEventType.keyUp.rawValue) |
             (1 << CGEventType.flagsChanged.rawValue) |
             (1 << CGEventType.leftMouseDown.rawValue) |
+            (1 << CGEventType.leftMouseUp.rawValue) |
             (1 << CGEventType.rightMouseDown.rawValue) |
+            (1 << CGEventType.rightMouseUp.rawValue) |
             (1 << CGEventType.otherMouseDown.rawValue) |
+            (1 << CGEventType.otherMouseUp.rawValue) |
             (1 << CGEventType.leftMouseDragged.rawValue) |
             (1 << CGEventType.rightMouseDragged.rawValue) |
             (1 << CGEventType.mouseMoved.rawValue) |
@@ -588,8 +591,11 @@ final class EventTapRegistry {
         case "keyUp":           return .keyUp
         case "flagsChanged":    return .flagsChanged
         case "leftMouseDown":     return .leftMouseDown
+        case "leftMouseUp":       return .leftMouseUp
         case "rightMouseDown":    return .rightMouseDown
+        case "rightMouseUp":      return .rightMouseUp
         case "otherMouseDown":    return .otherMouseDown
+        case "otherMouseUp":      return .otherMouseUp
         case "leftMouseDragged":  return .leftMouseDragged
         case "rightMouseDragged": return .rightMouseDragged
         case "mouseMoved":        return .mouseMoved
@@ -605,8 +611,11 @@ final class EventTapRegistry {
         case .keyUp:           return "keyUp"
         case .flagsChanged:    return "flagsChanged"
         case .leftMouseDown:     return "leftMouseDown"
+        case .leftMouseUp:       return "leftMouseUp"
         case .rightMouseDown:    return "rightMouseDown"
+        case .rightMouseUp:      return "rightMouseUp"
         case .otherMouseDown:    return "otherMouseDown"
+        case .otherMouseUp:      return "otherMouseUp"
         case .leftMouseDragged:  return "leftMouseDragged"
         case .rightMouseDragged: return "rightMouseDragged"
         case .mouseMoved:        return "mouseMoved"
