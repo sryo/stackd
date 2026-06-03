@@ -1600,6 +1600,7 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         .ax("ax.system")                  { b, _    in AX.systemWide(store: b.axHandles) },
         .ax("ax.systemElementAtPosition") { b, body in AX.systemElementAtPosition(x: Float((body["x"] as? Double) ?? 0), y: Float((body["y"] as? Double) ?? 0), store: b.axHandles) },
         .ax("ax.focusedElement")          { b, _    in AX.focusedElementHandle(store: b.axHandles) },
+        .ax("ax.focusedElementSystemWide"){ b, _    in AX.focusedElementSystemWideHandle(store: b.axHandles) },
         .ax("ax.attributeNames")          { b, body in AX.attributeNames(handle: (body["handle"] as? Int) ?? -1, store: b.axHandles) },
         .ax("ax.attribute")               { b, body in AX.attribute(handle: (body["handle"] as? Int) ?? -1, name: body["name"] as? String ?? "", store: b.axHandles) },
         .ax("ax.attributes")              { b, body in AX.attributes(handle: (body["handle"] as? Int) ?? -1, store: b.axHandles) },

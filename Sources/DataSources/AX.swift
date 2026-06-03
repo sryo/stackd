@@ -108,6 +108,23 @@ enum AX {
         return store.mint(focused as! AXUIElement)
     }
 
+    /// System-wide focused element — mirrors HS's
+    /// `ax.systemWideElement():attributeValue("AXFocusedUIElement")`.
+    /// Differs from `focusedElementHandle` (which goes through the frontmost
+    /// application) in cases where focus crosses app boundaries: system
+    /// dialogs, popovers, helper overlays, the menu bar. For ordinary
+    /// text-input positioning (Muse anchoring to a caret) the two return
+    /// the same element; for edge cases the system-wide variant matches
+    /// what HS Muse uses to find an anchor.
+    static func focusedElementSystemWideHandle(store: HandleStore) -> Int? {
+        let sys = AXUIElementCreateSystemWide()
+        AXUIElementSetMessagingTimeout(sys, 0.1)
+        var ref: AnyObject?
+        let err = AXUIElementCopyAttributeValue(sys, kAXFocusedUIElementAttribute as CFString, &ref)
+        guard err == .success, let focused = ref else { return nil }
+        return store.mint(focused as! AXUIElement)
+    }
+
     // MARK: - Introspection
 
     static func attributeNames(handle: Int, store: HandleStore) -> [String]? {

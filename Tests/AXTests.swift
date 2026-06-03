@@ -12,7 +12,8 @@ import Foundation
 //
 // Skipped (would need access changes or AX/TCC):
 // - marshal(_:store:) and toCFType(_:store:) — fileprivate.
-// - focusedElement(), focusedElementHandle(store:) — frontmost app + AX trust.
+// - focusedElement(), focusedElementHandle(store:),
+//   focusedElementSystemWideHandle(store:) — frontmost app + AX trust.
 // - attributeNames/attribute/children/parent/role/setAttribute/performAction —
 //   require AXUIElementCopy* against a real element, which needs TCC.
 // - AXAppObserver init — succeeds without TCC but installs a CFRunLoopSource
@@ -79,6 +80,21 @@ func registerAXTests() {
         let h = AX.systemWide(store: store)
         try expect(h >= 1, "minted handle should be positive")
         try expect(store.get(h) != nil, "minted handle should resolve in the store")
+    }
+
+    test("AX.focusedElementSystemWideHandle returns nil-or-valid (TCC-gated, never crashes)") {
+        // Without Accessibility permission the AXUIElementCopyAttributeValue
+        // call returns an error and we yield nil. With permission it mints
+        // a handle. Both outcomes are valid; what we're testing is that the
+        // function doesn't crash and that any returned handle is well-formed.
+        let store = AX.HandleStore()
+        let h = AX.focusedElementSystemWideHandle(store: store)
+        if let h = h {
+            try expect(h >= 1, "minted handle should be positive")
+            try expect(store.get(h) != nil, "minted handle should resolve in the store")
+        }
+        // nil is the expected outcome in the test harness, which doesn't
+        // have Accessibility permission — pass-through.
     }
 
     test("AXObserverPool.liveObserverCount is non-negative at rest") {

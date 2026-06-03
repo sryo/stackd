@@ -902,6 +902,13 @@ export const sd = {
     system()                          { return request({ type: "ax.system" }); },
     systemElementAtPosition(x, y)     { return request({ type: "ax.systemElementAtPosition", x, y }); },
     focusedElement()                  { return request({ type: "ax.focusedElement" }); },
+    // System-wide focused element — mirrors HS's
+    // ax.systemWideElement():attributeValue("AXFocusedUIElement"). Use this
+    // when the focused element may sit OUTSIDE the frontmost app (system
+    // dialogs, popovers, menu bar). For ordinary text-input anchoring this
+    // returns the same thing as focusedElement(); for cross-app focus cases
+    // it's the HS-faithful choice.
+    focusedElementSystemWide()        { return request({ type: "ax.focusedElementSystemWide" }); },
     attributeNames(handle)            { return request({ type: "ax.attributeNames", handle }); },
     attribute(handle, name)           { return request({ type: "ax.attribute", handle, name }); },
     attributes(handle)                { return request({ type: "ax.attributes", handle }); },
