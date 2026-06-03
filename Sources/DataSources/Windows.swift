@@ -552,21 +552,14 @@ enum WindowsByID {
     /// AX honored the call but the app clamped the size.
     static func setFrameProbed(windowID: CGWindowID, x: Double, y: Double, w: Double, h: Double) -> [String: Any] {
         let ok = setFrame(windowID: windowID, x: x, y: y, w: w, h: h)
-        guard let el = elementFor(windowID: windowID) else {
+        guard let r = frame(windowID: windowID) else {
             return ["ok": ok, "actual": NSNull()]
         }
-        var posRef: CFTypeRef?
-        var sizeRef: CFTypeRef?
-        _ = AXUIElementCopyAttributeValue(el, kAXPositionAttribute as CFString, &posRef)
-        _ = AXUIElementCopyAttributeValue(el, kAXSizeAttribute     as CFString, &sizeRef)
-        var pt = CGPoint.zero, sz = CGSize.zero
-        if let p = posRef  { AXValueGetValue(p as! AXValue, .cgPoint, &pt) }
-        if let s = sizeRef { AXValueGetValue(s as! AXValue, .cgSize,  &sz) }
         return [
             "ok": ok,
             "actual": [
-                "x": Double(pt.x), "y": Double(pt.y),
-                "w": Double(sz.width), "h": Double(sz.height)
+                "x": Double(r.origin.x), "y": Double(r.origin.y),
+                "w": Double(r.size.width), "h": Double(r.size.height)
             ] as [String: Any]
         ]
     }

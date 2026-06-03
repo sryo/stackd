@@ -628,34 +628,37 @@ enum Media {
         // play/pause aren't flattened into a toggle. MediaRemote routes the
         // same intents through a single sendCommand call; Spotify's
         // AppleScript dictionary keeps them separate.
-        let spotifyVerb: String? = {
-            switch name {
-            case "toggle":   return "playpause"
-            case "play":     return "play"
-            case "pause":    return "pause"
-            case "next":     return "next track"
-            case "previous": return "previous track"
-            default:         return nil
-            }
-        }()
+        let spotifyVerb = spotifyVerb(for: name)
+        let spotifyRunning = spotifyVerb != nil && isAppRunning("com.spotify.client")
         // Prefer osascript when Spotify is the only relevant broadcaster.
         // MRMediaRemoteSendCommand reports "framework accepted the dispatch",
         // not "player responded" — on Tahoe it accepts-and-drops Spotify
         // commands silently, so trusting its true return would defeat the
         // whole fallback. When Music IS running we let MediaRemote decide
         // (Music registers correctly).
-        if let verb = spotifyVerb, isAppRunning("com.spotify.client"), !isAppRunning("com.apple.Music") {
+        if spotifyRunning, !isAppRunning("com.apple.Music"), let verb = spotifyVerb {
             return runSpotifyCommand(verb)
         }
-        if let fn = MediaRemote.sendCommand, let cmd = MediaRemote.commands[name] {
-            if fn(cmd, nil) { return true }
+        if let fn = MediaRemote.sendCommand, let cmd = MediaRemote.commands[name], fn(cmd, nil) {
+            return true
         }
         // MediaRemote rejected (or unloadable). Last-resort fallback to
         // Spotify if it's running and we have a verb mapping.
-        if let verb = spotifyVerb, isAppRunning("com.spotify.client") {
+        if spotifyRunning, let verb = spotifyVerb {
             return runSpotifyCommand(verb)
         }
         return false
+    }
+
+    private static func spotifyVerb(for name: String) -> String? {
+        switch name {
+        case "toggle":   return "playpause"
+        case "play":     return "play"
+        case "pause":    return "pause"
+        case "next":     return "next track"
+        case "previous": return "previous track"
+        default:         return nil
+        }
     }
 
     private static func runSpotifyCommand(_ verb: String) -> Bool {
@@ -744,16 +747,20 @@ enum Media {
         let trimmed = raw.trimmingCharacters(in: .newlines)
         if trimmed.isEmpty { return nil }
         let parts = trimmed.split(separator: "\t", omittingEmptySubsequences: false).map(String.init)
-        // Reject leading-empty (or whitespace-only) title — happens when
-        // Spotify returned a row but the title field was blank, e.g.
-        // "\tArtist\tAlbum\t...". Otherwise we'd emit a track with no name.
-        guard !parts.isEmpty, !parts[0].trimmingCharacters(in: .whitespaces).isEmpty else { return nil }
-        var out: [String: Any] = ["title": parts[0]]
-        // Per-field trim catches the whitespace-only metadata case ("   "
-        // for blank artist/album) that the bar's `m.artist ? "X · " + m.artist
-        // : "X"` ternary would otherwise render as "Song ·    ·    ".
-        if parts.count > 1, !parts[1].trimmingCharacters(in: .whitespaces).isEmpty { out["artist"] = parts[1] }
-        if parts.count > 2, !parts[2].trimmingCharacters(in: .whitespaces).isEmpty { out["album"]  = parts[2] }
+        // Per-field trim rejects whitespace-only fields ("   "). For the
+        // title that means we emit nil (would render as a nameless track);
+        // for artist/album that means we drop the key (the bar's
+        // `m.artist ? "X · " + m.artist : "X"` ternary is truthy on "   ",
+        // which would render as "Song ·    ·    ").
+        func field(_ index: Int) -> String? {
+            guard index < parts.count else { return nil }
+            let v = parts[index].trimmingCharacters(in: .whitespaces)
+            return v.isEmpty ? nil : parts[index]
+        }
+        guard let title = field(0) else { return nil }
+        var out: [String: Any] = ["title": title]
+        if let artist = field(1) { out["artist"] = artist }
+        if let album  = field(2) { out["album"]  = album  }
         // Spotify's duration is in milliseconds, position in seconds. Other
         // apps may differ; normalize as we add them.
         if bundleId == "com.spotify.client" {
@@ -763,9 +770,8 @@ enum Media {
         // Optional player state — present when the script emits a 6th field.
         // Without it, default to playing=true (the legacy script only emitted
         // when player state was "playing", so any output meant playing).
-        if parts.count > 5 {
-            let s = parts[5].trimmingCharacters(in: .whitespaces).lowercased()
-            out["playing"] = (s == "playing")
+        if let state = field(5) {
+            out["playing"] = state.trimmingCharacters(in: .whitespaces).lowercased() == "playing"
         } else {
             out["playing"] = true
         }
