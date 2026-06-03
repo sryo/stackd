@@ -91,6 +91,7 @@ enum ChannelInference {
         "net.wifi":          "net",
         "net.lan":           "net",
         "net.path":          "net",
+        "net.throughput":    "net",
         "audio.output":      "audio",
         "audio.input":       "audio",
         "display.all":       "display",

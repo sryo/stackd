@@ -38,7 +38,12 @@ private enum SkyLightOverlay {
 ///   - last-applied frame (so we only reposition / reorder on change)
 final class OverlayHandle: NSObject, WKNavigationDelegate {
     let id: Int
-    let targetWID: CGWindowID
+    /// The window this overlay currently tracks. Mutable so a single overlay
+    /// can move between focused windows on focus change (overlay-border uses
+    /// this pattern: one panel + WKWebView for the whole session, retargeted
+    /// instead of detached + reattached, which avoids the orphan-overlay race
+    /// that produced duplicate borders).
+    private(set) var targetWID: CGWindowID
     let panel: NSPanel
     let webView: WKWebView
 
@@ -61,6 +66,37 @@ final class OverlayHandle: NSObject, WKNavigationDelegate {
         super.init()
         webView.navigationDelegate = self
     }
+
+    /// Re-point this overlay at a different target window. The vsync tick
+    /// driving from Bridge reads `targetWID` per frame, so the next tick
+    /// fetches new SLSGetWindowBounds and repositions. Resets `lastFrame`
+    /// so the position update is forced even if the new window's frame
+    /// matches the prior frame coincidentally (a tile-resize cluster could
+    /// land two equal-sized windows back to back).
+    func setTarget(_ newWID: CGWindowID) {
+        if released { return }
+        if newWID == targetWID { return }
+        targetWID = newWID
+        lastFrame = .zero
+    }
+
+    /// Evaluate JS in the overlay's WebView. Used by stacks that drive the
+    /// overlay's style from outside (overlay-border calls this on focus
+    /// change to update the border color/radius). Buffers pre-didFinish.
+    func evaluate(_ js: String) {
+        if released { return }
+        if navigationReady {
+            webView.evaluateJavaScript(js, completionHandler: nil)
+        } else {
+            // Append rather than replace — multiple eval calls during the
+            // load window must all run on flush. pendingTargetJS already
+            // does last-write-wins for target geometry; arbitrary eval is
+            // append-only so style commands don't get dropped.
+            let prior = pendingEvalJS ?? ""
+            pendingEvalJS = prior + ";" + js
+        }
+    }
+    private var pendingEvalJS: String?
 
     /// Per-tick: reposition the panel to the target's current bounds and
     /// push `window.sd.target = {x,y,w,h}` into the overlay's WebView.
@@ -114,6 +150,10 @@ final class OverlayHandle: NSObject, WKNavigationDelegate {
         navigationReady = true
         if let pending = pendingTargetJS {
             pendingTargetJS = nil
+            webView.evaluateJavaScript(pending, completionHandler: nil)
+        }
+        if let pending = pendingEvalJS {
+            pendingEvalJS = nil
             webView.evaluateJavaScript(pending, completionHandler: nil)
         }
     }

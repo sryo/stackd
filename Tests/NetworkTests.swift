@@ -135,4 +135,66 @@ func registerNetworkTests() {
             try expect(knownIfaces.contains(iface), "interface '\(iface)' is not in the known set")
         }
     }
+
+    // MARK: - NetThroughput.computeRates (pure diff math)
+
+    test("NetThroughput.computeRates returns nil on first sample (prevTs == 0)") {
+        // First tick has no prior sample — must skip rather than emit a
+        // garbage rate computed against epoch=0. Matches startChannel's
+        // "snapshot() returns nil → no push" contract.
+        let rates = NetThroughput.computeRates(
+            prevRx: 0, prevTx: 0, prevTs: 0,
+            curRx:  1000, curTx: 2000, curTs: 1000.0
+        )
+        try expect(rates == nil, "first-tick rate should be nil, got \(String(describing: rates))")
+    }
+
+    test("NetThroughput.computeRates returns nil when time hasn't advanced") {
+        // Same-timestamp ticks (degenerate but theoretically possible if a
+        // timer fires twice at the same Date) would yield divide-by-zero.
+        let rates = NetThroughput.computeRates(
+            prevRx: 100, prevTx: 100, prevTs: 1000.0,
+            curRx:  200, curTx:  200, curTs:  1000.0
+        )
+        try expect(rates == nil, "zero-dt rate should be nil")
+    }
+
+    test("NetThroughput.computeRates divides byte delta by time delta") {
+        // 1000 bytes rx in 2 seconds → 500 B/s. Plain arithmetic — guards
+        // against an off-by-one in the dt math (e.g., dt=1 hardcoded).
+        let rates = NetThroughput.computeRates(
+            prevRx: 0,    prevTx: 0,    prevTs: 1000.0,
+            curRx:  1000, curTx:  4000, curTs:  1002.0
+        )
+        try expect(rates != nil, "rates should be non-nil for a normal diff")
+        try expectEqual(rates!.rxBps, 500.0)
+        try expectEqual(rates!.txBps, 2000.0)
+    }
+
+    test("NetThroughput.computeRates clamps negative deltas to 0") {
+        // Counter wrap or interface tear-down can produce curRx < prevRx —
+        // the JS-side throughput.js used Math.max(0, ...) for exactly this
+        // reason. Mirror the clamp in Swift so negative rates never reach JS.
+        let rates = NetThroughput.computeRates(
+            prevRx: 5000, prevTx: 5000, prevTs: 1000.0,
+            curRx:  1000, curTx:  6000, curTs:  1001.0
+        )
+        try expect(rates != nil)
+        try expectEqual(rates!.rxBps, 0.0)
+        try expectEqual(rates!.txBps, 1000.0)
+    }
+
+    test("NetThroughput.interfaceTotals returns non-negative counters") {
+        // Smoke test — getifaddrs() always succeeds on a healthy mac. We
+        // can't pin specific byte counts (depends on host activity), but
+        // the call must return without crashing and the totals must be
+        // valid UInt64 values (which they are by type — this asserts the
+        // call shape).
+        let (rx, tx) = NetThroughput.interfaceTotals()
+        // UInt64 is non-negative by definition; this is really asserting
+        // that the call doesn't trap. Loopback exclusion means rx/tx may
+        // legitimately be 0 on a freshly booted Ethernet-only mac.
+        try expect(rx >= 0)
+        try expect(tx >= 0)
+    }
 }

@@ -304,7 +304,7 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         if manifest.permissions.contains("mouse")      { startMouse() }
         if manifest.permissions.contains("appearance") { startAppearance() }
         if manifest.permissions.contains("input")      { startInput() }
-        if manifest.permissions.contains("net")        { startNetwork() }
+        if manifest.permissions.contains("net")        { startNetwork(); startNetworkThroughput() }
         if manifest.permissions.contains("audio")      { startAudio() }
         if manifest.permissions.contains("display")    { startDisplay() }
         if manifest.permissions.contains("media")      { startMedia() }
@@ -348,9 +348,21 @@ final class Bridge: NSObject, WKScriptMessageHandler {
                 let cb = et.callback
                 if et.consume == true {
                     let predicate = Bridge.buildPredicate(et.`if`)
+                    let key = "\(manifest.id):\(cb)"
+                    // requireRects: install an empty cursor-rect gate before
+                    // the consumer can fire, so a consumer with no `if:`
+                    // predicate doesn't eat every event of its type during
+                    // the boot window where JS hasn't yet called
+                    // sd.events.setTapRects. Without this, an unguarded
+                    // leftMouseDown consumer swallows every click between
+                    // stack load and JS-ready.
+                    if et.requireRects == true {
+                        EventTapRegistry.shared.setConsumerRects(key: key, rects: [])
+                    }
                     let token = EventTapRegistry.shared.registerConsumer(
                         eventType: type,
-                        predicate: predicate
+                        predicate: predicate,
+                        key: key
                     ) { [weak self] event in
                         self?.fireEventTap(callback: cb, type: type, event: event)
                     }
@@ -1413,6 +1425,38 @@ final class Bridge: NSObject, WKScriptMessageHandler {
                 y: body["y"] as? Double ?? 0,
                 button: body["button"] as? String ?? "left")
         },
+        // Update the runtime cursor-rect gate for a consumer eventtap declared
+        // in this stack's manifest (`callback` matches the eventtap entry's
+        // `callback`). Body shape:
+        //   { callback: "snapshotsLeftClick",
+        //     rects: [{x,y,w,h}, ...] | null }
+        // null → clear gate (consume on predicate alone — original behavior).
+        // empty [] → empty gate (consumer never matches; suppresses without
+        //   unregistering).
+        // populated → consume only when cursor falls in any rect (top-left
+        //   origin global screen coords, same space as sd.windows.byId.frame).
+        // Returns true on accept, false when the callback name isn't a
+        // consumer this stack registered (defensive — silent mis-keying
+        // would otherwise hide a typo behind a no-op).
+        .syncBridge("events.setTapRects", permission: "events", denyValue: false) { bridge, body in
+            guard let callback = body["callback"] as? String, !callback.isEmpty else { return false }
+            let key = "\(bridge.stackId):\(callback)"
+            if body["rects"] is NSNull || body["rects"] == nil {
+                EventTapRegistry.shared.setConsumerRects(key: key, rects: nil)
+                return true
+            }
+            guard let arr = body["rects"] as? [[String: Any]] else { return false }
+            let rects: [CGRect] = arr.map { d in
+                CGRect(
+                    x: (d["x"] as? Double) ?? Double((d["x"] as? Int) ?? 0),
+                    y: (d["y"] as? Double) ?? Double((d["y"] as? Int) ?? 0),
+                    width:  (d["w"] as? Double) ?? Double((d["w"] as? Int) ?? 0),
+                    height: (d["h"] as? Double) ?? Double((d["h"] as? Int) ?? 0)
+                )
+            }
+            EventTapRegistry.shared.setConsumerRects(key: key, rects: rects)
+            return true
+        },
 
         // Cursor — warp / read. setPosition takes top-left global coords
         // (same convention as sd.mouse / sd.events.click); pass `display`
@@ -1565,6 +1609,15 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         },
         .ax("windows.byId.cornerHints", permission: "windows") { _, body in
             WindowsByID.cornerHints(windowID: CGWindowID((body["id"] as? Int) ?? 0))
+        },
+        // Traffic-light button rects — one AX walk reads close + zoom +
+        // minimize button frames so stacks can intercept clicks on the
+        // native dots (windowscape routes the yellow dot to its snapshot
+        // subsystem). Returns NSNull (→ JS null) when the window is
+        // unaddressable; per-button fields are NSNull when that dot doesn't
+        // exist on the window (panels, helper windows).
+        .ax("windows.byId.buttonFrames", permission: "windows") { _, body in
+            WindowsByID.buttonFrames(windowID: CGWindowID((body["id"] as? Int) ?? 0)) as Any? ?? NSNull()
         },
         // Batch reader — one AX lookup, all curated readers in one payload.
         // Replaces 4-9 sequential round-trips at attach/render time.
@@ -2029,6 +2082,37 @@ final class Bridge: NSObject, WKScriptMessageHandler {
                 bridge.respond(requestId: requestId, value: id)
             }
         },
+        // Retarget an existing overlay at a new window without tearing it
+        // down. Used by overlay-border to keep one overlay across the
+        // session and just move/resize it on focus change — the prior
+        // detach-then-attach cycle produced ghost borders when detach
+        // didn't complete before the next attach ran.
+        .syncBridge("overlay.setTarget", permission: "overlay", denyValue: false) { b, body in
+            guard let id = body["id"] as? Int,
+                  let wid = body["targetId"] as? Int,
+                  let handle = b.overlayHandles[id] else { return false }
+            if Thread.isMainThread {
+                handle.setTarget(CGWindowID(wid))
+            } else {
+                DispatchQueue.main.sync { handle.setTarget(CGWindowID(wid)) }
+            }
+            return true
+        },
+        // Evaluate arbitrary JS in the overlay's WebView. Pairs with
+        // setTarget so the stack can update the overlay's appearance
+        // (color, radius, theme) when retargeting. The overlay's WebView
+        // is otherwise opaque to the host stack — no postMessage channel.
+        .syncBridge("overlay.eval", permission: "overlay", denyValue: false) { b, body in
+            guard let id = body["id"] as? Int,
+                  let js = body["js"] as? String,
+                  let handle = b.overlayHandles[id] else { return false }
+            if Thread.isMainThread {
+                handle.evaluate(js)
+            } else {
+                DispatchQueue.main.sync { handle.evaluate(js) }
+            }
+            return true
+        },
         // Tear down: cancel the displayLink subscription, then close the
         // overlay NSPanel. Detaching does NOT touch the target window.
         .syncBridge("overlay.detach", permission: "overlay", denyValue: false) { b, body in
@@ -2292,6 +2376,7 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         ("net",         "netWifi"),
         ("net",         "netLan"),
         ("net",         "netPath"),
+        ("net",         "netThroughput"),
         ("audio",       "audioOutput"),
         ("audio",       "audioInput"),
         ("display",     "displays"),
@@ -2441,6 +2526,17 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         }
         pushFn()
         scope.adopt(NetworkObserver.shared.subscribe(pushFn))
+    }
+
+    // Aggregate throughput across non-loopback interfaces. Replaces the
+    // `netstat -ib` setInterval(1s) in bar/items/throughput.js — observer
+    // owns the diff math + previous-sample cache so multiple stack
+    // subscribers all read the same rate per tick (the previous JS-side
+    // version recomputed per stack, drifting its baseline each call).
+    private func startNetworkThroughput() {
+        startChannel(name: "netThroughput", observer: NetworkThroughputObserver.shared) {
+            NetworkThroughputObserver.shared.current
+        }
     }
 
     private func startAudio() {

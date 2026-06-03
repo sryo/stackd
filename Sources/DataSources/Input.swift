@@ -360,6 +360,7 @@ final class EventTapRegistry {
     // sees it.
     private struct Consumer {
         let predicate: EventTapPredicate
+        let key: String                  // "\(stackId):\(callback)" — rectsAny lookup
         let onMatch: (CGEvent) -> Void   // fires async to JS after a match
     }
     private var consumers: [CGEventType: [Int: Consumer]] = [:]
@@ -367,6 +368,15 @@ final class EventTapRegistry {
     private var consumeTap: CFMachPort?
     private var consumeRunLoopSource: CFRunLoopSource?
     private var consumeMask: CGEventMask = 0
+
+    // Per-consumer cursor-rect gate. Keyed by Consumer.key. nil → no gate
+    // (consume on predicate alone, original behavior). [] → empty gate
+    // (consumer never matches — useful for "buttons not visible right now").
+    // Non-empty → consume only when event location falls in any rect.
+    // Mutated synchronously by Bridge via setConsumerRects so the predicate
+    // can adapt to runtime state (windowscape pushes traffic-light rects on
+    // focus change + drag-bracket close, then clears on display change).
+    private var rectsByKey: [String: [CGRect]] = [:]
 
     private init() {}
 
@@ -483,18 +493,34 @@ final class EventTapRegistry {
     /// the escape hatch is a JSContext-backed sync bridge per consuming stack.
     func registerConsumer(eventType: CGEventType,
                           predicate: EventTapPredicate,
+                          key: String,
                           onMatch: @escaping (CGEvent) -> Void) -> Token? {
         guard ensureConsumeTap(adding: eventType) else { return nil }
         let id = nextConsumerId
         nextConsumerId += 1
-        consumers[eventType, default: [:]][id] = Consumer(predicate: predicate, onMatch: onMatch)
+        consumers[eventType, default: [:]][id] = Consumer(predicate: predicate, key: key, onMatch: onMatch)
         return Token { [weak self] in
             self?.consumers[eventType]?.removeValue(forKey: id)
             if self?.consumers[eventType]?.isEmpty == true {
                 self?.consumers.removeValue(forKey: eventType)
             }
+            self?.rectsByKey.removeValue(forKey: key)
         }
     }
+
+    /// Update (or clear) the cursor-rect gate for a consumer key.
+    /// - `rects = nil`  → no gate; predicate decides alone (default).
+    /// - `rects = []`   → empty gate; consumer never matches.
+    /// - `rects = [..]` → consume only when CGEvent location is in any rect.
+    /// Coordinates are top-left origin global screen coords, same space as
+    /// `sd.windows.byId.frame` / `sd.windows.byId.buttonFrames`.
+    func setConsumerRects(key: String, rects: [CGRect]?) {
+        if let r = rects { rectsByKey[key] = r }
+        else { rectsByKey.removeValue(forKey: key) }
+    }
+
+    /// Test/inspection accessor for the cursor-rect gate. nil = no gate set.
+    func rectsForKey(_ key: String) -> [CGRect]? { rectsByKey[key] }
 
     private func ensureConsumeTap(adding eventType: CGEventType) -> Bool {
         // Same Accessibility gate as the observer tap. If we can't install the
@@ -574,10 +600,17 @@ final class EventTapRegistry {
         // onMatch synchronously unregistered itself would mutate consumers[type]
         // mid-iteration otherwise.
         for c in Array(snap.values) {
-            if c.predicate.matches(event) {
-                matched = true
-                c.onMatch(event)
+            if !c.predicate.matches(event) { continue }
+            // Optional rect-any gate. nil → no gate (consume on predicate).
+            // Empty array → never matches (callers use this to temporarily
+            // suppress a consumer without unregistering it).
+            if let rects = rectsByKey[c.key] {
+                if rects.isEmpty { continue }
+                let loc = event.location
+                if !rects.contains(where: { $0.contains(loc) }) { continue }
             }
+            matched = true
+            c.onMatch(event)
         }
         if matched { return nil }       // drop
         return Unmanaged.passUnretained(event)

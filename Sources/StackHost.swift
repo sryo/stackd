@@ -56,10 +56,18 @@ struct StackManifest: Decodable {
     /// JS round-tripping per-event would force CG to wait on WKWebView. An
     /// empty/missing `if` means "consume every event of this type" (useful
     /// for the demo case but rarely what you want in production).
+    ///
+    /// `requireRects: true` defaults the cursor-rect gate to an empty array
+    /// at registration so the consumer never matches until JS has called
+    /// `sd.events.setTapRects(callback, [...])`. Closes the boot race window
+    /// where the consumer is live but JS hasn't yet pushed rects — without
+    /// this flag the consumer's empty predicate matches every event of the
+    /// type, eating every click between stack-load and JS-ready.
     struct EventTap: Decodable {
         let event: String
         let callback: String
         let consume: Bool?
+        let requireRects: Bool?
         let `if`: Predicate?
 
         struct Predicate: Decodable {

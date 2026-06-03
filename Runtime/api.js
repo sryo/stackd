@@ -4,7 +4,7 @@
 function signal(initial, name) {
   let value = initial;
   const subs = new Set();
-  return {
+  const base = {
     get value() { return value; },
     set value(next) {
       if (Object.is(next, value)) return;
@@ -34,6 +34,20 @@ function signal(initial, name) {
     },
     peek() { return value; },
   };
+  // Proxy fall-through: `sd.appearance.dark` reads `dark` off the current
+  // payload when the signal itself doesn't own that key. Lets templates
+  // (and `{{ sd.battery.percent }}` style placeholders) skip the manual
+  // `.value` ceremony. Own keys (value/subscribe/peek + anything added via
+  // Object.assign for RPC-style methods like sd.mouse.warp) shadow the
+  // payload, so existing call sites keep working.
+  return new Proxy(base, {
+    get(target, prop, receiver) {
+      if (prop in target) return Reflect.get(target, prop, receiver);
+      const v = value;
+      if (v != null && typeof v === "object") return v[prop];
+      return undefined;
+    }
+  });
 }
 
 const channels = Object.create(null);
@@ -256,7 +270,7 @@ export const sd = {
   },
   windows:    {
     focused: channel("focusedWindow"),
-    all:     channel("windowsAll"),
+    all:     channel("windowsAll", []),
     // Lifecycle channels — sugar over the sd.window.* bangs. Stack must
     // declare `handles: ["sd.window.created", ...]` in stack.json for the
     // daemon to route the bang to it. Each .subscribe(fn) re-fires whenever
@@ -335,6 +349,19 @@ export const sd = {
     //             ? 0 : h.toolbarPresent ? 26 : 16;
     // matching Tahoe's WindowServer rounding.
     cornerHints(id) { return request({ type: "windows.byId.cornerHints", id }); },
+    // Traffic-light button frames (in the same global coord space as
+    // `frame`). Returns
+    //   { close:    {x,y,w,h} | null,
+    //     zoom:     {x,y,w,h} | null,
+    //     minimize: {x,y,w,h} | null }
+    // or null when the window is unaddressable. Per-button fields are null
+    // when that dot doesn't exist on this window (some panels, helper
+    // windows). One AX walk per call — a stack that needs button rects for
+    // many windows should still batch by id at its own cadence (focus
+    // change / moved / resized) rather than poll. windowscape's port of
+    // the lua fullscreen_ui.lua intercept layer uses this to route clicks
+    // on the native yellow/green/red dots to custom handlers.
+    buttonFrames(id) { return request({ type: "windows.byId.buttonFrames", id }); },
     // Batch reader: one round-trip → all curated properties at once.
     // Returns null when the window is unaddressable; otherwise:
     //   { frame, title, role, subrole, isMinimized, isFullscreen, isMain,
@@ -446,7 +473,16 @@ export const sd = {
     // isConstrained = Low Data Mode; isExpensive = cellular / personal hotspot.
     // The signal stays null until the first NWPath update lands (typically
     // within a few hundred ms of stack load).
-    path: channel("netPath")
+    path: channel("netPath"),
+    // Aggregate throughput across non-loopback interfaces, polled 1s in
+    // the daemon (getifaddrs + if_data byte counters, summed and diffed).
+    //   sd.net.throughput.subscribe(({ rxBps, txBps, rxBytes, txBytes }) => …)
+    // rxBps / txBps are bytes-per-second over the last second; rxBytes /
+    // txBytes are cumulative counters since boot (NIC-reset-dependent).
+    // First push lands after the second tick (need two samples to diff) —
+    // about 2s after the stack loads. Cadence is `{ interval: N }` on
+    // subscribe like other polled channels; daemon stays at 1s natively.
+    throughput: channel("netThroughput")
   },
   defaults: {
     read(bundleId, key) {
@@ -493,7 +529,7 @@ export const sd = {
     // poll. Tunable cadence — pass `{ interval }` (seconds) to slow this
     // stack's fanout (event-driven re-fires still arrive):
     //   sd.display.all.subscribe(d => updateUI(d), { interval: 10 });
-    all:        channel("displays"),
+    all:        channel("displays", []),
     // Display lookup helpers — read sd.display.all's last-pushed value and
     // return the display whose frame contains the given point/window.
     // Replaces the ~5 copies of this loop sitting in cursor-overlay stacks
@@ -814,7 +850,24 @@ export const sd = {
     type(text)            { return request({ type: "events.type", value: text }); },
     key(spec)             { return request({ type: "events.key",  spec }); },
     scroll(dx, dy)        { return request({ type: "events.scroll", dx, dy }); },
-    click(x, y, button)   { return request({ type: "events.click", x, y, button: button || "left" }); }
+    click(x, y, button)   { return request({ type: "events.click", x, y, button: button || "left" }); },
+    // Update the runtime cursor-rect gate for a consuming eventtap declared
+    // in this stack's manifest (matched by callback name). Three semantics:
+    //   - rects = null  → clear the gate (consumer matches on its static
+    //                     predicate alone — `keyCodes`, `flagsMask`, etc).
+    //   - rects = []    → empty gate; consumer never fires until rects are
+    //                     repopulated (use to suppress without unregistering).
+    //   - rects = [..]  → consumer fires only when the event's cursor
+    //                     position falls in ANY of the rects. Coords are
+    //                     top-left origin global screen, same space as
+    //                     `sd.windows.byId.frame`/`buttonFrames`.
+    // The consume decision is synchronous in the daemon, so updates take
+    // effect on the next event; no async lag. Used by windowscape's port
+    // of fullscreen_ui.lua to gate leftMouseDown consume on whether the
+    // cursor is over a native traffic-light button.
+    setTapRects(callback, rects) {
+      return request({ type: "events.setTapRects", callback, rects: rects ?? null });
+    }
   },
   // Cursor — warp / read. Top-left global coords by default (same convention
   // as sd.mouse). Pass `display` (CGDirectDisplayID from sd.display.all) to
@@ -835,7 +888,7 @@ export const sd = {
   apps: {
     // running: signal<[{pid, bundleId, name, active, hidden, launchedAt?}]>
     // — fires on launch/quit/hide/unhide/activate.
-    running: channel("apps"),
+    running: channel("apps", []),
     // Transition deltas: { added: [...], removed: [...], changed: [...] }.
     // Fires only when something actually changed (not the initial full list
     // — for that, subscribe to .running). Consumers that only care about
@@ -1118,6 +1171,22 @@ export const sd = {
       if (handleId == null) return null;
       return {
         id: handleId,
+        // Move this overlay to a different target window without tearing
+        // down the WKWebView. The vsync ticker repositions on the next
+        // frame, and any pending eval() calls queued before navigation
+        // finished still run on the same WebView. Use this for one-overlay-
+        // follows-focus designs (overlay-border) where detach+attach would
+        // race and leave duplicate panels on screen.
+        setTarget(newTargetId) {
+          return request({ type: "overlay.setTarget", id: handleId, targetId: newTargetId });
+        },
+        // Evaluate JS in the overlay's WebView. Pairs with setTarget to
+        // refresh styling (color, radius, theme) when retargeting. The
+        // overlay's WebView is otherwise opaque — there's no postMessage
+        // channel from the host stack.
+        eval(js) {
+          return request({ type: "overlay.eval", id: handleId, js: String(js ?? "") });
+        },
         detach() { return request({ type: "overlay.detach", id: handleId }); }
       };
     }
@@ -1858,7 +1927,7 @@ export const sd = {
   location: channel("location"),
   // Attached USB devices: [{ vendorID, productID, vendorName?, productName?,
   //   serialNumber?, locationID }, ...]. Fires on attach/detach via IOKit.
-  usb: channel("usb"),
+  usb: channel("usb", []),
   // Mounted volumes via DiskArbitration. One-shot snapshot:
   //   const disks = await sd.disks.list();
   //   // → [{ name, mountPoint, fs?, removable?, ejectable?, size?, internal? }, ...]
@@ -1893,7 +1962,7 @@ export const sd = {
   //   // ...later...
   //   unsub();          // stop receiving locally
   //   await s.stop();   // tear the AVCaptureSession down (LED off)
-  camera: Object.assign(channel("camera"), {
+  camera: Object.assign(channel("camera", []), {
     frame(opts) {
       const o = opts || {};
       return request({
@@ -1945,7 +2014,7 @@ export const sd = {
     }
   }),
   spaces: {
-    all: channel("spaces"),
+    all: channel("spaces", []),
     // Spaces this window is on, by CGWindowID — Promise<number[]>.
     // Backed by SLSCopySpacesForWindows.
     windowSpaces(id) { return request({ type: "spaces.windowSpaces", id }); },
@@ -2067,14 +2136,18 @@ sd.tpl  = sdTpl;
 // sd.* signals it references, and updates the DOM on every fire. Lets simple
 // stacks skip writing `sd.bind(...)` and `<script>` entirely.
 //
+// Signals fall through to their payload via Proxy (see signal() at top of
+// file), so `{{ sd.battery.percent }}` reads `.value.percent` directly — no
+// `.value` ceremony needed. Before the first sample, array channels
+// (windows.all, display.all, apps.running, spaces.all, usb, camera) default
+// to `[]`; object channels return `undefined` for unknown keys. Either way,
+// no throw — the expression renders empty until the first real sample.
+//
 // Limitations:
 //   - Dependency tracking is regex-based: `{{ sd.battery.percent }}` finds
 //     `sd.battery` in the source and subscribes. `const b = sd.battery;
 //     b.percent` won't track because the regex never sees the alias. For
 //     dynamic usage, drop down to `<script>` + `sd.bind`.
-//   - Expressions wrap in try/catch and substitute "" on throw, so
-//     `{{ sd.battery.percent }}` renders empty until the first sample arrives
-//     (no manual `b?.percent` ceremony needed in the common case).
 //   - <script> and <style> contents are skipped — they're not display surface.
 
 // Lookup of every signal exposed on `sd.*` that templates can auto-subscribe
@@ -2095,6 +2168,7 @@ const __sdSignalPaths = {
   "net.wifi":           sd.net.wifi,
   "net.lan":            sd.net.lan,
   "net.path":           sd.net.path,
+  "net.throughput":     sd.net.throughput,
   "audio.output":       sd.audio.output,
   "audio.input":        sd.audio.input,
   "display.all":        sd.display.all,
@@ -2149,9 +2223,11 @@ function __sdEvalWithScope(compiled, item, index) {
 }
 
 function __sdEvalPlaceholder(compiled) {
-  // Typical throw cause: signal's value is still null, so `sd.battery.percent`
-  // throws on the first read. Once the first sample arrives, the subscription
-  // re-runs and the value renders.
+  // The signal Proxy fall-through means missing payload keys return
+  // `undefined` (or `[]` for array-defaulted channels), not throw — so this
+  // try/catch is now belt-and-suspenders for genuine expression errors
+  // (TypeError calling a non-function, RangeError on stringify, etc.), not
+  // the common null-payload-on-first-read case it was originally written for.
   return __sdEvalWithScope(compiled, undefined, undefined);
 }
 

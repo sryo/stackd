@@ -229,6 +229,20 @@ func registerWindowsTests() {
         try expect(true, "invalidateCache(pid:) did not crash for unknown pids")
     }
 
+    // MARK: - WindowsByID.buttonFrames — traffic-light reader
+
+    test("WindowsByID.buttonFrames returns nil for an unaddressable windowID") {
+        // buttonFrames batches three AX attribute reads (close/zoom/minimize
+        // → AXPosition + AXSize each) into one daemon round-trip. When the
+        // windowID doesn't resolve via elementFor, the contract is nil (not
+        // a partial dict with three nulls). Mirrors info()'s nil contract;
+        // lets the stack-side interceptor fall through to a no-op cleanly
+        // when a stale id is queried mid-tick.
+        let result = WindowsByID.buttonFrames(windowID: 0)
+        try expect(result == nil,
+                   "buttonFrames(0) returned non-nil: \(String(describing: result))")
+    }
+
     // MARK: - WindowsByID.info — batch reader
 
     test("WindowsByID.info returns nil for an unaddressable windowID") {

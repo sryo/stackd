@@ -4,6 +4,10 @@ cd "$(dirname "$0")"
 
 mkdir -p .build
 
+# Doc snippet sync check — fails fast if any <!-- include: ... --> block in
+# README/BELIEFS/CLAUDE has drifted from its source file.
+python3 docs/sync.py --check
+
 # Derive the production source list from build.sh so we don't have to keep
 # two lists in sync. Drop Sources/main.swift — Tests/main.swift replaces it
 # as the entry point.

@@ -825,6 +825,44 @@ enum WindowsByID {
         ]
     }
 
+    /// Traffic-light button frames in the same global, top-left-origin coord
+    /// space as `frame()`. Returns nil when the window is unaddressable; each
+    /// of `close` / `zoom` / `minimize` is `{x,y,w,h}` or NSNull when the
+    /// button doesn't exist on this window (some panels and helper windows
+    /// lack one or more dots). Used by stacks that want to intercept clicks
+    /// on the native dots (e.g. windowscape routes the yellow dot to its
+    /// snapshot subsystem instead of the OS genie).
+    ///
+    /// One AX lookup per button (three round-trips to the app) batched into
+    /// a single RPC. AX timeout 100ms — same gate as `cornerHints` / `info`.
+    static func buttonFrames(windowID: CGWindowID) -> [String: Any]? {
+        guard let el = elementFor(windowID: windowID) else { return nil }
+        AXUIElementSetMessagingTimeout(el, 0.1)
+        func rect(_ attr: String) -> Any {
+            var btnRef: AnyObject?
+            guard AXUIElementCopyAttributeValue(el, attr as CFString, &btnRef) == .success,
+                  let btn = btnRef else { return NSNull() }
+            // swiftlint:disable:next force_cast
+            let button = btn as! AXUIElement
+            var posRef: AnyObject?, sizeRef: AnyObject?
+            AXUIElementCopyAttributeValue(button, kAXPositionAttribute as CFString, &posRef)
+            AXUIElementCopyAttributeValue(button, kAXSizeAttribute     as CFString, &sizeRef)
+            var pt = CGPoint.zero, sz = CGSize.zero
+            if let p = posRef { AXValueGetValue(p as! AXValue, .cgPoint, &pt) }
+            if let s = sizeRef { AXValueGetValue(s as! AXValue, .cgSize,  &sz) }
+            if sz.width <= 0 || sz.height <= 0 { return NSNull() }
+            return [
+                "x": Int(pt.x), "y": Int(pt.y),
+                "w": Int(sz.width), "h": Int(sz.height)
+            ] as [String: Int]
+        }
+        return [
+            "close":    rect("AXCloseButton"),
+            "zoom":     rect("AXZoomButton"),
+            "minimize": rect("AXMinimizeButton")
+        ]
+    }
+
     /// Per-window tab list. Walks the window's direct children for an
     /// `AXTabGroup` (browsers, Finder, terminals all use it); returns
     /// `[{title, selected}]` from the tab group's `AXChildren` (typically

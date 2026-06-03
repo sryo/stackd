@@ -1,6 +1,7 @@
 import Foundation
 import AppKit
 import CoreGraphics
+import WebKit
 
 // Tests for `Sources/DataSources/Overlay.swift`.
 //
@@ -122,6 +123,47 @@ func registerOverlayTests() {
     }
 
     // MARK: - bounds + isOrderedIn together — the tick guard pair
+
+    // MARK: - OverlayHandle.setTarget — retarget mutation
+
+    test("OverlayHandle.setTarget updates targetWID and is idempotent for the same wid") {
+        // setTarget exists so overlay-border can move ONE overlay between
+        // focused windows on focus change, instead of detach+attach pairs
+        // racing on the daemon main thread and leaving duplicate panels on
+        // screen. The vsync ticker reads targetWID per frame, so all we
+        // need from this method is that the property actually changes.
+        //
+        // Construct a degenerate panel + webView pair on the main thread.
+        // No orderFront → nothing visible during the suite. Same constraint
+        // as the rest of the harness: we exercise the mutation without
+        // mounting AppKit windows.
+        let panel   = NSPanel(contentRect: .zero, styleMask: .borderless,
+                              backing: .buffered, defer: true)
+        let webView = WKWebView(frame: .zero, configuration: WKWebViewConfiguration())
+        let h = OverlayHandle(id: 1, targetWID: 100, panel: panel, webView: webView)
+        try expectEqual(h.targetWID, CGWindowID(100))
+        h.setTarget(200)
+        try expectEqual(h.targetWID, CGWindowID(200))
+        h.setTarget(200)  // idempotent — early-out path
+        try expectEqual(h.targetWID, CGWindowID(200))
+        // Cleanup — panel/webView drop with the test scope.
+        h.detach()
+    }
+
+    test("OverlayHandle.setTarget on a detached handle is a safe no-op") {
+        // Race: a focus change can fire while the handle is being torn down
+        // (stack reload). The released guard must catch it so we don't
+        // silently apply a target to a closed panel — the next tick would
+        // read targetWID and try to reposition a deallocated WebView.
+        let panel   = NSPanel(contentRect: .zero, styleMask: .borderless,
+                              backing: .buffered, defer: true)
+        let webView = WKWebView(frame: .zero, configuration: WKWebViewConfiguration())
+        let h = OverlayHandle(id: 2, targetWID: 100, panel: panel, webView: webView)
+        h.detach()
+        h.setTarget(300)
+        try expectEqual(h.targetWID, CGWindowID(100),
+                        "expected targetWID unchanged after detach + setTarget")
+    }
 
     test("bounds and isOrderedIn agree on an invalid wid (both negative)") {
         // The per-vsync subscription in Bridge.swift checks `isOrderedIn`

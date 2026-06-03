@@ -99,6 +99,54 @@ func registerInputTests() {
         }
     }
 
+    // MARK: - EventTapRegistry.setConsumerRects — runtime cursor-rect gate
+
+    test("EventTapRegistry.setConsumerRects round-trips nil / empty / populated for a key") {
+        // The cursor-rect gate has three semantically distinct states, all
+        // visible to the synchronous consume path:
+        //   - nil  → no gate (consume on the static predicate alone)
+        //   - []   → empty gate (consumer never fires, used to suppress without
+        //            tearing the registration down)
+        //   - [r]  → consume only when cursor falls in any rect
+        // This test pins the storage shape so a future refactor can't silently
+        // collapse `nil` and `[]` into the same internal value — the consume
+        // dispatcher branches on them differently.
+        let key = "tests.rectsRoundtrip"
+        EventTapRegistry.shared.setConsumerRects(key: key, rects: nil)
+        try expect(EventTapRegistry.shared.rectsForKey(key) == nil,
+                   "expected nil after setConsumerRects(nil)")
+        EventTapRegistry.shared.setConsumerRects(key: key, rects: [])
+        let empty = EventTapRegistry.shared.rectsForKey(key)
+        try expect(empty != nil && empty?.isEmpty == true,
+                   "expected empty array after setConsumerRects([]), got \(String(describing: empty))")
+        let r = CGRect(x: 10, y: 20, width: 30, height: 40)
+        EventTapRegistry.shared.setConsumerRects(key: key, rects: [r])
+        try expectEqual(EventTapRegistry.shared.rectsForKey(key)?.count, 1)
+        try expectEqual(EventTapRegistry.shared.rectsForKey(key)?[0], r)
+        // Cleanup so other tests start from nil.
+        EventTapRegistry.shared.setConsumerRects(key: key, rects: nil)
+    }
+
+    test("EventTapRegistry.setConsumerRects scopes by key — distinct keys do not bleed") {
+        // Bridge mints keys as "\(stackId):\(callback)", so two stacks (or two
+        // callbacks within one stack) must not see each other's rects.
+        // Catches a regression where a single shared array silently leaks
+        // gates between consumers.
+        let k1 = "tests.scope.a"
+        let k2 = "tests.scope.b"
+        EventTapRegistry.shared.setConsumerRects(key: k1, rects: [CGRect(x: 0, y: 0, width: 10, height: 10)])
+        EventTapRegistry.shared.setConsumerRects(key: k2, rects: [CGRect(x: 100, y: 100, width: 5, height: 5)])
+        try expectEqual(EventTapRegistry.shared.rectsForKey(k1)?.count, 1)
+        try expectEqual(EventTapRegistry.shared.rectsForKey(k2)?.count, 1)
+        try expectEqual(EventTapRegistry.shared.rectsForKey(k1)?[0].size.width, 10)
+        try expectEqual(EventTapRegistry.shared.rectsForKey(k2)?[0].size.width, 5)
+        EventTapRegistry.shared.setConsumerRects(key: k1, rects: nil)
+        try expect(EventTapRegistry.shared.rectsForKey(k1) == nil)
+        try expectEqual(EventTapRegistry.shared.rectsForKey(k2)?.count, 1,
+                        "clearing k1 must not affect k2")
+        EventTapRegistry.shared.setConsumerRects(key: k2, rects: nil)
+    }
+
     // MARK: - HotkeyRegistry.keyCode token table
 
     test("HotkeyRegistry.keyCode resolves letters, digits, and named keys to their Carbon constants") {

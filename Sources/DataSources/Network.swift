@@ -2,6 +2,7 @@ import Foundation
 import SystemConfiguration
 import CoreWLAN
 import Network
+import Darwin
 
 enum NetLAN {
     static func current() -> [String: Any] {
@@ -88,5 +89,101 @@ enum NetPath {
             "isConstrained":  path.isConstrained,
             "isExpensive":    path.isExpensive
         ]
+    }
+}
+
+// MARK: - sd.net.throughput
+
+/// Pure interface-byte sum + rate math. Split from the observer so the diff
+/// logic is unit-testable without a Timer or AF_LINK getifaddrs walk.
+enum NetThroughput {
+    /// Walks getifaddrs() once, sums `if_data.ifi_ibytes` / `ifi_obytes`
+    /// across every non-loopback link-level (AF_LINK) entry. Loopback is
+    /// skipped to match the netstat-ib parser that the bar/items/throughput
+    /// stack previously implemented in JS — without that skip, a single
+    /// localhost-heavy app (Docker, dev proxy) would dominate the rate.
+    static func interfaceTotals() -> (rx: UInt64, tx: UInt64) {
+        var addrs: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&addrs) == 0, let first = addrs else { return (0, 0) }
+        defer { freeifaddrs(addrs) }
+        var rx: UInt64 = 0
+        var tx: UInt64 = 0
+        var ptr: UnsafeMutablePointer<ifaddrs>? = first
+        while let p = ptr {
+            let entry = p.pointee
+            if let sa = entry.ifa_addr, sa.pointee.sa_family == UInt8(AF_LINK) {
+                let name = String(cString: entry.ifa_name)
+                if !name.hasPrefix("lo"),
+                   let dataPtr = entry.ifa_data?.assumingMemoryBound(to: if_data.self) {
+                    rx &+= UInt64(dataPtr.pointee.ifi_ibytes)
+                    tx &+= UInt64(dataPtr.pointee.ifi_obytes)
+                }
+            }
+            ptr = entry.ifa_next
+        }
+        return (rx, tx)
+    }
+
+    /// Diff math. Returns nil when there's no prior sample (first tick) or
+    /// time hasn't advanced. Clamps negative deltas to 0 so a counter wrap
+    /// or interface tear-down doesn't surface a negative rate to JS.
+    static func computeRates(
+        prevRx: UInt64, prevTx: UInt64, prevTs: TimeInterval,
+        curRx:  UInt64, curTx:  UInt64, curTs:  TimeInterval
+    ) -> (rxBps: Double, txBps: Double)? {
+        guard prevTs > 0, curTs > prevTs else { return nil }
+        let dt = curTs - prevTs
+        let dRx = curRx > prevRx ? Double(curRx - prevRx) : 0
+        let dTx = curTx > prevTx ? Double(curTx - prevTx) : 0
+        return (dRx / dt, dTx / dt)
+    }
+}
+
+/// 1s polling observer for aggregate network throughput. Like
+/// SensorsObserver / HostObserver, kicks a Timer on install and tears it
+/// down when the last subscriber leaves. Cached `current` so multiple
+/// bridges fanning out on the same tick read the same diff (calling
+/// snapshot twice on a static-state struct would zero the second read).
+final class NetworkThroughputObserver: RefCountedObserver {
+    static let shared = NetworkThroughputObserver()
+    private override init() { super.init() }
+
+    /// Latest snapshot, refreshed on each tick. nil until the first diff
+    /// is available — matches startChannel's "no data yet → skip push"
+    /// contract.
+    private(set) var current: [String: Any]?
+    private var prevRx: UInt64 = 0
+    private var prevTx: UInt64 = 0
+    private var prevTs: TimeInterval = 0
+
+    override func install() -> Token {
+        prevRx = 0; prevTx = 0; prevTs = 0; current = nil
+        let t = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+            self?.tick()
+        }
+        RunLoop.main.add(t, forMode: .common)
+        return Token { [weak self] in
+            t.invalidate()
+            self?.current = nil
+            self?.prevRx = 0; self?.prevTx = 0; self?.prevTs = 0
+        }
+    }
+
+    private func tick() {
+        let (rx, tx) = NetThroughput.interfaceTotals()
+        let now = Date().timeIntervalSince1970
+        if let rates = NetThroughput.computeRates(
+            prevRx: prevRx, prevTx: prevTx, prevTs: prevTs,
+            curRx:  rx,     curTx:  tx,     curTs:  now
+        ) {
+            current = [
+                "rxBps":   rates.rxBps,
+                "txBps":   rates.txBps,
+                "rxBytes": rx,
+                "txBytes": tx
+            ]
+        }
+        prevRx = rx; prevTx = tx; prevTs = now
+        fire()
     }
 }
