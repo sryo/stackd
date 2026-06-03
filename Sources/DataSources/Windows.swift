@@ -550,24 +550,47 @@ enum WindowsByID {
     }
 
     /// Probed variant of setFrame: applies the requested geometry then reads
-    /// back what AX actually accepted, so callers (windowscape's tiler /
-    /// drag-resize) can infer min/max constraints from the (requested,
-    /// actual) delta and stop fighting apps that refuse to honor part of
-    /// the request.
+    /// back what AX/CG actually accepted, so callers (windowscape's tiler /
+    /// drag-resize) can detect apps that refuse to honor the requested size.
+    ///
+    /// The read-back goes through CGWindowList, NOT AX. Reading AX
+    /// (kAXPositionAttribute + kAXSizeAttribute) immediately after a write
+    /// returns the JUST-WRITTEN value rather than the app-clamped actual —
+    /// AX writes propagate asynchronously to the target app's NSWindow, and
+    /// AX reads inside the same runloop tick return the cached requested
+    /// value. CG bounds reflect what's actually on the framebuffer.
     ///
     /// Returns the post-set live frame; ok=false (with actual=null) means
     /// the element wasn't reachable. ok=true with actual ≠ requested means
-    /// AX honored the call but the app clamped the size.
+    /// AX accepted the call but the app clamped the size (e.g. Calculator,
+    /// fixed-size dialogs, Finder column widths).
     static func setFrameProbed(windowID: CGWindowID, x: Double, y: Double, w: Double, h: Double) -> [String: Any] {
         let ok = setFrame(windowID: windowID, x: x, y: y, w: w, h: h)
-        guard let r = frame(windowID: windowID) else {
+        // App propagation wait: AX writes hit the target app's runloop
+        // asynchronously, then the app draws and CG updates. Reading
+        // CGWindowList immediately catches an intermediate state where CG
+        // shows the requested size before the app's layout pass clamps it.
+        // 60ms is enough for most apps (Finder column rounding, Calculator
+        // fixed size, browser min-width snap-backs) to settle. The cost is
+        // tile-pass latency: 6 windows × 60ms = ~360ms per tile pass, which
+        // is acceptable for a UX where tiles already animate at ~100ms.
+        Thread.sleep(forTimeInterval: 0.06)
+        // Read back via CGWindowList — ground truth, no AX cache race.
+        let target = Int(windowID)
+        guard let raw = CGWindowListCopyWindowInfo(
+            [.optionIncludingWindow], CGWindowID(windowID)
+        ),
+        let list = raw as? [[String: Any]],
+        let info = list.first(where: { ($0[kCGWindowNumber as String] as? Int) == target }),
+        let bounds = info[kCGWindowBounds as String] as? [String: CGFloat]
+        else {
             return ["ok": ok, "actual": NSNull()]
         }
         return [
             "ok": ok,
             "actual": [
-                "x": Double(r.origin.x), "y": Double(r.origin.y),
-                "w": Double(r.size.width), "h": Double(r.size.height)
+                "x": Double(bounds["X"] ?? 0), "y": Double(bounds["Y"] ?? 0),
+                "w": Double(bounds["Width"] ?? 0), "h": Double(bounds["Height"] ?? 0)
             ] as [String: Any]
         ]
     }
