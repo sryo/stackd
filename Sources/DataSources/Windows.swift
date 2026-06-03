@@ -1412,7 +1412,12 @@ enum WindowEvents {
         guard tahoePollTimer == nil else { return }
         // Seed prev so the first tick doesn't fire bangs for every existing window.
         tahoePollPrev = snapshotCGWindowState()
-        tahoePollTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { _ in
+        // 100ms tick — fast enough that windowscape's drift watcher (also
+        // 100ms-ish) sees a window resize within one frame. CGWindowList
+        // enumeration is cheap (~1ms for typical 50-window sessions); the
+        // previous 250ms left up to half a second of dead time between
+        // "user resized" and "windowscape sees it".
+        tahoePollTimer = Timer.scheduledTimer(withTimeInterval: 0.10, repeats: true) { _ in
             tahoePollTick()
         }
     }
