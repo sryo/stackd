@@ -1660,6 +1660,25 @@ final class Bridge: NSObject, WKScriptMessageHandler {
                 }
             }
         },
+        // JS-controlled window frame. Input is in CG/AX convention (top-left
+        // origin) — matches sd.windows.focused / sd.ax.attribute. Width / height
+        // optional; omitted dimensions preserve current. Used by stacks that
+        // reposition per-invocation (Muse anchors to AX-focused element) where
+        // a single manifest anchor isn't expressive enough.
+        .custom("window.setFrame", denyValue: false) { bridge, body, requestId in
+            guard let f = StackWindow.parseSetFrame(body) else {
+                bridge.respond(requestId: requestId, value: false)
+                return
+            }
+            DispatchQueue.main.async { [weak bridge] in
+                if let win = bridge?.webView?.window as? StackWindow {
+                    win.setFrame(cgX: f.x, cgY: f.y, w: f.w, h: f.h)
+                    bridge?.respond(requestId: requestId, value: true)
+                } else {
+                    bridge?.respond(requestId: requestId, value: false)
+                }
+            }
+        },
 
         // Native popup menu — async (resolves on user pick / cancel).
         .custom("menu.popup", permission: "menu") { bridge, body, requestId in

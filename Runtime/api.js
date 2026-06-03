@@ -935,7 +935,21 @@ export const sd = {
     // body isn't enough (e.g. material: glass — the NSGlassEffectView
     // renders independently of WebView contentView alpha and stays visible
     // even when the body is opacity:0).
-    setAlpha(value) { return request({ type: "window.setAlpha", value }); }
+    setAlpha(value) { return request({ type: "window.setAlpha", value }); },
+    // Reposition (and optionally resize) the panel at runtime. Coordinates
+    // are in CG / AX convention (top-left origin) — matches what
+    // sd.windows.focused.peek().frame and sd.ax.attribute(_, "AXFrame")
+    // return. Width / height optional: omit to keep current dimensions.
+    //
+    //   sd.window.setFrame({ x: 100, y: 200 })                  // move only
+    //   sd.window.setFrame({ x: 100, y: 200, w: 320, h: 320 })  // move + resize
+    //
+    // Used by stacks that anchor themselves per-invocation (Muse to the
+    // AX-focused element) when the static manifest anchor isn't enough.
+    setFrame(rect) {
+      const r = rect || {};
+      return request({ type: "window.setFrame", x: r.x, y: r.y, w: r.w, h: r.h });
+    }
   },
   hotkey: {
     // Dynamically bind a Carbon hotkey from JS. Equivalent to the manifest

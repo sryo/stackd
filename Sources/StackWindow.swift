@@ -334,6 +334,36 @@ final class StackWindow: NSPanel, WKNavigationDelegate {
         return CGFloat(max(0.0, min(1.0, raw)))
     }
 
+    /// JS-controlled window frame. Input is in CG/AX convention (top-left
+    /// origin, y growing down — same as `sd.windows.focused.peek().frame` and
+    /// `sd.ax.attribute(.., "AXFrame")` return). The Y axis is flipped against
+    /// the primary screen's height to land in AppKit coords before calling
+    /// `NSWindow.setFrame`.
+    ///
+    /// Width / height are optional — when omitted, the current dimensions
+    /// stay. Useful for stacks that reposition per-invocation (Muse anchors
+    /// itself to the AX-focused element) without wanting to resize.
+    func setFrame(cgX: Double, cgY: Double, w: Double?, h: Double?) {
+        guard let primary = NSScreen.screens.first else { return }
+        let primaryMaxY = primary.frame.maxY
+        let width  = CGFloat(w ?? Double(self.frame.width))
+        let height = CGFloat(h ?? Double(self.frame.height))
+        let appkitY = primaryMaxY - CGFloat(cgY) - height
+        let rect = NSRect(x: CGFloat(cgX), y: appkitY, width: width, height: height)
+        self.setFrame(rect, display: true)
+    }
+
+    /// Parse a `window.setFrame` body into (x, y, w?, h?). x/y required and
+    /// finite; w/h optional and must be positive + finite when present.
+    /// Returns nil on bad input — bridge responds false.
+    static func parseSetFrame(_ body: [String: Any]) -> (x: Double, y: Double, w: Double?, h: Double?)? {
+        guard let x = body["x"] as? Double, x.isFinite,
+              let y = body["y"] as? Double, y.isFinite else { return nil }
+        let w: Double? = (body["w"] as? Double).flatMap { $0.isFinite && $0 > 0 ? $0 : nil }
+        let h: Double? = (body["h"] as? Double).flatMap { $0.isFinite && $0 > 0 ? $0 : nil }
+        return (x, y, w, h)
+    }
+
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         FileHandle.standardError.write(Data("stackd: webview did-finish \(webView.url?.absoluteString ?? "?")\n".utf8))
         webView.evaluateJavaScript("window.dispatchEvent(new Event('stackd:load'))", completionHandler: nil)

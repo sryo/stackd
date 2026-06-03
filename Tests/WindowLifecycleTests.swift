@@ -232,4 +232,52 @@ func registerWindowLifecycleTests() {
     test("setAlpha: above 1 clamps to 1") {
         try expectEqual(StackWindow.parseSetAlpha(["value": 1.7]), 1.0)
     }
+
+    // MARK: setFrame body parsing
+    //
+    // CG / AX convention (top-left origin) — same as sd.windows.focused and
+    // AXFrame. x/y required and finite. w/h optional; must be positive +
+    // finite when present, treated as missing otherwise.
+
+    test("setFrame: missing x → nil") {
+        try expect(StackWindow.parseSetFrame(["y": 100.0]) == nil)
+    }
+    test("setFrame: missing y → nil") {
+        try expect(StackWindow.parseSetFrame(["x": 100.0]) == nil)
+    }
+    test("setFrame: non-numeric x → nil") {
+        try expect(StackWindow.parseSetFrame(["x": "100", "y": 100.0]) == nil)
+    }
+    test("setFrame: NaN y → nil") {
+        try expect(StackWindow.parseSetFrame(["x": 100.0, "y": Double.nan]) == nil)
+    }
+    test("setFrame: x/y only → w/h are nil (preserve current dimensions)") {
+        let p = StackWindow.parseSetFrame(["x": 100.0, "y": 200.0])
+        try expect(p != nil)
+        try expectEqual(p?.x, 100.0)
+        try expectEqual(p?.y, 200.0)
+        try expect(p?.w == nil)
+        try expect(p?.h == nil)
+    }
+    test("setFrame: full x/y/w/h passes through") {
+        let p = StackWindow.parseSetFrame(["x": 100.0, "y": 200.0, "w": 320.0, "h": 320.0])
+        try expectEqual(p?.x, 100.0)
+        try expectEqual(p?.y, 200.0)
+        try expectEqual(p?.w, 320.0)
+        try expectEqual(p?.h, 320.0)
+    }
+    test("setFrame: zero w treated as missing") {
+        let p = StackWindow.parseSetFrame(["x": 100.0, "y": 200.0, "w": 0.0, "h": 320.0])
+        try expect(p?.w == nil)
+        try expectEqual(p?.h, 320.0)
+    }
+    test("setFrame: negative h treated as missing") {
+        let p = StackWindow.parseSetFrame(["x": 100.0, "y": 200.0, "w": 320.0, "h": -5.0])
+        try expectEqual(p?.w, 320.0)
+        try expect(p?.h == nil)
+    }
+    test("setFrame: infinite w treated as missing") {
+        let p = StackWindow.parseSetFrame(["x": 100.0, "y": 200.0, "w": Double.infinity, "h": 320.0])
+        try expect(p?.w == nil)
+    }
 }
