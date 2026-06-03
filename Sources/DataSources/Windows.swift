@@ -263,12 +263,15 @@ enum WindowAddressabilityCache {
     struct Probe { let addressable: Bool; let isStandard: Bool; let ts: TimeInterval }
     private static var cache: [String: Probe] = [:]
     private static let lock = NSLock()
-    // Two TTLs: a successful probe is cached long (windows don't randomly
-    // become unaddressable), but a failed probe is re-checked aggressively
-    // (AX often returns nil transiently under load — caching that for
-    // minutes would mark Terminal as "ghost" across many sd.windows.all
-    // pushes, dropping it from the tile rotation).
-    private static let okTtl:   TimeInterval = 60.0
+    // Successful probes are cached PERMANENTLY (until pid death — see the
+    // NSWorkspace.didTerminateApplication observer in install()). Reasoning:
+    // AX's 100ms messaging timeout drops queries under load (spotlight
+    // indexing, brightness poll, rapid tile passes); a once-addressable
+    // window doesn't randomly become un-addressable while its pid is
+    // alive. Re-probing on TTL expiry kept causing Terminal to lose its
+    // verdict to a transient AX timeout.
+    // Failed probes are re-checked aggressively so an app that JUST opened
+    // a window gets re-evaluated within a beat.
     private static let failTtl: TimeInterval = 0.5
 
     static func probe(pid: pid_t, windowID: CGWindowID) -> Probe {
@@ -276,8 +279,11 @@ enum WindowAddressabilityCache {
         let now = Date().timeIntervalSince1970
         lock.lock()
         if let p = cache[key] {
-            let ttl = p.addressable ? okTtl : failTtl
-            if (now - p.ts) < ttl {
+            if p.addressable {
+                lock.unlock()
+                return p   // sticky success — never re-probe
+            }
+            if (now - p.ts) < failTtl {
                 lock.unlock()
                 return p
             }
@@ -391,10 +397,14 @@ enum WindowsByID {
     static func invalidateCache(pid: pid_t) {
         cacheLock.lock(); defer { cacheLock.unlock() }
         axCache[pid] = nil
-        // Also clear the addressability cache for this pid so Windows.all
-        // re-probes on the next push (a new window of the same pid would
-        // otherwise inherit a stale "unaddressable" verdict for ~60s).
-        WindowAddressabilityCache.invalidate(pid: pid)
+        // Deliberately do NOT clear WindowAddressabilityCache(pid:) here.
+        // invalidateCache fires on EVERY window-destroy for the pid (helper
+        // windows, autocomplete popups, sheets — Terminal alone produces
+        // many per session). Nuking the per-pid AddressabilityCache on
+        // each kept causing Terminal's main window to lose its sticky-true
+        // verdict and get re-probed against a transient AX timeout. The
+        // AddressabilityCache has its own TTL + invalidate-on-process-exit
+        // path to drop stale entries.
     }
 
     static func invalidateAll() {

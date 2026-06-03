@@ -117,6 +117,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             WindowsByID.invalidateCache(pid: pid_t(info.pid))
             host?.bang(name: "sd.window.destroyed", detail: WindowsLifecycleObserver.detail(info))
         }
+
+        // Drop the AX-addressability cache when an app fully quits. Per-window
+        // destroy events fire too aggressively (Terminal alone spawns + reaps
+        // many helper windows per session) and would nuke the sticky-true
+        // verdict for the app's MAIN window. Only do it when the pid really
+        // is gone — NSWorkspace fires this once per app termination.
+        NotificationCenter.default.addObserver(
+            forName: NSWorkspace.didTerminateApplicationNotification,
+            object: NSWorkspace.shared, queue: .main
+        ) { note in
+            guard let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
+            WindowAddressabilityCache.invalidate(pid: app.processIdentifier)
+        }
         WindowsLifecycleObserver.shared.onTitleChange = { [weak host] info, oldTitle in
             log("window title changed: \(info.app) — '\(oldTitle)' → '\(info.title)'")
             var d = WindowsLifecycleObserver.detail(info)
