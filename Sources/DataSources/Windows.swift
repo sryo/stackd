@@ -220,12 +220,22 @@ enum Windows {
             else { return nil }
             if !includeOwn && pid == ownPid { return nil }
             let onscreen = (info[kCGWindowIsOnscreen as String] as? Int) ?? 0
+            // Enrich with AX-derived fields the stack would otherwise have
+            // to probe per-pass:
+            //   addressable: AX can resolve an AXUIElement for this id
+            //   isStandard:  AXSubrole == AXStandardWindow (filters out
+            //                Inspector / preferences / helper windows)
+            // Both cached per (pid, id) with a TTL so a 50-window
+            // CGWindowList push doesn't fan out 50+50 AX RPCs every time.
+            let probe = WindowAddressabilityCache.probe(pid: pid_t(pid), windowID: CGWindowID(num))
             return [
                 "id": num,
                 "app": owner,
                 "pid": pid,
                 "title": info[kCGWindowName as String] as? String ?? "",
                 "onscreen": onscreen != 0,
+                "addressable": probe.addressable,
+                "isStandard":  probe.isStandard,
                 "frame": [
                     "x": Int(bounds["X"] ?? 0),
                     "y": Int(bounds["Y"] ?? 0),
@@ -234,6 +244,76 @@ enum Windows {
                 ]
             ]
         }
+    }
+}
+
+// MARK: - WindowAddressabilityCache
+//
+// AX probe results for each (pid, CGWindowID) cached with a TTL. Used to
+// enrich Windows.all() without paying an AX round-trip per window per push.
+// First call for an id pays the elementFor + subrole lookup; subsequent
+// reads within the TTL hit the cache. Cache is invalidated when the pid
+// goes away (WindowsByID.invalidateCache(pid:) is called from
+// WindowsLifecycleObserver on window-destroyed events).
+//
+// Why on the daemon side: lets every stack consume sd.windows.all without
+// each one re-implementing per-pass probing (the previous design had
+// windowscape doing 2N AX calls per tile pass — costly and racy).
+enum WindowAddressabilityCache {
+    struct Probe { let addressable: Bool; let isStandard: Bool; let ts: TimeInterval }
+    private static var cache: [String: Probe] = [:]
+    private static let lock = NSLock()
+    // Two TTLs: a successful probe is cached long (windows don't randomly
+    // become unaddressable), but a failed probe is re-checked aggressively
+    // (AX often returns nil transiently under load — caching that for
+    // minutes would mark Terminal as "ghost" across many sd.windows.all
+    // pushes, dropping it from the tile rotation).
+    private static let okTtl:   TimeInterval = 60.0
+    private static let failTtl: TimeInterval = 0.5
+
+    static func probe(pid: pid_t, windowID: CGWindowID) -> Probe {
+        let key = "\(pid)|\(windowID)"
+        let now = Date().timeIntervalSince1970
+        lock.lock()
+        if let p = cache[key] {
+            let ttl = p.addressable ? okTtl : failTtl
+            if (now - p.ts) < ttl {
+                lock.unlock()
+                return p
+            }
+        }
+        lock.unlock()
+        // Probe outside the lock — AX calls hop to main thread internally.
+        let el = WindowsByID.elementFor(windowID: windowID, pid: pid)
+        let addressable = (el != nil)
+        var isStd = false
+        if let e = el {
+            var subroleRef: AnyObject?
+            if AXUIElementCopyAttributeValue(e, kAXSubroleAttribute as CFString, &subroleRef) == .success,
+               let s = subroleRef as? String {
+                isStd = (s == (kAXStandardWindowSubrole as String))
+            }
+        }
+        var probe = Probe(addressable: addressable, isStandard: isStd, ts: now)
+        lock.lock()
+        // Sticky-success: if we've EVER successfully probed this id, a
+        // failure now is treated as transient (AX timeout, app under load).
+        // Keep the true verdict AND return it — overwriting + returning the
+        // fresh false would propagate the flicker straight to the stack.
+        // The entry is dropped entirely on pid-destroy (invalidate) which
+        // is when a window really does go away.
+        if let existing = cache[key], existing.addressable && !addressable {
+            probe = Probe(addressable: true, isStandard: existing.isStandard, ts: now)
+        }
+        cache[key] = probe
+        lock.unlock()
+        return probe
+    }
+
+    static func invalidate(pid: pid_t) {
+        let prefix = "\(pid)|"
+        lock.lock(); defer { lock.unlock() }
+        cache = cache.filter { !$0.key.hasPrefix(prefix) }
     }
 }
 
@@ -311,6 +391,10 @@ enum WindowsByID {
     static func invalidateCache(pid: pid_t) {
         cacheLock.lock(); defer { cacheLock.unlock() }
         axCache[pid] = nil
+        // Also clear the addressability cache for this pid so Windows.all
+        // re-probes on the next push (a new window of the same pid would
+        // otherwise inherit a stale "unaddressable" verdict for ~60s).
+        WindowAddressabilityCache.invalidate(pid: pid)
     }
 
     static func invalidateAll() {
