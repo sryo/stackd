@@ -214,8 +214,15 @@ final class FSWatch {
         let cb: FSEventStreamCallback = { _, info, numEvents, evPaths, evFlags, _ in
             guard let info = info else { return }
             let watch = Unmanaged<FSWatch>.fromOpaque(info).takeUnretainedValue()
-            let pathsAny = unsafeBitCast(evPaths, to: NSArray.self)
-            let paths = (pathsAny as? [String]) ?? []
+            // With kFSEventStreamCreateFlagUseCFTypes set, evPaths is a
+            // CFArrayRef of CFStringRef. Without that flag it would be a
+            // raw `UnsafePointer<UnsafePointer<CChar>?>` and the NSArray
+            // bridge would interpret the first 8 bytes of a path string
+            // as an object pointer → EXC_BAD_ACCESS on the next message
+            // send. (Real crash logged 2026-06-03, fault addr decoded as
+            // path-string bytes.)
+            let cfPaths = Unmanaged<CFArray>.fromOpaque(evPaths).takeUnretainedValue()
+            let paths = (cfPaths as NSArray) as? [String] ?? []
             let flagsBuf = UnsafeBufferPointer(start: evFlags, count: numEvents)
             var events: [(path: String, flags: FSEventStreamEventFlags)] = []
             for i in 0..<min(paths.count, flagsBuf.count) {
@@ -229,7 +236,7 @@ final class FSWatch {
             cfPaths,
             FSEventStreamEventId(kFSEventStreamEventIdSinceNow),
             0.1,
-            UInt32(kFSEventStreamCreateFlagFileEvents | kFSEventStreamCreateFlagNoDefer)
+            UInt32(kFSEventStreamCreateFlagFileEvents | kFSEventStreamCreateFlagNoDefer | kFSEventStreamCreateFlagUseCFTypes)
         ) else { return nil }
         self.stream = s
         FSEventStreamSetDispatchQueue(s, DispatchQueue.main)

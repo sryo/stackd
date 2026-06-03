@@ -273,4 +273,56 @@ func registerStorageTests() {
         try expect(!PasteboardObserver.shared.isActive,
                    "PasteboardObserver must deactivate ≤5.2s after last unsubscribe")
     }
+
+    // MARK: - FSWatch (FSEvents callback path-decoding)
+
+    test("FSWatch decodes paths from CFArray-typed FSEvents callback (no SIGSEGV)") {
+        // Regression for the crash logged 2026-06-03: FSEventStreamCreate was
+        // called WITHOUT kFSEventStreamCreateFlagUseCFTypes, so evPaths was a
+        // C-string array, but the callback did `unsafeBitCast(evPaths, to:
+        // NSArray.self)` → `objc_msgSend(copy)` interpreted the first 8 bytes
+        // of a path string as an object pointer and faulted.
+        //
+        // This test creates a real FSWatch on a temp dir, writes a file, spins
+        // the runloop for the callback to fire, and asserts: (a) the daemon
+        // doesn't crash, (b) the decoded path is a valid UTF-8 string under
+        // the watched dir (not garbage). Pre-fix the process SEGFAULTs in
+        // the bridge call before any assertion runs.
+
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("fswatch-test-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmp) }
+
+        var received: [String] = []
+        let watch = FSWatch(paths: [tmp.path]) { events in
+            for e in events { received.append(e.path) }
+        }
+        try expect(watch != nil, "FSWatch.init should succeed for a valid temp dir")
+
+        // Touch a file inside the watched dir so FSEvents fires.
+        let target = tmp.appendingPathComponent("hello.txt")
+        try "world".write(to: target, atomically: true, encoding: .utf8)
+
+        // Spin the main runloop up to 2s for the FSEvents callback to land.
+        let deadline = Date().addingTimeInterval(2.0)
+        while received.isEmpty && Date() < deadline {
+            RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.05))
+        }
+
+        try expect(!received.isEmpty,
+                   "FSWatch callback should have fired with at least one path within 2s")
+        // The path must be a valid UTF-8 string under the watched dir. macOS
+        // canonicalizes /var → /private/var so FSEvents may return the
+        // /private-prefixed form; resolve both sides before comparing.
+        // (Pre-fix, the bridge produced garbage strings or crashed before this
+        // point — surviving with a decodable path == the fix is wired.)
+        let any = received.first!
+        let watchedResolved = URL(fileURLWithPath: tmp.path).resolvingSymlinksInPath().path
+        let receivedResolved = URL(fileURLWithPath: any).resolvingSymlinksInPath().path
+        try expect(receivedResolved.hasPrefix(watchedResolved),
+                   "decoded path '\(receivedResolved)' should be under watched dir '\(watchedResolved)'")
+
+        watch?.stop()
+    }
 }
