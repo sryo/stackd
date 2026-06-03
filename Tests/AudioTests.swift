@@ -191,4 +191,89 @@ func registerAudioTests() {
         Media.nowPlaying { _ in fired = true }
         try expect(!fired, "Media.nowPlaying completion must not fire synchronously")
     }
+
+    // MARK: - Media.parseScriptedResult (Spotify / osascript fallback)
+
+    test("parseScriptedResult: empty / whitespace input returns nil") {
+        try expect(Media.parseScriptedResult("", bundleId: "com.spotify.client") == nil,
+                   "empty input should yield nil (no current track)")
+        try expect(Media.parseScriptedResult("   \n", bundleId: "com.spotify.client") == nil,
+                   "whitespace-only input should yield nil")
+    }
+
+    test("parseScriptedResult: leading-tab (empty title) returns nil") {
+        // Spotify returns "\t\t\t\t" if there's no title — parser must treat
+        // this as "no track" not "track with blank title", otherwise the bar
+        // would render a stale " · " separator on top of an empty string.
+        try expect(Media.parseScriptedResult("\t\t\t\t", bundleId: "com.spotify.client") == nil,
+                   "all-blank tab-separated fields should yield nil")
+    }
+
+    test("parseScriptedResult: title-only input yields playing+title, no artist/album") {
+        let out = Media.parseScriptedResult("Just A Title", bundleId: "com.spotify.client")
+        try expect(out != nil, "title-only should parse")
+        try expectEqual(out!["title"] as? String, "Just A Title")
+        try expectEqual(out!["playing"] as? Bool, true)
+        try expect(out!["artist"] == nil, "no artist field for title-only input")
+        try expect(out!["album"]  == nil, "no album field for title-only input")
+    }
+
+    test("parseScriptedResult: full Spotify row maps to media-channel keys") {
+        // Spotify produces: title\tartist\talbum\tduration_ms\tposition_sec
+        let out = Media.parseScriptedResult(
+            "Stairway to Heaven\tLed Zeppelin\tIV\t482830\t127.5",
+            bundleId: "com.spotify.client"
+        )
+        try expect(out != nil, "full row should parse")
+        try expectEqual(out!["title"]    as? String, "Stairway to Heaven")
+        try expectEqual(out!["artist"]   as? String, "Led Zeppelin")
+        try expectEqual(out!["album"]    as? String, "IV")
+        try expectEqual(out!["playing"]  as? Bool,   true)
+        // Spotify durations are milliseconds; the parser normalizes to seconds
+        // so the field matches MediaRemote's kMRMediaRemoteNowPlayingInfoDuration
+        // (which is already in seconds). Stacks using duration/elapsed as a
+        // progress fraction depend on the same units across sources.
+        try expectEqual(out!["duration"] as? Double, 482.83)
+        try expectEqual(out!["elapsed"]  as? Double, 127.5)
+    }
+
+    test("parseScriptedResult: blank artist/album fields are dropped, not empty-strung") {
+        // AppleScript returns the literal "" when the metadata is missing;
+        // dropping them keeps the JS-side `m.artist ? ... : ...` ternary in
+        // bar/items/nowplaying.js producing "Title" instead of "Title · ".
+        let out = Media.parseScriptedResult("OnlyTitle\t\t\t180000\t10",
+                                            bundleId: "com.spotify.client")
+        try expect(out != nil)
+        try expectEqual(out!["title"] as? String, "OnlyTitle")
+        try expect(out!["artist"] == nil, "blank artist should be dropped")
+        try expect(out!["album"]  == nil, "blank album should be dropped")
+        try expectEqual(out!["duration"] as? Double, 180.0)
+    }
+
+    test("parseScriptedResult: trailing newline from osascript is tolerated") {
+        // osascript stdout always ends with \n. The parser trims so the
+        // duration/elapsed fields parse as Double rather than failing on
+        // a stray suffix that breaks Double(parts[N]).
+        let out = Media.parseScriptedResult(
+            "Song\tArtist\tAlbum\t1000\t0.5\n",
+            bundleId: "com.spotify.client"
+        )
+        try expect(out != nil)
+        try expectEqual(out!["duration"] as? Double, 1.0)
+        try expectEqual(out!["elapsed"]  as? Double, 0.5)
+    }
+
+    test("parseScriptedResult: non-Spotify bundle skips duration/elapsed normalization") {
+        // Other bundles may produce different units; until we add a per-app
+        // normalizer the parser only emits duration/elapsed for known sources.
+        let out = Media.parseScriptedResult(
+            "Track\tArtist\tAlbum\t300\t30",
+            bundleId: "com.unknown.app"
+        )
+        try expect(out != nil)
+        try expectEqual(out!["title"]  as? String, "Track")
+        try expectEqual(out!["artist"] as? String, "Artist")
+        try expect(out!["duration"] == nil, "duration should be omitted for unknown bundles")
+        try expect(out!["elapsed"]  == nil, "elapsed should be omitted for unknown bundles")
+    }
 }
