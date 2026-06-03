@@ -475,9 +475,21 @@ enum WindowsByID {
         }
 
         cacheLock.lock()
-        axCache[pid] = map
+        // MERGE, don't replace. AXWindowsAttribute can return different
+        // subsets across calls (apps re-render their window list, helper
+        // windows come and go). If we replace, a window present in pass A
+        // but absent in pass B disappears from our cache → next probe for
+        // that id fails → window dropped from tile rotation. Merging
+        // preserves the union of what we've ever seen for this pid.
+        // Stale AXUIElements raise -25204 when actioned, which we already
+        // tolerate (the per-window invalidate path drops them on destroy).
+        var existing = axCache[pid] ?? [:]
+        for (wid, el) in map {
+            existing[wid] = el  // freshest AX element wins for shared ids
+        }
+        axCache[pid] = existing
         cacheLock.unlock()
-        return map[windowID]
+        return existing[windowID]
     }
 
     // Look up by CGWindowID alone — we walk the CGWindowList to recover the
