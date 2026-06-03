@@ -3,5 +3,7 @@
   "name": "Cursor warp",
   "anchor": { "edge": "top-left", "inset": [40, 40] },
   "size": { "w": 240, "h": 120 },
+  "material": "glass",
+  "cornerRadius": 12,
   "permissions": ["cursor", "display"]
 }

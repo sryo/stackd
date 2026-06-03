@@ -3,5 +3,7 @@
   "name": "Speech STT",
   "anchor": { "edge": "top-right", "inset": [40, 40] },
   "size": { "w": 340, "h": 240 },
+  "material": "glass",
+  "cornerRadius": 10,
   "permissions": ["speech"]
 }

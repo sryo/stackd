@@ -3,5 +3,7 @@
   "name": "SQLite",
   "anchor": { "edge": "top-right", "inset": [40, 40] },
   "size": { "w": 320, "h": 200 },
+  "material": "glass",
+  "cornerRadius": 10,
   "permissions": ["sqlite"]
 }

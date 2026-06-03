@@ -3,5 +3,7 @@
   "name": "Broadcasts observer demo",
   "anchor": { "edge": "top-right", "inset": [16, 16] },
   "size": { "w": 320, "h": 200 },
+  "material": "glass",
+  "cornerRadius": 10,
   "permissions": ["broadcasts"]
 }

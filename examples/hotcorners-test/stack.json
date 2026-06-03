@@ -4,5 +4,7 @@
   "anchor": { "edge": "top-right", "inset": [340, 16] },
   "size": { "w": 220, "h": 100 },
   "clickThrough": true,
+  "material": "glass",
+  "cornerRadius": 12,
   "permissions": ["notify", "mouse", "display"]
 }

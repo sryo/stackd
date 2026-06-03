@@ -3,6 +3,8 @@
   "name": "Windows batch",
   "anchor": { "edge": "top-left", "inset": [40, 40] },
   "size": { "w": 360, "h": 220 },
+  "material": "glass",
+  "cornerRadius": 10,
   "permissions": ["windows"],
   "hotkeys": [
     { "key": "ctrl+alt+b", "callback": "batched" },

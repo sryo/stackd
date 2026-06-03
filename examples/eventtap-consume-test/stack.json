@@ -4,6 +4,8 @@
   "anchor": { "edge": "top-right", "inset": [320, 16] },
   "size": { "w": 260, "h": 84 },
   "clickThrough": true,
+  "material": "glass",
+  "cornerRadius": 12,
   "permissions": [],
   "eventtap": [
     { "event": "keyDown", "callback": "onSpace", "consume": true,

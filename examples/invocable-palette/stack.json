@@ -4,6 +4,8 @@
   "anchor": { "edge": "top", "inset": [200, 0] },
   "size": { "w": 480, "h": 80 },
   "invocable": true,
+  "material": "glass",
+  "cornerRadius": 12,
   "permissions": ["ax"],
   "hotkeys": [
     { "key": "ctrl+cmd+space", "callback": "show" }

@@ -3,5 +3,7 @@
   "name": "HTTP server",
   "anchor": { "edge": "top-left", "inset": [40, 40] },
   "size": { "w": 320, "h": 140 },
+  "material": "glass",
+  "cornerRadius": 10,
   "permissions": ["httpserver"]
 }

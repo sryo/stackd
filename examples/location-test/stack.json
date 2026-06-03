@@ -3,5 +3,7 @@
   "name": "Location Test",
   "anchor": { "edge": "bottom-right", "inset": [16, 16] },
   "size":   { "w": 220, "h": 56 },
+  "material": "glass",
+  "cornerRadius": 10,
   "permissions": ["location"]
 }

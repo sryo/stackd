@@ -3,5 +3,7 @@
   "name": "Update test",
   "anchor": { "edge": "top-right", "inset": [16, 16] },
   "size":   { "w": 280, "h": 200 },
+  "material": "glass",
+  "cornerRadius": 12,
   "permissions": ["update"]
 }
