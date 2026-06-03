@@ -262,6 +262,13 @@ enum Windows {
 enum WindowAddressabilityCache {
     struct Probe { let addressable: Bool; let isStandard: Bool; let ts: TimeInterval }
     private static var cache: [String: Probe] = [:]
+    // Consecutive AX-miss count per (pid, windowID). Only after N misses
+    // do we mark a probe as addressable=false. Single misses are silently
+    // treated as transient (AX timeout, race) and the cache stays in its
+    // prior state (or is treated as "not yet known" = addressable=true,
+    // letting the stack include it optimistically).
+    private static var missCount: [String: Int] = [:]
+    private static let missThreshold = 5
     private static let lock = NSLock()
     // Successful probes are cached PERMANENTLY (until pid death — see the
     // NSWorkspace.didTerminateApplication observer in install()). Reasoning:
@@ -300,16 +307,29 @@ enum WindowAddressabilityCache {
                 isStd = (s == (kAXStandardWindowSubrole as String))
             }
         }
-        var probe = Probe(addressable: addressable, isStandard: isStd, ts: now)
         lock.lock()
-        // Sticky-success: if we've EVER successfully probed this id, a
-        // failure now is treated as transient (AX timeout, app under load).
-        // Keep the true verdict AND return it — overwriting + returning the
-        // fresh false would propagate the flicker straight to the stack.
-        // The entry is dropped entirely on pid-destroy (invalidate) which
-        // is when a window really does go away.
-        if let existing = cache[key], existing.addressable && !addressable {
-            probe = Probe(addressable: true, isStandard: existing.isStandard, ts: now)
+        let existing = cache[key]
+        var probe: Probe
+        if addressable {
+            // Success — clear miss counter, cache true permanently.
+            missCount[key] = 0
+            probe = Probe(addressable: true, isStandard: isStd, ts: now)
+        } else if let e = existing, e.addressable {
+            // Sticky-success: established-true never flips to false on a
+            // transient miss. Keep + return true.
+            probe = e
+        } else {
+            // No success yet. Bump miss counter; only mark addressable=false
+            // after missThreshold consecutive failures. Before that, report
+            // OPTIMISTICALLY (addressable=true) so the stack doesn't drop
+            // a window for one transient race during boot.
+            let n = (missCount[key] ?? 0) + 1
+            missCount[key] = n
+            if n >= missThreshold {
+                probe = Probe(addressable: false, isStandard: false, ts: now)
+            } else {
+                probe = Probe(addressable: true, isStandard: true, ts: now)
+            }
         }
         cache[key] = probe
         lock.unlock()
@@ -320,6 +340,7 @@ enum WindowAddressabilityCache {
         let prefix = "\(pid)|"
         lock.lock(); defer { lock.unlock() }
         cache = cache.filter { !$0.key.hasPrefix(prefix) }
+        missCount = missCount.filter { !$0.key.hasPrefix(prefix) }
     }
 }
 
