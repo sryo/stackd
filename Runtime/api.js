@@ -956,7 +956,14 @@ export const sd = {
     setFrame(rect) {
       const r = rect || {};
       return request({ type: "window.setFrame", x: r.x, y: r.y, w: r.w, h: r.h });
-    }
+    },
+    // Dynamically toggle click-through. true = pass clicks through to the
+    // layer beneath (desktop, system menubar). false = receive clicks
+    // normally. Used by stacks that need per-region routing — most notably
+    // the menubar "bar" stack, which polls sd.mouse and flips this as the
+    // cursor crosses its item rects so the system menubar stays clickable
+    // outside the bar's items.
+    setClickThrough(value) { return request({ type: "window.setClickThrough", value: !!value }); }
   },
   hotkey: {
     // Dynamically bind a Carbon hotkey from JS. Equivalent to the manifest

@@ -1680,6 +1680,23 @@ final class Bridge: NSObject, WKScriptMessageHandler {
                 }
             }
         },
+        // JS-controlled click-through. Bar-like stacks toggle this to route
+        // events between themselves and the system menubar underneath as the
+        // mouse moves over / off their item rects.
+        .custom("window.setClickThrough", denyValue: false) { bridge, body, requestId in
+            guard let v = StackWindow.parseSetClickThrough(body) else {
+                bridge.respond(requestId: requestId, value: false)
+                return
+            }
+            DispatchQueue.main.async { [weak bridge] in
+                if let win = bridge?.webView?.window as? StackWindow {
+                    win.setClickThrough(v)
+                    bridge?.respond(requestId: requestId, value: true)
+                } else {
+                    bridge?.respond(requestId: requestId, value: false)
+                }
+            }
+        },
 
         // Native popup menu — async (resolves on user pick / cancel).
         .custom("menu.popup", permission: "menu") { bridge, body, requestId in
@@ -2395,7 +2412,13 @@ final class Bridge: NSObject, WKScriptMessageHandler {
                 }
             }
         }
-        pushFn()
+        // Initial hydration runs off-main: Media.nowPlaying's MediaRemote-
+        // absent path AND the scripted-fallback path both block synchronously
+        // (Process.run + waitUntilExit, ~200-600ms cold) on the calling
+        // queue. startMedia runs during stack load on main — inline pushFn()
+        // would stutter every stack with `media` perm on a Spotify-active
+        // session. Hop to utility; the dedupe/push still lands on main.
+        DispatchQueue.global(qos: .utility).async { pushFn() }
         scope.adopt(MediaObserver.shared.subscribe(pushFn))
     }
 
@@ -2764,7 +2787,12 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         // .fragmentsAllowed lets us serialize bare scalars (Bool/Int/String) at
         // the top level — required for imperative API responses like
         // setVolume → true, defaults.read → "value".
-        guard let data = try? JSONSerialization.data(withJSONObject: obj, options: [.fragmentsAllowed]),
+        // .sortedKeys guarantees deterministic key order so the channel
+        // dedupe (string-compare against lastState[channel]) doesn't
+        // false-mismatch when two code paths build the same dict in
+        // different insertion orders (e.g. MediaRemote vs scripted-fallback
+        // building the media snapshot).
+        guard let data = try? JSONSerialization.data(withJSONObject: obj, options: [.fragmentsAllowed, .sortedKeys]),
               let s = String(data: data, encoding: .utf8) else { return "null" }
         return s
     }

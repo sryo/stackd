@@ -47,7 +47,9 @@ final class StackWindow: NSPanel, WKNavigationDelegate {
         level: NSWindow.Level = .statusBar,
         invocable: Bool = false,
         material: StackMaterial = .none,
-        cornerRadius: Double? = nil
+        cornerRadius: Double? = nil,
+        shape: StackShape = .rect,
+        padding: Double = 0
     ) {
         self.invocable = invocable
         let config = WKWebViewConfiguration()
@@ -105,6 +107,18 @@ final class StackWindow: NSPanel, WKNavigationDelegate {
         let attachment = MaterialAttachment.mode(
             material: material, cornerRadius: cornerRadius, supportsGlass: supportsGlass)
 
+        // Resolve outer (material) and inner (WebView) corner radii.
+        //  - `outerRadius` honors `shape` — capsule overrides manifest radius
+        //    with min(w,h)/2; rect uses the manifest radius (or 0).
+        //  - `innerRadius` keeps the WebView's corners CONCENTRIC with the
+        //    material edge when `padding > 0`. Mirrors SwiftUI's
+        //    `RoundedRectangularShapeCorners.concentric`: parallel arcs sharing
+        //    a center. Collapses to 0 when padding ≥ outerRadius (sharp
+        //    content inside a smaller-radius container — matches SwiftUI).
+        let outerRadius = shape.outerRadius(frame: frame.size, manifestRadius: cornerRadius)
+        let innerRadius = StackPadding.concentricInnerRadius(outer: outerRadius, padding: padding)
+        let inset = CGFloat(padding)
+
         switch attachment {
         case .directContent:
             self.contentView = webView
@@ -125,14 +139,21 @@ final class StackWindow: NSPanel, WKNavigationDelegate {
                     glass.style = .regular
                     glass.tintColor = color
                 }
-                if let r = cornerRadius, r > 0 {
-                    glass.cornerRadius = CGFloat(r)
+                if outerRadius > 0 {
+                    glass.cornerRadius = CGFloat(outerRadius)
                 }
-                webView.frame = glass.bounds
+                webView.frame = glass.bounds.insetBy(dx: inset, dy: inset)
                 webView.autoresizingMask = [.width, .height]
-                if let r = cornerRadius, r > 0 {
+                if innerRadius > 0 {
                     webView.wantsLayer = true
-                    webView.layer?.cornerRadius = CGFloat(r)
+                    webView.layer?.cornerRadius = CGFloat(innerRadius)
+                    // NSGlassEffectView uses continuous (squircle) corners per
+                    // Apple's design system. CALayer defaults to .circular —
+                    // a perfect arc — which makes the WebView's inner corner
+                    // visibly diverge from the glass's outer corner even when
+                    // their radii are concentric. Match the curve so the rim
+                    // reads as a true concentric inset.
+                    webView.layer?.cornerCurve = .continuous
                     webView.layer?.masksToBounds = true
                 }
                 glass.contentView = webView
@@ -144,14 +165,15 @@ final class StackWindow: NSPanel, WKNavigationDelegate {
         case .siblingInContainer:
             let container = NSView(frame: NSRect(origin: .zero, size: frame.size))
             container.autoresizingMask = [.width, .height]
-            if let effect = StackWindow.makeEffectView(material: material, frame: container.bounds, cornerRadius: cornerRadius) {
+            if let effect = StackWindow.makeEffectView(material: material, frame: container.bounds, cornerRadius: outerRadius > 0 ? outerRadius : nil) {
                 container.addSubview(effect)
             }
-            webView.frame = container.bounds
+            webView.frame = container.bounds.insetBy(dx: inset, dy: inset)
             webView.autoresizingMask = [.width, .height]
-            if let r = cornerRadius, r > 0 {
+            if innerRadius > 0 {
                 webView.wantsLayer = true
-                webView.layer?.cornerRadius = CGFloat(r)
+                webView.layer?.cornerRadius = CGFloat(innerRadius)
+                webView.layer?.cornerCurve = .continuous
                 webView.layer?.masksToBounds = true
             }
             container.addSubview(webView)
@@ -378,6 +400,26 @@ final class StackWindow: NSPanel, WKNavigationDelegate {
         let w: Double? = (body["w"] as? Double).flatMap { $0.isFinite && $0 > 0 ? $0 : nil }
         let h: Double? = (body["h"] as? Double).flatMap { $0.isFinite && $0 > 0 ? $0 : nil }
         return (x, y, w, h)
+    }
+
+    /// JS-controlled click-through toggle. Maps to `ignoresMouseEvents` on
+    /// the panel: `true` → panel passes mouse events to the layer beneath
+    /// (desktop, system menubar, other windows); `false` → panel receives
+    /// clicks like a normal window.
+    ///
+    /// Used by stacks that need dynamic event routing — most importantly the
+    /// menubar-region "bar" stack, which must let clicks through to the
+    /// system menubar EXCEPT when the mouse is over one of its own items.
+    /// The bar polls `sd.mouse` and toggles this as the cursor enters /
+    /// leaves item rectangles.
+    func setClickThrough(_ clickThrough: Bool) {
+        self.ignoresMouseEvents = clickThrough
+    }
+
+    /// Parse a `window.setClickThrough` body into a Bool. Returns nil if the
+    /// `value` field is missing or not a Bool — bridge responds false.
+    static func parseSetClickThrough(_ body: [String: Any]) -> Bool? {
+        return body["value"] as? Bool
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {

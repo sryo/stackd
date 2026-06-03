@@ -281,6 +281,28 @@ func registerWindowLifecycleTests() {
         try expect(p?.w == nil)
     }
 
+    // MARK: setClickThrough body parsing
+    //
+    // Bool-only value field. Anything else (missing, string, number) returns
+    // nil and the bridge responds false rather than silently coercing — same
+    // strict shape as setAlpha / setFrame.
+
+    test("setClickThrough: true passes through") {
+        try expectEqual(StackWindow.parseSetClickThrough(["value": true]), true)
+    }
+    test("setClickThrough: false passes through") {
+        try expectEqual(StackWindow.parseSetClickThrough(["value": false]), false)
+    }
+    test("setClickThrough: missing value → nil") {
+        try expect(StackWindow.parseSetClickThrough([:]) == nil)
+    }
+    test("setClickThrough: numeric value → nil (no truthy coercion)") {
+        try expect(StackWindow.parseSetClickThrough(["value": 1]) == nil)
+    }
+    test("setClickThrough: string value → nil") {
+        try expect(StackWindow.parseSetClickThrough(["value": "true"]) == nil)
+    }
+
     // MARK: revealedDirectly (invocable-stack first-invoke shortcut)
     //
     // Invocable stacks load their page BEFORE first orderFront. The gate's
