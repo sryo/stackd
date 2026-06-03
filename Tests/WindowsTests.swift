@@ -271,4 +271,71 @@ func registerWindowsTests() {
         try expect(actual["w"] is Double, "w should be Double")
         try expect(actual["h"] is Double, "h should be Double")
     }
+
+    // MARK: - WindowAddressabilityCache.probe — grace + sticky-success contract
+    //
+    // Each test uses a unique fake (pid, windowID) so they don't collide with
+    // each other or with any real window. `AXUIElementCreateApplication(pid)`
+    // for a pid that owns no windows returns an empty AXWindows array, so
+    // `WindowsByID.elementFor(pid:)` returns nil, driving the probe down its
+    // unaddressable branches deterministically. `invalidate(pid:)` resets
+    // both the result cache and the firstSeenAt map per test.
+
+    test("WindowAddressabilityCache.probe — grace optimism reports addressable:true, isStandard:false") {
+        // Locks the post-aef9f4e contract: brand-new IDs get the optimistic
+        // `addressable: true` (so they stay candidate for tile rotation),
+        // but isStandard stays false until a real AX probe confirms
+        // AXStandardWindow. Prevents the prior bug where sheets/dialogs
+        // born during AX-stress inherited isStandard: true and got tiled.
+        let pid: pid_t = 7_777_701
+        defer { WindowAddressabilityCache.invalidate(pid: pid) }
+        let p = WindowAddressabilityCache.probe(pid: pid, windowID: 7_777_701, now: 1000.0)
+        try expectEqual(p.addressable, true)
+        try expectEqual(p.isStandard, false)
+        try expectEqual(p.isMinimized, false)
+    }
+
+    test("WindowAddressabilityCache.probe — grace optimism is NOT cached as sticky-success") {
+        // Regression: prior to this fix, the grace path stored its
+        // `addressable: true` result in the same cache the sticky-success
+        // branch reads, so the next probe returned the lie permanently.
+        // Every window the daemon saw during an AX-stress burst (boot,
+        // full restart, spotlight indexing) ended up flagged
+        // `isStandard: false` for its entire lifetime and silently dropped
+        // out of windowscape's tile rotation. The check: probe twice — once
+        // inside grace, once past grace — and demand the second call
+        // re-probes (verdict goes to `addressable: false` once the optimism
+        // budget runs out). If the grace result had stickied, the second
+        // call would echo the cached `addressable: true`.
+        let pid: pid_t = 7_777_702
+        defer { WindowAddressabilityCache.invalidate(pid: pid) }
+        let inGrace = WindowAddressabilityCache.probe(pid: pid, windowID: 7_777_702, now: 1000.0)
+        try expectEqual(inGrace.addressable, true)
+        try expectEqual(inGrace.isStandard, false)
+        // 6.0 seconds later — past the 5.0s optimisticGraceMs window. A
+        // poisoned cache would still return the grace result here.
+        let pastGrace = WindowAddressabilityCache.probe(pid: pid, windowID: 7_777_702, now: 1006.0)
+        try expectEqual(pastGrace.addressable, false,
+                        "grace optimism leaked past graceMs — cache is being poisoned")
+        try expectEqual(pastGrace.isStandard, false)
+    }
+
+    test("WindowAddressabilityCache.probe — past-grace failure caches with failTtl re-probe gate") {
+        // The mirror of the test above: once we're past the grace window
+        // a genuine failure verdict IS cached, gated by `failTtl` (0.5s).
+        // Locks the cadence so windowscape can rely on `addressable: false`
+        // being stable for the duration of a tile pass instead of
+        // flickering true→false→true within milliseconds.
+        let pid: pid_t = 7_777_703
+        defer { WindowAddressabilityCache.invalidate(pid: pid) }
+        // Seed firstSeenAt so we're past grace immediately.
+        _ = WindowAddressabilityCache.probe(pid: pid, windowID: 7_777_703, now: 1000.0)
+        let first = WindowAddressabilityCache.probe(pid: pid, windowID: 7_777_703, now: 1006.0)
+        try expectEqual(first.addressable, false)
+        // Within failTtl (< 0.5s) — same Probe instance, ts unchanged.
+        let cached = WindowAddressabilityCache.probe(pid: pid, windowID: 7_777_703, now: 1006.1)
+        try expectEqual(cached.addressable, false)
+        try expectEqual(cached.ts, first.ts,
+                        "within failTtl, probe must return cached entry (same ts)")
+    }
 }

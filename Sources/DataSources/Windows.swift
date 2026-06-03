@@ -282,9 +282,9 @@ enum WindowAddressabilityCache {
     // a window gets re-evaluated within a beat.
     private static let failTtl: TimeInterval = 0.5
 
-    static func probe(pid: pid_t, windowID: CGWindowID) -> Probe {
+    static func probe(pid: pid_t, windowID: CGWindowID,
+                      now: TimeInterval = Date().timeIntervalSince1970) -> Probe {
         let key = "\(pid)|\(windowID)"
-        let now = Date().timeIntervalSince1970
         lock.lock()
         if let p = cache[key] {
             if p.addressable {
@@ -316,15 +316,18 @@ enum WindowAddressabilityCache {
         }
         lock.lock()
         let existing = cache[key]
-        var probe: Probe
+        let probe: Probe
+        let shouldCache: Bool
         if addressable {
             // Success — cache true permanently.
             probe = Probe(addressable: true, isStandard: isStd, isMinimized: isMin, ts: now)
+            shouldCache = true
         } else if let e = existing, e.addressable {
             // Sticky-success: established-true never flips to false on a
             // transient miss. Keep addressable+isStandard, refresh isMinimized
             // (changes while window is alive — Cmd+M, dock click).
             probe = Probe(addressable: true, isStandard: e.isStandard, isMinimized: isMin, ts: now)
+            shouldCache = true
         } else {
             // No success yet. Time-based optimism: report addressable: true
             // for the first optimisticGraceMs after we first saw the id. AX
@@ -343,12 +346,23 @@ enum WindowAddressabilityCache {
             if firstSeenAt[key] == nil { firstSeenAt[key] = now }
             let inGrace = (now - firstSeen) < optimisticGraceMs
             if inGrace {
+                // CRUCIAL: do NOT cache the grace-optimism result. The
+                // sticky-success branch above ("if p.addressable") would
+                // then lock in `addressable: true, isStandard: false` for
+                // the window's entire lifetime — meaning every window the
+                // daemon sees during an AX-stress burst (boot, full rebuild
+                // restart, spotlight indexing burst, etc.) would never
+                // re-enter tile rotation. By NOT caching, the next call
+                // re-probes; if AX has caught up we hit the success branch
+                // and cache the real verdict.
                 probe = Probe(addressable: true, isStandard: false, isMinimized: false, ts: now)
+                shouldCache = false
             } else {
                 probe = Probe(addressable: false, isStandard: false, isMinimized: false, ts: now)
+                shouldCache = true
             }
         }
-        cache[key] = probe
+        if shouldCache { cache[key] = probe }
         lock.unlock()
         return probe
     }
