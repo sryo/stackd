@@ -69,6 +69,10 @@ swiftc -O \
   "${SWIFT_SOURCES[@]}" "${C_SOURCES[@]}" \
   -import-objc-header Sources/C/StackdBridge.h \
   -Xcc -Wno-zero-length-array \
+  -Xlinker -sectcreate \
+  -Xlinker __TEXT \
+  -Xlinker __info_plist \
+  -Xlinker Sources/Info.plist \
   -framework AppKit \
   -framework AppIntents \
   -framework AVFoundation \

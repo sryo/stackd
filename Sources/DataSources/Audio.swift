@@ -584,10 +584,10 @@ enum Media {
     ///
     /// Spotify on macOS 26 (Tahoe) frequently doesn't register with
     /// MediaRemote — title/artist come up empty even mid-playback. When
-    /// MediaRemote yields nothing, we fall back to a one-shot osascript
-    /// against any broadcast-broken app that's currently running. The
-    /// fallback only runs when the app is in `NSRunningApplications` to
-    /// avoid the "tell application X" trap that would launch X.
+    /// MediaRemote returns an EMPTY info dict, we fall back to a one-shot
+    /// osascript against any broadcast-broken app that's currently running.
+    /// A non-empty info dict is treated as authoritative even if we extract
+    /// no keys — overriding it would misrepresent the user's active player.
     static func nowPlaying(completion: @escaping ([String: Any]?) -> Void) {
         guard let fn = MediaRemote.getNowPlayingInfo else {
             // Match the success path's queue: MediaRemote's callback fires
@@ -599,6 +599,15 @@ enum Media {
             return
         }
         fn(.global(qos: .utility)) { info in
+            // info.isEmpty is the structural "no broadcaster" signal — only
+            // then do we try the per-app fallback. Otherwise MediaRemote is
+            // authoritative about WHO the active player is, even if we don't
+            // extract any of the keys it ships (ads, livestreams, podcasts
+            // with only Timestamp/MediaType/UniqueIdentifier fields).
+            if info.isEmpty {
+                completion(scriptedFallback())
+                return
+            }
             var out: [String: Any] = [:]
             if let t = info["kMRMediaRemoteNowPlayingInfoTitle"]  as? String { out["title"]  = t }
             if let a = info["kMRMediaRemoteNowPlayingInfoArtist"] as? String { out["artist"] = a }
@@ -609,26 +618,62 @@ enum Media {
             // Artwork omitted — base64-encoding the CFData on every push is
             // wasteful for a HUD's purposes. Future iteration: serve via a
             // synthetic sd://artwork URL.
-            if out["title"] == nil {
-                if let f = scriptedFallback() { completion(f); return }
-            }
             completion(out.isEmpty ? nil : out)
         }
     }
 
     @discardableResult
     static func command(_ name: String) -> Bool {
+        // Map our command names to Spotify's distinct AppleScript verbs so
+        // play/pause aren't flattened into a toggle. MediaRemote routes the
+        // same intents through a single sendCommand call; Spotify's
+        // AppleScript dictionary keeps them separate.
+        let spotifyVerb: String? = {
+            switch name {
+            case "toggle":   return "playpause"
+            case "play":     return "play"
+            case "pause":    return "pause"
+            case "next":     return "next track"
+            case "previous": return "previous track"
+            default:         return nil
+            }
+        }()
+        // Prefer osascript when Spotify is the only relevant broadcaster.
+        // MRMediaRemoteSendCommand reports "framework accepted the dispatch",
+        // not "player responded" — on Tahoe it accepts-and-drops Spotify
+        // commands silently, so trusting its true return would defeat the
+        // whole fallback. When Music IS running we let MediaRemote decide
+        // (Music registers correctly).
+        if let verb = spotifyVerb, isAppRunning("com.spotify.client"), !isAppRunning("com.apple.Music") {
+            return runSpotifyCommand(verb)
+        }
         if let fn = MediaRemote.sendCommand, let cmd = MediaRemote.commands[name] {
             if fn(cmd, nil) { return true }
         }
-        // MediaRemote command sometimes silently no-ops for Spotify on Tahoe.
-        // If Spotify is the only running broadcaster and we're sending a
-        // play/pause toggle, route through osascript so the click on the bar
-        // item actually controls what the user can read.
-        guard name == "toggle" || name == "play" || name == "pause" else { return false }
-        guard isAppRunning("com.spotify.client") else { return false }
-        _ = runOsascript("tell application id \"com.spotify.client\" to playpause")
-        return true
+        // MediaRemote rejected (or unloadable). Last-resort fallback to
+        // Spotify if it's running and we have a verb mapping.
+        if let verb = spotifyVerb, isAppRunning("com.spotify.client") {
+            return runSpotifyCommand(verb)
+        }
+        return false
+    }
+
+    private static func runSpotifyCommand(_ verb: String) -> Bool {
+        // Inline `is running` check closes the TOCTOU between
+        // NSWorkspace.runningApplications and Process.run — bare
+        // `tell application id "X"` would launch X if it quit in the gap.
+        // Returning the literal "ok" lets us distinguish success from
+        // "Spotify quit between checks" without trusting termination status
+        // (osascript exits 0 even when the inner `tell` did nothing).
+        let script = """
+        if application id "com.spotify.client" is running then
+            tell application id "com.spotify.client" to \(verb)
+            return "ok"
+        end if
+        return ""
+        """
+        let r = runOsascript(script)
+        return r.success && r.output.trimmingCharacters(in: .whitespacesAndNewlines) == "ok"
     }
 
     // MARK: - per-app osascript fallback (Spotify, etc.)
@@ -636,47 +681,93 @@ enum Media {
     /// Per-app osascript producers, tried in order. First running app wins.
     /// Add to this list when we discover another broadcaster that doesn't
     /// register with MediaRemote on a given macOS release.
+    ///
+    /// Wire format (one tab-separated row): title \t artist \t album \t
+    /// duration \t elapsed \t playState. parseScriptedResult tolerates fewer
+    /// fields and unknown trailing fields.
     private static let scriptedSources: [(bundleId: String, script: String)] = [
         ("com.spotify.client", """
-        tell application id "com.spotify.client"
-            if player state is playing then
-                set t to name of current track
-                set a to artist of current track
-                set b to album of current track
-                set d to duration of current track
-                set p to player position
-                return t & "\t" & a & "\t" & b & "\t" & d & "\t" & p
-            end if
-            return ""
-        end tell
+        if application id "com.spotify.client" is running then
+            tell application id "com.spotify.client"
+                if player state is not stopped then
+                    set t to name of current track
+                    set a to artist of current track
+                    set b to album of current track
+                    set d to duration of current track
+                    set p to player position
+                    set s to (player state as string)
+                    return t & "\t" & a & "\t" & b & "\t" & d & "\t" & p & "\t" & s
+                end if
+            end tell
+        end if
+        return ""
         """),
     ]
 
+    // Coalesce rapid fallback invocations. Spotify state-change notifications
+    // can fire 2-3 times in <500ms (ad transitions); without a short-TTL
+    // cache each would spawn its own blocking osascript on the utility queue.
+    // 300ms collapses bursts into a single exec while still surfacing real
+    // state changes within one media-channel push tick.
+    private static let scriptQueue = DispatchQueue(label: "stackd.media.script", qos: .utility)
+    private static var cachedFallback: (timestamp: TimeInterval, value: [String: Any]?) = (0, nil)
+    private static let cacheTTL: TimeInterval = 0.3
+
     private static func scriptedFallback() -> [String: Any]? {
-        for source in scriptedSources {
-            guard isAppRunning(source.bundleId) else { continue }
-            let raw = runOsascript(source.script)
-            if let parsed = parseScriptedResult(raw, bundleId: source.bundleId) { return parsed }
+        return scriptQueue.sync {
+            let now = ProcessInfo.processInfo.systemUptime
+            if now - cachedFallback.timestamp < cacheTTL { return cachedFallback.value }
+            var result: [String: Any]?
+            for source in scriptedSources {
+                guard isAppRunning(source.bundleId) else { continue }
+                let r = runOsascript(source.script)
+                guard r.success else { continue }
+                if let parsed = parseScriptedResult(r.output, bundleId: source.bundleId) {
+                    result = parsed
+                    break
+                }
+            }
+            cachedFallback = (now, result)
+            return result
         }
-        return nil
     }
 
     /// Pure parser for the tab-separated osascript result. Internal so
     /// AudioTests can exercise it without spawning osascript or assuming
     /// any specific app is running.
     internal static func parseScriptedResult(_ raw: String, bundleId: String) -> [String: Any]? {
-        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Trim only newlines (not all whitespace) so a leading tab — which
+        // signals "blank title" — survives into the split. Tabs ARE in
+        // .whitespacesAndNewlines, so trimming with that set would collapse
+        // "\tArtist\t..." into "Artist\t..." and silently promote Artist
+        // into the title position.
+        let trimmed = raw.trimmingCharacters(in: .newlines)
         if trimmed.isEmpty { return nil }
         let parts = trimmed.split(separator: "\t", omittingEmptySubsequences: false).map(String.init)
-        guard !parts.isEmpty, !parts[0].isEmpty else { return nil }
-        var out: [String: Any] = ["playing": true, "title": parts[0]]
-        if parts.count > 1, !parts[1].isEmpty { out["artist"] = parts[1] }
-        if parts.count > 2, !parts[2].isEmpty { out["album"]  = parts[2] }
+        // Reject leading-empty (or whitespace-only) title — happens when
+        // Spotify returned a row but the title field was blank, e.g.
+        // "\tArtist\tAlbum\t...". Otherwise we'd emit a track with no name.
+        guard !parts.isEmpty, !parts[0].trimmingCharacters(in: .whitespaces).isEmpty else { return nil }
+        var out: [String: Any] = ["title": parts[0]]
+        // Per-field trim catches the whitespace-only metadata case ("   "
+        // for blank artist/album) that the bar's `m.artist ? "X · " + m.artist
+        // : "X"` ternary would otherwise render as "Song ·    ·    ".
+        if parts.count > 1, !parts[1].trimmingCharacters(in: .whitespaces).isEmpty { out["artist"] = parts[1] }
+        if parts.count > 2, !parts[2].trimmingCharacters(in: .whitespaces).isEmpty { out["album"]  = parts[2] }
         // Spotify's duration is in milliseconds, position in seconds. Other
         // apps may differ; normalize as we add them.
         if bundleId == "com.spotify.client" {
             if parts.count > 3, let d = Double(parts[3]) { out["duration"] = d / 1000.0 }
             if parts.count > 4, let p = Double(parts[4]) { out["elapsed"]  = p }
+        }
+        // Optional player state — present when the script emits a 6th field.
+        // Without it, default to playing=true (the legacy script only emitted
+        // when player state was "playing", so any output meant playing).
+        if parts.count > 5 {
+            let s = parts[5].trimmingCharacters(in: .whitespaces).lowercased()
+            out["playing"] = (s == "playing")
+        } else {
+            out["playing"] = true
         }
         return out
     }
@@ -685,20 +776,27 @@ enum Media {
         NSWorkspace.shared.runningApplications.contains { $0.bundleIdentifier == bundleId }
     }
 
-    private static func runOsascript(_ script: String) -> String {
+    /// Spawns osascript with stderr routed to /dev/null and stdout drained
+    /// after waitUntilExit. Returns (stdout, success). stderr must NOT be
+    /// a Pipe() — an undrained pipe whose ~16-64KB kernel buffer fills (TCC
+    /// denial messages, AppleScript syntax errors, deprecation warnings)
+    /// blocks osascript on write and hangs waitUntilExit forever. Classic
+    /// Process footgun.
+    private static func runOsascript(_ script: String) -> (output: String, success: Bool) {
         let task = Process()
         task.launchPath = "/usr/bin/osascript"
         task.arguments = ["-e", script]
         let outPipe = Pipe()
         task.standardOutput = outPipe
-        task.standardError = Pipe()
+        task.standardError = FileHandle.nullDevice
         do {
             try task.run()
             task.waitUntilExit()
             let data = outPipe.fileHandleForReading.readDataToEndOfFile()
-            return String(data: data, encoding: .utf8) ?? ""
+            let output = String(data: data, encoding: .utf8) ?? ""
+            return (output, task.terminationStatus == 0)
         } catch {
-            return ""
+            return ("", false)
         }
     }
 }
@@ -720,19 +818,25 @@ final class MediaObserver: RefCountedObserver {
         _ = MediaObserver.registerOnce
         let nc = NotificationCenter.default
         let dn = DistributedNotificationCenter.default()
-        // Spotify on Tahoe often doesn't register with MediaRemote, so its
-        // changes never reach the kMRMediaRemote* notifications. Observe
-        // its own NSDistributedNotification so the osascript fallback in
-        // Media.nowPlaying fires within a frame of track / play / pause.
-        // The MediaRemote registrations may be no-ops on newer macOS where
-        // Apple has restricted the private framework; we still observe the
-        // distributed notification so Spotify-only setups stay live.
-        return installNotifications([
+        // The Spotify DN is registered with object: "com.spotify.client" so
+        // unrelated local processes can't spoof the notification name and
+        // trigger osascript fork-storms. Goes through a direct dn.addObserver
+        // call (not installNotifications) because the helper hardcodes
+        // object: nil.
+        let mrToken = installNotifications([
             (nc, NSNotification.Name("kMRMediaRemoteNowPlayingInfoDidChangeNotification")),
             (nc, NSNotification.Name("kMRMediaRemoteNowPlayingApplicationDidChangeNotification")),
-            (nc, NSNotification.Name("kMRMediaRemoteNowPlayingPlaybackQueueChangedNotification")),
-            (dn, NSNotification.Name("com.spotify.client.PlaybackStateChanged"))
+            (nc, NSNotification.Name("kMRMediaRemoteNowPlayingPlaybackQueueChangedNotification"))
         ])
+        let dnToken = dn.addObserver(
+            forName: NSNotification.Name("com.spotify.client.PlaybackStateChanged"),
+            object: "com.spotify.client",
+            queue: .main
+        ) { [weak self] _ in self?.fire() }
+        return Token {
+            mrToken.cancel()
+            dn.removeObserver(dnToken)
+        }
     }
 }
 

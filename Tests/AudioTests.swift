@@ -201,21 +201,67 @@ func registerAudioTests() {
                    "whitespace-only input should yield nil")
     }
 
-    test("parseScriptedResult: leading-tab (empty title) returns nil") {
-        // Spotify returns "\t\t\t\t" if there's no title — parser must treat
-        // this as "no track" not "track with blank title", otherwise the bar
-        // would render a stale " · " separator on top of an empty string.
-        try expect(Media.parseScriptedResult("\t\t\t\t", bundleId: "com.spotify.client") == nil,
-                   "all-blank tab-separated fields should yield nil")
+    test("parseScriptedResult: leading-tab (empty title) with content elsewhere returns nil") {
+        // Spotify can emit a row with metadata but a blank title field. The
+        // parser must reject these — otherwise the bar would render a stale
+        // " · Artist" entry with no track name. The earlier "all tabs"
+        // version of this test was incorrect: `trimmingCharacters` strips
+        // tabs (they're whitespace), so the input collapsed to "" and hit
+        // the empty short-circuit, never exercising the !parts[0].isEmpty
+        // guard. This input keeps content past the title so the guard
+        // actually fires.
+        try expect(Media.parseScriptedResult("\tArtist\tAlbum\t100\t10\tplaying", bundleId: "com.spotify.client") == nil,
+                   "blank-title-with-content should yield nil")
+    }
+
+    test("parseScriptedResult: whitespace-only title returns nil") {
+        // Per-field whitespace check — "   " is rejected the same as "".
+        try expect(Media.parseScriptedResult("   \tArtist", bundleId: "com.spotify.client") == nil,
+                   "whitespace-only title should yield nil")
+    }
+
+    test("parseScriptedResult: whitespace-only artist/album are dropped, not emitted") {
+        // The bar's `m.artist ? "X · " + m.artist : "X"` ternary is truthy
+        // on "   " — so a non-trim emit would render "Song ·    ·    ".
+        let out = Media.parseScriptedResult("Song\t   \t   \t1000\t0.5\tplaying",
+                                            bundleId: "com.spotify.client")
+        try expect(out != nil)
+        try expectEqual(out!["title"] as? String, "Song")
+        try expect(out!["artist"] == nil, "whitespace-only artist should be dropped")
+        try expect(out!["album"]  == nil, "whitespace-only album should be dropped")
     }
 
     test("parseScriptedResult: title-only input yields playing+title, no artist/album") {
         let out = Media.parseScriptedResult("Just A Title", bundleId: "com.spotify.client")
         try expect(out != nil, "title-only should parse")
         try expectEqual(out!["title"] as? String, "Just A Title")
+        // No 6th field → default to playing=true (legacy script only emitted
+        // when state was playing, so any output meant playing).
         try expectEqual(out!["playing"] as? Bool, true)
         try expect(out!["artist"] == nil, "no artist field for title-only input")
         try expect(out!["album"]  == nil, "no album field for title-only input")
+    }
+
+    test("parseScriptedResult: 6th-field playState=paused yields playing=false") {
+        // The current script emits player state as the 6th field. "paused"
+        // must surface as playing=false so HUDs can show a ▶ overlay rather
+        // than blanking the track entirely.
+        let out = Media.parseScriptedResult(
+            "Song\tArtist\tAlbum\t180000\t30\tpaused",
+            bundleId: "com.spotify.client"
+        )
+        try expect(out != nil)
+        try expectEqual(out!["title"]   as? String, "Song")
+        try expectEqual(out!["playing"] as? Bool,   false)
+    }
+
+    test("parseScriptedResult: 6th-field playState=playing yields playing=true") {
+        let out = Media.parseScriptedResult(
+            "Song\tArtist\tAlbum\t180000\t30\tplaying",
+            bundleId: "com.spotify.client"
+        )
+        try expect(out != nil)
+        try expectEqual(out!["playing"] as? Bool, true)
     }
 
     test("parseScriptedResult: full Spotify row maps to media-channel keys") {
