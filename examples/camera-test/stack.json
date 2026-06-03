@@ -5,6 +5,6 @@
   "size": { "w": 280, "h": 220 },
   "clickThrough": true,
   "material": "glass",
-  "cornerRadius": 10,
+  "cornerRadius": 24,
   "permissions": ["camera"]
 }

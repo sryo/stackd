@@ -4,6 +4,6 @@
   "anchor": { "edge": "top-right", "inset": [232, 16] },
   "size": { "w": 260, "h": 64 },
   "material": "glass",
-  "cornerRadius": 12,
+  "cornerRadius": 24,
   "permissions": ["app", "windows"]
 }

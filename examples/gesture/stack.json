@@ -4,7 +4,7 @@
   "anchor": { "edge": "top-right", "inset": [312, 16] },
   "size": { "w": 220, "h": 56 },
   "material": "glass",
-  "cornerRadius": 12,
+  "cornerRadius": 24,
   "eventtap": [
     { "event": "gesture", "callback": "g" }
   ]

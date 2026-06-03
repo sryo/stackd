@@ -5,7 +5,7 @@
   "size": { "w": 260, "h": 84 },
   "clickThrough": true,
   "material": "glass",
-  "cornerRadius": 12,
+  "cornerRadius": 24,
   "permissions": [],
   "eventtap": [
     { "event": "keyDown", "callback": "onSpace", "consume": true,

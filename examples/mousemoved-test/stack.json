@@ -5,7 +5,7 @@
   "size": { "w": 200, "h": 88 },
   "clickThrough": true,
   "material": "glass",
-  "cornerRadius": 12,
+  "cornerRadius": 24,
   "permissions": [],
   "eventtap": [
     { "event": "mouseMoved", "callback": "move" }

@@ -4,7 +4,7 @@
   "anchor": { "edge": "top-right", "inset": [96, 16] },
   "size": { "w": 140, "h": 48 },
   "material": "glass",
-  "cornerRadius": 12,
+  "cornerRadius": 24,
   "permissions": ["mouse"],
   "handles": ["user.beep"]
 }

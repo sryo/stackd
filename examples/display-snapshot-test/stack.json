@@ -4,7 +4,7 @@
   "anchor": { "edge": "top-left", "inset": [40, 40] },
   "size": { "w": 360, "h": 280 },
   "material": "glass",
-  "cornerRadius": 10,
+  "cornerRadius": 24,
   "permissions": ["display"],
   "hotkeys": [
     { "key": "ctrl+alt+s", "callback": "snap" }

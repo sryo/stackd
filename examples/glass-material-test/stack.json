@@ -4,5 +4,6 @@
   "anchor": { "edge": "top-right", "inset": [60, 60] },
   "size": { "w": 280, "h": 120 },
   "material": "glass",
+  "cornerRadius": 24,
   "permissions": ["battery"]
 }

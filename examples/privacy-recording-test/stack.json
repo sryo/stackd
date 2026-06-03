@@ -5,6 +5,6 @@
   "size": { "w": 320, "h": 180 },
   "clickThrough": true,
   "material": "glass",
-  "cornerRadius": 10,
+  "cornerRadius": 24,
   "permissions": ["privacy"]
 }

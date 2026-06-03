@@ -4,6 +4,6 @@
   "anchor": { "edge": "top-right", "inset": [88, 16] },
   "size":   { "w": 240, "h": 64 },
   "material": "glass",
-  "cornerRadius": 10,
+  "cornerRadius": 24,
   "permissions": ["fs"]
 }

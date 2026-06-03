@@ -5,7 +5,7 @@
   "size": { "w": 480, "h": 80 },
   "invocable": true,
   "material": "glass",
-  "cornerRadius": 12,
+  "cornerRadius": 24,
   "permissions": ["ax"],
   "hotkeys": [
     { "key": "ctrl+cmd+space", "callback": "show" }

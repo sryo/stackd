@@ -5,6 +5,6 @@
   "size": { "w": 220, "h": 100 },
   "clickThrough": true,
   "material": "glass",
-  "cornerRadius": 12,
+  "cornerRadius": 24,
   "permissions": ["notify", "mouse", "display"]
 }
