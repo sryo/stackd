@@ -23,7 +23,7 @@ FSEvents picks it up; the panel appears within ~300ms.
 | [focus](focus) | `sd.app.frontmost` + `sd.windows.focused` title |
 | [fs-watcher](fs-watcher) | `sd.fs.watch` + a banged message to other stacks |
 | [gesture](gesture) | `eventtap: gesture` — pinch/swipe/rotate name and finger count |
-| [glass-material-test](glass-material-test) | `"material": "glass"` — native NSVisualEffectView background |
+| [glass-material-test](glass-material-test) | `"material": "glass.clear"` — Liquid Glass (NSGlassEffectView, macOS 26+) |
 | [hello](hello) | Minimal panel — `sd.bind`, two signals, three target shapes |
 | [host-test](host-test) | `sd.host.info` + `sd.host.load` — uptime, CPU %, memory |
 | [hotcorners-test](hotcorners-test) | `manifest.hotcorners` — corner enter / exit callbacks with `sd.notify` |

@@ -6,6 +6,8 @@ Drop a folder into `~/stackd/stacks/` and it becomes a live piece of your deskto
 
 It's the successor to a Hammerspoon config that grew too tall. The native parts stay native (Accessibility, eventtaps, IOKit, CGEvent post); the visual layer is HTML/CSS — the same tools, the same dev tooling, the same gradients you can already write — instead of a paint-program's worth of `hs.canvas` arithmetic.
 
+> See **[BELIEFS.md](./BELIEFS.md)** for what stackd believes.
+
 ```
 ~/stackd/stacks/battery/
 ├── stack.json         { "anchor": { "edge": "top-right", "inset": [16, 16] },
