@@ -54,21 +54,50 @@ That's a complete stack body. The runtime walks the DOM at load time, finds ever
 
 ## Concepts
 
-- **stack** — a loadable folder (`~/stackd/stacks/<id>/`) with a manifest (`stack.json`), a rendered surface (`index.html` + `index.css`), and optional permissions.
-- **signal** — reactive system state. `sd.battery`, `sd.mouse`, `sd.windows.focused`. Subscribe or drop into `{{ }}`; the panel re-renders on change.
-- **bang** — a message any stack can fire and any stack can handle. CLI: `stackd bang my.event key=value`. JS: `window.onBang_my_event = (detail) => {…}`.
-- **verb** — a CLI command (`list`, `reload`, `toggle`, `set`, `bang`, `new`, `doctor`, `help`). The `stackd` binary is both the daemon and the client; arguments mean "send to the running daemon."
-- **permission** — `stack.json` declares which `sd.*` channels the stack uses. Channel permissions are auto-inferred from `sd.<channel>` references in your HTML/CSS/JS, so the list is usually a *minimum* you don't have to maintain. RPC actions (e.g. `menubar.item`, `overlay`) still need to be listed explicitly.
+The vocabulary, in one place. Everything below uses these terms in the strict sense.
+
+**Units**
+- **stack** — a loadable folder (`~/stackd/stacks/<id>/`) with a manifest (`stack.json`), a rendered surface (`index.html` + `index.css`), and optional permissions. The deployable unit.
+- **manifest** — `stack.json`. Declares region, size, anchor, material, permissions, handles, hotkeys, eventtap entries.
+- **panel** — the borderless NSPanel the daemon creates to host a stack's WebView. One stack = one panel (per display, for fullscreen stacks).
+
+**The reactive surface (what a stack sees)**
+- **primitive** — any general `sd.*` API. Every primitive has at least two unrelated callers (no `sd.spotify` — there's `sd.media`).
+- **channel** — a top-level `sd.*` namespace (`sd.battery`, `sd.windows`, `sd.media`). The unit of permission inference.
+- **signal** — reactive state. `sd.battery`, `sd.mouse`, `sd.windows.focused`. Subscribe or drop into `{{ }}`; the panel re-renders on change.
+- **action** — one-shot async write. `sd.windows.setFrame(...)`, `sd.pasteboard.set(...)`. Opposite of signal.
+- **bang** — one-shot pub/sub topic event. Any stack can fire (`sd.bang`); any stack that lists the topic in `handles` receives. CLI: `stackd bang my.topic key=value`. JS: `window.onBang_my_topic = (detail) => {…}`.
+
+**Native plumbing (daemon-side)**
+- **observer** — a daemon-side poller backing a signal (`BatteryObserver`, `AudioObserver`). Sheds itself when no stack subscribes.
+- **scope** / **StackScope** — per-stack container of native resources (observer subs, hotkeys, eventtaps). Drains on unload — nothing leaks.
+- **token** — a cancellable handle returned by registries, adopted into a StackScope.
+- **hotkey** — Carbon system-wide keybinding. Manifest-declared (`hotkeys: [...]`) or dynamic (`sd.hotkey.bind`).
+- **eventtap** — CGEventTap subscription. Manifest-declared, read-only or consuming.
+
+**CLI**
+- **verb** — a `stackd` subcommand (`list`, `reload`, `toggle`, `set`, `bang`, `new`, `doctor`, `help`). The `stackd` binary is both daemon and client; arguments mean "send to the running daemon."
+
+**Permissions** (BELIEFS #6 — reads inferred, writes declared)
+- Channel reads are auto-inferred from `sd.<channel>` references in your HTML/CSS/JS — the list is usually a *minimum* you don't have to maintain.
+- Actions that change the world (e.g. `menubar.item`, `overlay`) must be listed explicitly.
 
 ## Writing a stack
 
 A stack is `stack.json` + `index.html` + `index.css`. The manifest says where the panel lives and what it can touch:
 
+<!-- include: examples/cursor/stack.json -->
 ```json
-{ "id": "cursor", "name": "Cursor",
-  "anchor": { "edge": "top-right", "inset": [16, 16] },
-  "size":   { "w": 140, "h": 48 },
-  "permissions": ["mouse"] }
+{
+  "id": "cursor",
+  "name": "Cursor",
+  "anchor": { "edge": "top-right", "inset": [96, 16] },
+  "size": { "w": 140, "h": 48 },
+  "material": "glass",
+  "cornerRadius": 24,
+  "permissions": ["mouse"],
+  "handles": ["user.beep"]
+}
 ```
 
 Anchor edges are the eight standard corners + sides (`top-right`, `top-left`, `top`, `bottom`, `left`, `right`, …). Manifest also takes `region` (`fullscreen` for overlays), `clickThrough`, `invocable` (for hotkey-summoned panels), `hotkeys`, `handles`, and `material` (NSVisualEffectView under the WebView). See `Sources/StackTemplates.swift` for the full schema.
@@ -209,7 +238,7 @@ Available inside `{{ }}` templates and `import { sd } from "sd://runtime/api.js"
 | API | What it gives you |
 |---|---|
 | `sd.bang(name, detail)` | fire a bang to every stack whose manifest `handles` it |
-| `sd.broadcasts.observe(name, fn)` | NSDistributedNotificationCenter observer |
+| `sd.broadcasts.subscribe(name, fn)` | NSDistributedNotificationCenter subscription |
 | `sd.window.invoke() / dismiss()` | show/hide stacks declared `invocable` (palette pattern) |
 
 Window lifecycle (`sd.window.created / destroyed / titleChanged / moved / resized / minimized / deminimized / reordered / focusedByMouse`) and disk mount/unmount fire as bangs — declare in `stack.json`:
@@ -264,7 +293,7 @@ Working and in daily use:
 - **HS ports** — `notunes`, `apptimeout`, `palette`, `timetrail`, `undoclose`, `autodmg`, `sideswipe`, `muse`, `cloudpad`, `digup`, `edgehopper`, `framecorners`, `tttaps`, `windowscape`.
 - **Display stacks** — `bar`, `sysinfo`, `framecorners`, `overlay-border`.
 
-The discipline: every API in `sd.*` is a *general primitive* with at least two real consumers. No `sd.spotify` — there's `sd.media`, and Spotify is one of many publishers. No `sd.dock_orientation` — there's `sd.defaults.read("com.apple.dock", "orientation")`. If you find yourself wanting an escape hatch, propose the primitive that generalizes it.
+The discipline: every API in `sd.*` is a *general primitive* with at least two real consumers. No `sd.spotify` — there's `sd.media`, and Spotify is one feed of many (Apple Music, browser PiPs, Podcasts). No `sd.dock_orientation` — there's `sd.defaults.read("com.apple.dock", "orientation")`. If you find yourself wanting an escape hatch, propose the primitive that generalizes it.
 
 Open items: STT (`sd.speech.listen`), AirPods battery, camera stream, calendar writes + reminders, modern menu-bar suppress API on Sequoia+ (CGSSetMenuBarVisibility removed), per-AX-observer parity, AX notification bus (`sd.ax.observe`).
 

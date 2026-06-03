@@ -25,11 +25,11 @@
   };
 
   // Lock-screen DN. Trigger via Cmd+Ctrl+Q.
-  await sd.broadcasts.observe("com.apple.screenIsLocked", (p) => {
+  await sd.broadcasts.subscribe("com.apple.screenIsLocked", (p) => {
     append(`<b>locked</b> ${JSON.stringify(p)}`);
     console.log("locked", p);
   });
-  await sd.broadcasts.observe("com.apple.screenIsUnlocked", (p) => {
+  await sd.broadcasts.subscribe("com.apple.screenIsUnlocked", (p) => {
     append(`<b>unlocked</b> ${JSON.stringify(p)}`);
     console.log("unlocked", p);
   });
@@ -40,11 +40,11 @@
   // through a small swift/osascript shim. As a quick smoke test:
   //   osascript -e 'use framework "Foundation"' \
   //             -e 'current application''s NSDistributedNotificationCenter''s defaultCenter''s postNotificationName:"sd.test.ping" object:"hello"'
-  await sd.broadcasts.observe("sd.test.ping", (p) => {
+  await sd.broadcasts.subscribe("sd.test.ping", (p) => {
     append(`<b>ping</b> ${JSON.stringify(p)}`);
     console.log("ping", p);
   });
 
-  append("observers installed — try Cmd+Ctrl+Q or post sd.test.ping");
+  append("subscribers installed — try Cmd+Ctrl+Q or post sd.test.ping");
 </script>
 </body></html>

@@ -12,7 +12,7 @@ FSEvents picks it up; the panel appears within ~300ms.
 |---|---|
 | [applescript-test](applescript-test) | `sd.applescript.run` — AppleScript + JXA with success / error handling |
 | [bang-pair](bang-pair) | Two stacks communicating via `sd.bang` |
-| [broadcasts-test](broadcasts-test) | `sd.broadcasts.observe` — Distributed Notifications (lock / unlock) |
+| [broadcasts-test](broadcasts-test) | `sd.broadcasts.subscribe` — Distributed Notifications (lock / unlock) |
 | [camera-test](camera-test) | `sd.camera` device list with `isInUse` highlight |
 | [corner-dot](corner-dot) | Pure-manifest panel — `display: all`, `anchor`, no script |
 | [cursor](cursor) | `sd.mouse` live coords + `sd.bang` flash via `user.beep` |

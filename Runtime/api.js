@@ -82,7 +82,7 @@ window.__sd_hotkey_fire = (id) => {
   const fn = hotkeyHandlers.get(id);
   if (fn) fn();
 };
-// DN callbacks routed by mint id. Populated by sd.broadcasts.observe.
+// DN callbacks routed by mint id. Populated by sd.broadcasts.subscribe.
 const broadcastHandlers = new Map();
 window.__sd_broadcast_fire = (id, payload) => {
   const fn = broadcastHandlers.get(id);
@@ -154,7 +154,7 @@ function request(payload) {
 }
 
 // Handler-registry helper for the native-mints-an-id pattern shared by
-// sd.hotkey.bind, sd.broadcasts.observe, sd.httpserver.serve, and the bind
+// sd.hotkey.bind, sd.broadcasts.subscribe, sd.httpserver.serve, and the bind
 // portion of sd.menubar.addItem. Native returns the id from
 // `request(bindPayload)`; we stash `callback` under it so the matching
 // `__sd_<name>_fire` dispatcher can route by id. Returns null on failure so
@@ -1018,21 +1018,29 @@ export const sd = {
       current()    { return request({ type: "hotkey.mode.current" }); }
     }
   },
-  // Generic NSDistributedNotificationCenter observer. The same machinery
+  // Generic NSDistributedNotificationCenter subscription. The same machinery
   // Caffeinate uses internally (com.apple.screenIsLocked, etc.) but exposed
   // to any stack. Permission: "broadcasts".
-  //   const id = await sd.broadcasts.observe(
+  //   const id = await sd.broadcasts.subscribe(
   //     "com.apple.screenIsLocked",
   //     (payload) => console.log("locked at", payload));
   //   ...later...
-  //   await sd.broadcasts.unobserve(id);
+  //   await sd.broadcasts.unsubscribe(id);
+  //
+  // Verb is "subscribe" to match signals (sd.battery.subscribe(fn)). The old
+  // names .observe / .unobserve are kept as aliases for back-compat; they
+  // collided with the daemon-side Observer pattern (BatteryObserver etc.)
+  // which is a poller, not a listener.
   broadcasts: {
-    observe(name, fn) {
+    subscribe(name, fn) {
       return registerHandler(broadcastHandlers, { type: "broadcasts.observe", name }, fn);
     },
-    unobserve(id) {
+    unsubscribe(id) {
       return unregisterHandler(broadcastHandlers, id, { type: "broadcasts.unobserve", id });
-    }
+    },
+    // Back-compat aliases — prefer .subscribe / .unsubscribe in new code.
+    observe(name, fn)  { return this.subscribe(name, fn); },
+    unobserve(id)      { return this.unsubscribe(id); }
   },
   // Custom URL-scheme handlers. Register a callback for `<scheme>://...`
   // URLs that other apps open; the callback fires with the parsed URL +

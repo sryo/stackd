@@ -12,7 +12,7 @@ Drop a folder into `~/stackd/stacks/`, it runs. No build, no registry, no single
 
 ## 3. Primitives, not products.
 
-Every `sd.*` API is a general primitive with at least two unrelated callers. No `sd.spotify` — there's `sd.media`, and Spotify is one publisher of many.
+Every `sd.*` API is a general primitive with at least two unrelated callers. No `sd.spotify` — there's `sd.media`, and Spotify is one feed of many.
 
 ## 4. Native trusts. HTML shows.
 
