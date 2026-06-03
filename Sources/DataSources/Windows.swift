@@ -326,16 +326,24 @@ enum WindowAddressabilityCache {
             // (changes while window is alive — Cmd+M, dock click).
             probe = Probe(addressable: true, isStandard: e.isStandard, isMinimized: isMin, ts: now)
         } else {
-            // No success yet. Time-based optimism: report true for the
-            // first optimisticGraceMs after we first saw the id. AX is
-            // slammed at boot — 5+ misses can happen in milliseconds,
+            // No success yet. Time-based optimism: report addressable: true
+            // for the first optimisticGraceMs after we first saw the id. AX
+            // is slammed at boot — 5+ misses can happen in milliseconds,
             // count-based thresholds get blown through. Time-based gives
             // the app a fair shot at responding before we mark it dead.
+            //
+            // isStandard stays FALSE during grace — we can't risk tiling
+            // a sheet / dialog / save-panel that happens to be born when
+            // AX is busy. The tiler's first-entry filter checks isStandard,
+            // so unknown-subrole windows stay out of rotation until a real
+            // AX probe confirms AXStandardWindow. Worst-case UX: a new
+            // standard window pops in non-tiled for a frame or two before
+            // the next probe lands and the next push includes it.
             let firstSeen = firstSeenAt[key] ?? now
             if firstSeenAt[key] == nil { firstSeenAt[key] = now }
             let inGrace = (now - firstSeen) < optimisticGraceMs
             if inGrace {
-                probe = Probe(addressable: true, isStandard: true, isMinimized: false, ts: now)
+                probe = Probe(addressable: true, isStandard: false, isMinimized: false, ts: now)
             } else {
                 probe = Probe(addressable: false, isStandard: false, isMinimized: false, ts: now)
             }
