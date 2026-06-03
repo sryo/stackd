@@ -236,6 +236,7 @@ enum Windows {
                 "onscreen": onscreen != 0,
                 "addressable": probe.addressable,
                 "isStandard":  probe.isStandard,
+                "isMinimized": probe.isMinimized,
                 "frame": [
                     "x": Int(bounds["X"] ?? 0),
                     "y": Int(bounds["Y"] ?? 0),
@@ -260,7 +261,7 @@ enum Windows {
 // each one re-implementing per-pass probing (the previous design had
 // windowscape doing 2N AX calls per tile pass — costly and racy).
 enum WindowAddressabilityCache {
-    struct Probe { let addressable: Bool; let isStandard: Bool; let ts: TimeInterval }
+    struct Probe { let addressable: Bool; let isStandard: Bool; let isMinimized: Bool; let ts: TimeInterval }
     private static var cache: [String: Probe] = [:]
     // Consecutive AX-miss count per (pid, windowID). Only after N misses
     // do we mark a probe as addressable=false. Single misses are silently
@@ -300,11 +301,17 @@ enum WindowAddressabilityCache {
         let el = WindowsByID.elementFor(windowID: windowID, pid: pid)
         let addressable = (el != nil)
         var isStd = false
+        var isMin = false
         if let e = el {
             var subroleRef: AnyObject?
             if AXUIElementCopyAttributeValue(e, kAXSubroleAttribute as CFString, &subroleRef) == .success,
                let s = subroleRef as? String {
                 isStd = (s == (kAXStandardWindowSubrole as String))
+            }
+            var minRef: AnyObject?
+            if AXUIElementCopyAttributeValue(e, kAXMinimizedAttribute as CFString, &minRef) == .success,
+               let b = minRef as? Bool {
+                isMin = b
             }
         }
         lock.lock()
@@ -313,11 +320,14 @@ enum WindowAddressabilityCache {
         if addressable {
             // Success — clear miss counter, cache true permanently.
             missCount[key] = 0
-            probe = Probe(addressable: true, isStandard: isStd, ts: now)
+            probe = Probe(addressable: true, isStandard: isStd, isMinimized: isMin, ts: now)
         } else if let e = existing, e.addressable {
             // Sticky-success: established-true never flips to false on a
-            // transient miss. Keep + return true.
-            probe = e
+            // transient miss. Keep the addressable+isStandard verdict, but
+            // re-read isMinimized fresh — minimize state DOES change while
+            // the window is alive (Cmd+M, dock click) and we want the tile
+            // rotation to track that.
+            probe = Probe(addressable: true, isStandard: e.isStandard, isMinimized: isMin, ts: now)
         } else {
             // No success yet. Bump miss counter; only mark addressable=false
             // after missThreshold consecutive failures. Before that, report
@@ -326,9 +336,9 @@ enum WindowAddressabilityCache {
             let n = (missCount[key] ?? 0) + 1
             missCount[key] = n
             if n >= missThreshold {
-                probe = Probe(addressable: false, isStandard: false, ts: now)
+                probe = Probe(addressable: false, isStandard: false, isMinimized: false, ts: now)
             } else {
-                probe = Probe(addressable: true, isStandard: true, ts: now)
+                probe = Probe(addressable: true, isStandard: true, isMinimized: false, ts: now)
             }
         }
         cache[key] = probe
