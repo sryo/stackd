@@ -541,6 +541,36 @@ enum WindowsByID {
         return pOK == .success && sOK == .success
     }
 
+    /// Probed variant of setFrame: applies the requested geometry then reads
+    /// back what AX actually accepted, so callers (windowscape's tiler /
+    /// drag-resize) can infer min/max constraints from the (requested,
+    /// actual) delta and stop fighting apps that refuse to honor part of
+    /// the request.
+    ///
+    /// Returns the post-set live frame; ok=false (with actual=null) means
+    /// the element wasn't reachable. ok=true with actual ≠ requested means
+    /// AX honored the call but the app clamped the size.
+    static func setFrameProbed(windowID: CGWindowID, x: Double, y: Double, w: Double, h: Double) -> [String: Any] {
+        let ok = setFrame(windowID: windowID, x: x, y: y, w: w, h: h)
+        guard let el = elementFor(windowID: windowID) else {
+            return ["ok": ok, "actual": NSNull()]
+        }
+        var posRef: CFTypeRef?
+        var sizeRef: CFTypeRef?
+        _ = AXUIElementCopyAttributeValue(el, kAXPositionAttribute as CFString, &posRef)
+        _ = AXUIElementCopyAttributeValue(el, kAXSizeAttribute     as CFString, &sizeRef)
+        var pt = CGPoint.zero, sz = CGSize.zero
+        if let p = posRef  { AXValueGetValue(p as! AXValue, .cgPoint, &pt) }
+        if let s = sizeRef { AXValueGetValue(s as! AXValue, .cgSize,  &sz) }
+        return [
+            "ok": ok,
+            "actual": [
+                "x": Double(pt.x), "y": Double(pt.y),
+                "w": Double(sz.width), "h": Double(sz.height)
+            ] as [String: Any]
+        ]
+    }
+
     @discardableResult
     static func minimize(windowID: CGWindowID, _ value: Bool) -> Bool {
         guard let el = elementFor(windowID: windowID) else { return false }

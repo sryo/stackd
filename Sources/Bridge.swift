@@ -1496,6 +1496,17 @@ final class Bridge: NSObject, WKScriptMessageHandler {
                 x: body["x"] as? Double ?? 0, y: body["y"] as? Double ?? 0,
                 w: body["w"] as? Double ?? 0, h: body["h"] as? Double ?? 0)
         },
+        // Probed setFrame: applies the geometry then reads back what AX
+        // actually accepted. Use this when you want to detect apps that
+        // refused part of the resize (Calculator, Browser at min width,
+        // fixed-size panels) so callers can build a constraint cache.
+        // Returns { ok: Bool, actual: {x,y,w,h} | null }.
+        .ax("windows.byId.setFrameProbed", permission: "windows") { _, body in
+            WindowsByID.setFrameProbed(
+                windowID: CGWindowID((body["id"] as? Int) ?? 0),
+                x: body["x"] as? Double ?? 0, y: body["y"] as? Double ?? 0,
+                w: body["w"] as? Double ?? 0, h: body["h"] as? Double ?? 0) as [String: Any]
+        },
         .ax("windows.byId.minimize",   permission: "windows", denyValue: false) { _, body in WindowsByID.minimize(  windowID: CGWindowID((body["id"] as? Int) ?? 0), body["value"] as? Bool ?? true) },
         .ax("windows.byId.fullscreen", permission: "windows", denyValue: false) { _, body in WindowsByID.fullscreen(windowID: CGWindowID((body["id"] as? Int) ?? 0), body["value"] as? Bool ?? true) },
         .ax("windows.byId.raise",      permission: "windows", denyValue: false) { _, body in WindowsByID.raise(     windowID: CGWindowID((body["id"] as? Int) ?? 0)) },

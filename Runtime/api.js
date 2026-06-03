@@ -297,6 +297,17 @@ export const sd = {
       const f = arg1 || {};
       return request({ type: "windows.setFrame", x: f.x, y: f.y, w: f.w, h: f.h });
     },
+    // Probed setFrame: applies the geometry then reads back what AX actually
+    // accepted, so callers can detect apps that refused part of the resize
+    // (Calculator, fixed-size panels, Browser at its min width). Returns
+    //   { ok: bool, actual: {x,y,w,h} | null }
+    // Use when building / updating a window-constraint cache (e.g. the
+    // windowscape tiler's per-window min/max inference). Same permission
+    // as setFrame: "windows".
+    setFrameProbed(id, frame) {
+      const f = frame || {};
+      return request({ type: "windows.byId.setFrameProbed", id, x: f.x, y: f.y, w: f.w, h: f.h });
+    },
     minimize(arg1, arg2) {
       if (typeof arg1 === "number") {
         return request({ type: "windows.byId.minimize", id: arg1, value: arg2 === undefined ? true : !!arg2 });

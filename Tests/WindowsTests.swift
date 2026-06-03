@@ -240,4 +240,35 @@ func registerWindowsTests() {
         let result = WindowsByID.info(windowID: 0)
         try expect(result == nil, "info(0) returned non-nil: \(String(describing: result))")
     }
+
+    // MARK: - WindowsByID.setFrameProbed — return-shape contract
+
+    test("WindowsByID.setFrameProbed for an unaddressable windowID returns ok:false, actual:NSNull") {
+        // Probed variant must always return a dict with both keys so the JS
+        // shape stays stable. When the underlying element isn't reachable
+        // (windowID never existed, app quit), ok is false and actual is
+        // NSNull — not missing. JS-side destructuring of
+        //   const { ok, actual } = await sd.windows.setFrameProbed(id, frame)
+        // would otherwise blow up with `actual is undefined`.
+        let r = WindowsByID.setFrameProbed(windowID: 0, x: 0, y: 0, w: 100, h: 100)
+        try expect(r["ok"] != nil, "ok key missing")
+        try expect(r["actual"] != nil, "actual key missing (must be NSNull, not absent)")
+        try expectEqual(r["ok"] as? Bool, false)
+        try expect(r["actual"] is NSNull,
+                   "actual should be NSNull for an unaddressable id, got \(type(of: r["actual"]!))")
+    }
+
+    test("WindowsByID.setFrameProbed actual frame, when present, exposes the x/y/w/h key set") {
+        // Shape contract: when AX yields back a frame, it MUST contain all
+        // four keys with Double values (matches sd.windows.frame's contract).
+        // We can't force a real window in tests; skip the body if no window
+        // is reachable. The unaddressable-id test above covers the failure
+        // branch.
+        let r = WindowsByID.setFrameProbed(windowID: 0, x: 0, y: 0, w: 100, h: 100)
+        guard let actual = r["actual"] as? [String: Any] else { return }
+        try expect(actual["x"] is Double, "x should be Double, got \(type(of: actual["x"] ?? "nil"))")
+        try expect(actual["y"] is Double, "y should be Double")
+        try expect(actual["w"] is Double, "w should be Double")
+        try expect(actual["h"] is Double, "h should be Double")
+    }
 }
