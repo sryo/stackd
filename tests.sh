@@ -70,6 +70,7 @@ TEST_SOURCES=(
   Tests/MaterialTests.swift
   Tests/WindowLifecycleTests.swift
   Tests/WindowChannelTests.swift
+  Tests/AnchorTests.swift
   Tests/main.swift
 )
 

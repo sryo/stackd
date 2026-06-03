@@ -308,20 +308,36 @@ final class StackHost {
         let anchor = manifest.anchor ?? StackManifest.Anchor(edge: "top-right", inset: [16, 16])
         let insetY = CGFloat(anchor.inset.indices.contains(0) ? anchor.inset[0] : 16)
         let insetX = CGFloat(anchor.inset.indices.contains(1) ? anchor.inset[1] : 16)
+        return StackHost.anchorRect(edge: anchor.edge, w: w, h: h, insetX: insetX, insetY: insetY, visibleFrame: vf)
+    }
 
-        switch anchor.edge {
-        // Corner anchors: size from manifest, offset by inset.
-        case "top-right":    return NSRect(x: vf.maxX - w - insetX, y: vf.maxY - h - insetY, width: w, height: h)
-        case "top-left":     return NSRect(x: vf.minX + insetX,     y: vf.maxY - h - insetY, width: w, height: h)
-        case "bottom-right": return NSRect(x: vf.maxX - w - insetX, y: vf.minY + insetY,     width: w, height: h)
-        case "bottom-left":  return NSRect(x: vf.minX + insetX,     y: vf.minY + insetY,     width: w, height: h)
-        // Edge anchors: stretch across the visible frame, manifest size is
-        // the THICKNESS only (height for top/bottom, width for left/right).
-        case "top":          return NSRect(x: vf.minX,              y: vf.maxY - h,          width: vf.width, height: h)
-        case "bottom":       return NSRect(x: vf.minX,              y: vf.minY,              width: vf.width, height: h)
-        case "left":         return NSRect(x: vf.minX,              y: vf.minY,              width: w,        height: vf.height)
-        case "right":        return NSRect(x: vf.maxX - w,          y: vf.minY,              width: w,        height: vf.height)
-        default:             return NSRect(x: vf.midX - w/2,        y: vf.midY - h/2,        width: w,        height: h)
+    /// Resolve a non-fullscreen, non-menubar anchor edge into a frame rect.
+    /// Pure function — extracted from `frameFor` so the geometry can be
+    /// unit-tested without instantiating NSScreen / StackManifest. The set
+    /// of recognized edge keys lives entirely in this switch.
+    ///
+    /// Edge taxonomy:
+    /// - Corner anchors (`top-right`, `top-left`, `bottom-right`, `bottom-left`):
+    ///   manifest size used as-is, inset offsets from the corner.
+    /// - Horizontal-center anchors (`top-center`, `bottom-center`): manifest
+    ///   width used as-is, centered on midX; insetY offsets from the matching
+    ///   edge. Used by floating bottom HUDs (SideSwipe), top toast strips, etc.
+    /// - Full-bleed edge anchors (`top`, `bottom`, `left`, `right`): stretch
+    ///   across the visible frame, manifest size is the THICKNESS only.
+    /// - Unknown → center of the visible frame.
+    static func anchorRect(edge: String, w: CGFloat, h: CGFloat, insetX: CGFloat, insetY: CGFloat, visibleFrame vf: NSRect) -> NSRect {
+        switch edge {
+        case "top-right":     return NSRect(x: vf.maxX - w - insetX, y: vf.maxY - h - insetY, width: w, height: h)
+        case "top-left":      return NSRect(x: vf.minX + insetX,     y: vf.maxY - h - insetY, width: w, height: h)
+        case "bottom-right":  return NSRect(x: vf.maxX - w - insetX, y: vf.minY + insetY,     width: w, height: h)
+        case "bottom-left":   return NSRect(x: vf.minX + insetX,     y: vf.minY + insetY,     width: w, height: h)
+        case "top-center":    return NSRect(x: vf.midX - w/2,        y: vf.maxY - h - insetY, width: w, height: h)
+        case "bottom-center": return NSRect(x: vf.midX - w/2,        y: vf.minY + insetY,     width: w, height: h)
+        case "top":           return NSRect(x: vf.minX,              y: vf.maxY - h,          width: vf.width, height: h)
+        case "bottom":        return NSRect(x: vf.minX,              y: vf.minY,              width: vf.width, height: h)
+        case "left":          return NSRect(x: vf.minX,              y: vf.minY,              width: w,        height: vf.height)
+        case "right":         return NSRect(x: vf.maxX - w,          y: vf.minY,              width: w,        height: vf.height)
+        default:              return NSRect(x: vf.midX - w/2,        y: vf.midY - h/2,        width: w,        height: h)
         }
     }
 
