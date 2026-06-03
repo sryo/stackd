@@ -280,4 +280,45 @@ func registerWindowLifecycleTests() {
         let p = StackWindow.parseSetFrame(["x": 100.0, "y": 200.0, "w": Double.infinity, "h": 320.0])
         try expect(p?.w == nil)
     }
+
+    // MARK: revealedDirectly (invocable-stack first-invoke shortcut)
+    //
+    // Invocable stacks load their page BEFORE first orderFront. The gate's
+    // normal arm-then-wait-for-didFinish path stalls on the 2s fallback
+    // (no didFinish coming for an already-loaded page). revealedDirectly()
+    // is the bypass: idle → revealed in one hop, no alpha jiggle.
+
+    test("FirstPaintGate: revealedDirectly from idle transitions to revealed") {
+        var g = FirstPaintGate()
+        try expect(g.revealedDirectly() == true)
+        try expect(g.state == .revealed)
+    }
+    test("FirstPaintGate: revealedDirectly from armed is a no-op (already arming the normal flow)") {
+        var g = FirstPaintGate()
+        _ = g.shouldArmOnShow()
+        try expect(g.revealedDirectly() == false)
+        try expect(g.state == .armed)
+    }
+    test("FirstPaintGate: revealedDirectly from revealed is a no-op") {
+        var g = FirstPaintGate()
+        _ = g.shouldArmOnShow()
+        _ = g.shouldRevealOnLoadFinish()
+        try expect(g.revealedDirectly() == false)
+        try expect(g.state == .revealed)
+    }
+    test("FirstPaintGate: revealedDirectly respects override (JS owns alpha)") {
+        var g = FirstPaintGate()
+        g.markOverridden()
+        try expect(g.revealedDirectly() == false)
+        try expect(g.state == .idle)
+    }
+    test("FirstPaintGate: revealedDirectly + later didFinish — only first transition wins") {
+        // Invocable stack flow: page loads (gate idle, didFinish no-ops),
+        // then orderFront triggers armFirstPaintGate which sees the loaded
+        // flag and calls revealedDirectly. A subsequent didFinish (e.g.
+        // JS-driven reload) is a no-op.
+        var g = FirstPaintGate()
+        _ = g.revealedDirectly()
+        try expect(g.shouldRevealOnLoadFinish() == false)
+    }
 }

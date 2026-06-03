@@ -24,6 +24,13 @@ final class StackWindow: NSPanel, WKNavigationDelegate {
     // so a brand new instance gets a fresh gate.
     private var gate = FirstPaintGate()
     private var revealFallbackTimer: Timer?
+    /// Latched by webView(_:didFinish:). For invocable stacks, the page
+    /// finishes loading BEFORE the first orderFront — so the gate's normal
+    /// arm-then-wait-for-didFinish dance would stall on its 2s fallback
+    /// timer (no didFinish coming for an already-loaded page). When this
+    /// flag is true at arm time, we skip the alpha=0 / timer path entirely
+    /// and transition the gate straight to .revealed.
+    private var hasFinishedLoad = false
 
     /// Maximum time we'll hold the panel hidden waiting for first paint
     /// before revealing anyway. NOT a timing-based correctness mechanism —
@@ -248,6 +255,15 @@ final class StackWindow: NSPanel, WKNavigationDelegate {
     /// chance to produce a frame before the compositor sees us. Schedules
     /// the safety-net reveal timer. Idempotent — subsequent calls are no-ops.
     private func armFirstPaintGate() {
+        if hasFinishedLoad {
+            // Invocable stacks load before their first orderFront — by the time
+            // arm is called, the page has already painted. Skip the alpha=0 /
+            // fallback-timer dance (which would otherwise wait 2s for a
+            // didFinish that's never coming) and transition the gate straight
+            // to .revealed.
+            _ = gate.revealedDirectly()
+            return
+        }
         guard gate.shouldArmOnShow() else { return }
         self.alphaValue = 0
         revealFallbackTimer?.invalidate()
@@ -367,6 +383,9 @@ final class StackWindow: NSPanel, WKNavigationDelegate {
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         FileHandle.standardError.write(Data("stackd: webview did-finish \(webView.url?.absoluteString ?? "?")\n".utf8))
         webView.evaluateJavaScript("window.dispatchEvent(new Event('stackd:load'))", completionHandler: nil)
+        // Latch the loaded flag so a later first-arm (invocable stack on
+        // first invoke) knows it can skip the fallback-timer wait.
+        hasFinishedLoad = true
         // First-paint signal: WKWebView's CALayer has the initial frame
         // committed by the time didFinishNavigation fires. Reveal once;
         // later navigations within the same window are no-ops.
@@ -446,5 +465,17 @@ struct FirstPaintGate {
     /// overridden (the prior state stays as-is for inspectability).
     mutating func markOverridden() {
         overridden = true
+    }
+
+    /// Called when armFirstPaintGate runs but the page has already finished
+    /// loading (invocable stacks on first invoke — page loaded at scope
+    /// creation, orderFront comes later via sd.window.invoke()). Skips the
+    /// alpha=0 / fallback-timer dance entirely; transitions idle → revealed
+    /// in one hop. Returns true on the transition, false if already past
+    /// idle or overridden.
+    mutating func revealedDirectly() -> Bool {
+        guard state == .idle, !overridden else { return false }
+        state = .revealed
+        return true
     }
 }
