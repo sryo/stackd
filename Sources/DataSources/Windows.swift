@@ -263,13 +263,13 @@ enum Windows {
 enum WindowAddressabilityCache {
     struct Probe { let addressable: Bool; let isStandard: Bool; let isMinimized: Bool; let ts: TimeInterval }
     private static var cache: [String: Probe] = [:]
-    // Consecutive AX-miss count per (pid, windowID). Only after N misses
-    // do we mark a probe as addressable=false. Single misses are silently
-    // treated as transient (AX timeout, race) and the cache stays in its
-    // prior state (or is treated as "not yet known" = addressable=true,
-    // letting the stack include it optimistically).
-    private static var missCount: [String: Int] = [:]
-    private static let missThreshold = 5
+    // First-seen wall-time per (pid, windowID). A window gets a grace
+    // window of OPTIMISTIC_GRACE_MS during which probe misses report
+    // addressable=true (instead of false). Avoids the boot-burst race
+    // where AX is slammed and Terminal's first 5+ probes time out in
+    // milliseconds. Once the grace expires, real misses mark false.
+    private static var firstSeenAt: [String: TimeInterval] = [:]
+    private static let optimisticGraceMs: TimeInterval = 5.0
     private static let lock = NSLock()
     // Successful probes are cached PERMANENTLY (until pid death — see the
     // NSWorkspace.didTerminateApplication observer in install()). Reasoning:
@@ -318,27 +318,26 @@ enum WindowAddressabilityCache {
         let existing = cache[key]
         var probe: Probe
         if addressable {
-            // Success — clear miss counter, cache true permanently.
-            missCount[key] = 0
+            // Success — cache true permanently.
             probe = Probe(addressable: true, isStandard: isStd, isMinimized: isMin, ts: now)
         } else if let e = existing, e.addressable {
             // Sticky-success: established-true never flips to false on a
-            // transient miss. Keep the addressable+isStandard verdict, but
-            // re-read isMinimized fresh — minimize state DOES change while
-            // the window is alive (Cmd+M, dock click) and we want the tile
-            // rotation to track that.
+            // transient miss. Keep addressable+isStandard, refresh isMinimized
+            // (changes while window is alive — Cmd+M, dock click).
             probe = Probe(addressable: true, isStandard: e.isStandard, isMinimized: isMin, ts: now)
         } else {
-            // No success yet. Bump miss counter; only mark addressable=false
-            // after missThreshold consecutive failures. Before that, report
-            // OPTIMISTICALLY (addressable=true) so the stack doesn't drop
-            // a window for one transient race during boot.
-            let n = (missCount[key] ?? 0) + 1
-            missCount[key] = n
-            if n >= missThreshold {
-                probe = Probe(addressable: false, isStandard: false, isMinimized: false, ts: now)
-            } else {
+            // No success yet. Time-based optimism: report true for the
+            // first optimisticGraceMs after we first saw the id. AX is
+            // slammed at boot — 5+ misses can happen in milliseconds,
+            // count-based thresholds get blown through. Time-based gives
+            // the app a fair shot at responding before we mark it dead.
+            let firstSeen = firstSeenAt[key] ?? now
+            if firstSeenAt[key] == nil { firstSeenAt[key] = now }
+            let inGrace = (now - firstSeen) < optimisticGraceMs
+            if inGrace {
                 probe = Probe(addressable: true, isStandard: true, isMinimized: false, ts: now)
+            } else {
+                probe = Probe(addressable: false, isStandard: false, isMinimized: false, ts: now)
             }
         }
         cache[key] = probe
@@ -350,7 +349,7 @@ enum WindowAddressabilityCache {
         let prefix = "\(pid)|"
         lock.lock(); defer { lock.unlock() }
         cache = cache.filter { !$0.key.hasPrefix(prefix) }
-        missCount = missCount.filter { !$0.key.hasPrefix(prefix) }
+        firstSeenAt = firstSeenAt.filter { !$0.key.hasPrefix(prefix) }
     }
 }
 
@@ -427,15 +426,21 @@ enum WindowsByID {
     // without doing the lookup, so drop the whole pid's cache).
     static func invalidateCache(pid: pid_t) {
         cacheLock.lock(); defer { cacheLock.unlock() }
-        axCache[pid] = nil
-        // Deliberately do NOT clear WindowAddressabilityCache(pid:) here.
-        // invalidateCache fires on EVERY window-destroy for the pid (helper
-        // windows, autocomplete popups, sheets — Terminal alone produces
-        // many per session). Nuking the per-pid AddressabilityCache on
-        // each kept causing Terminal's main window to lose its sticky-true
-        // verdict and get re-probed against a transient AX timeout. The
-        // AddressabilityCache has its own TTL + invalidate-on-process-exit
-        // path to drop stale entries.
+        // Deliberately a SHALLOW invalidate — only drop the per-pid AX
+        // window map IF we'll definitely rebuild it (rare). Actually
+        // skip entirely: a destroyed window's stale AXUIElement is
+        // harmless (actions on it return -25204 which we already
+        // tolerate); rebuilding the WHOLE map on every helper-window
+        // destroy is what was causing Terminal's main window's id
+        // mapping (between CGWindowID and AXUIElement) to oscillate.
+        // The cache self-heals via the next elementFor() call on a
+        // not-in-map id (rebuilds the map on miss).
+        _ = pid // intentionally unused — see comment above
+    }
+
+    static func invalidateCache(pid: pid_t, windowID: CGWindowID) {
+        cacheLock.lock(); defer { cacheLock.unlock() }
+        axCache[pid]?[windowID] = nil
     }
 
     static func invalidateAll() {

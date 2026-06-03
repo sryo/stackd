@@ -114,7 +114,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             log("window destroyed: \(info.app) — \(info.title) (id=\(info.id))")
             // Drop the AX cache for this pid — a destroyed window's AXUIElement
             // may still resolve briefly but actions on it raise -25204.
-            WindowsByID.invalidateCache(pid: pid_t(info.pid))
+            // Per-window invalidation — only the destroyed id's cache
+            // entry is dropped. Nuking the whole pid map on every
+            // helper-window destroy (Terminal Inspector, autocomplete
+            // sheets, etc.) caused the AX-window-to-CGWindowID mapping
+            // for the app's MAIN window to oscillate between rebuilds.
+            WindowsByID.invalidateCache(pid: pid_t(info.pid), windowID: CGWindowID(info.id))
             host?.bang(name: "sd.window.destroyed", detail: WindowsLifecycleObserver.detail(info))
         }
 
