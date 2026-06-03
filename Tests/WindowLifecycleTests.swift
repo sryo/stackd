@@ -164,4 +164,72 @@ func registerWindowLifecycleTests() {
         // A late navigation finish doesn't undo or re-fire:
         try expect(g.shouldRevealOnLoadFinish() == false)
     }
+
+    // MARK: gate override (JS-controlled alpha via sd.window.setAlpha)
+
+    test("FirstPaintGate: override before reveal disables auto-reveal on didFinish") {
+        var g = FirstPaintGate()
+        _ = g.shouldArmOnShow()
+        g.markOverridden()
+        try expect(g.shouldRevealOnLoadFinish() == false)
+        try expect(g.state == .armed) // state unchanged; JS owns alpha now
+    }
+
+    test("FirstPaintGate: override disables fallback reveal") {
+        var g = FirstPaintGate()
+        _ = g.shouldArmOnShow()
+        g.markOverridden()
+        try expect(g.fallbackFired() == false)
+    }
+
+    test("FirstPaintGate: override disables didFail reveal") {
+        var g = FirstPaintGate()
+        _ = g.shouldArmOnShow()
+        g.markOverridden()
+        try expect(g.shouldRevealOnLoadFail() == false)
+    }
+
+    test("FirstPaintGate: override blocks re-arming on subsequent show") {
+        // A revealed-then-hidden stack stays under JS control — re-show
+        // doesn't reactivate the gate.
+        var g = FirstPaintGate()
+        _ = g.shouldArmOnShow()
+        g.markOverridden()
+        // Even from idle, the override sticks (defensive — if JS calls
+        // setAlpha early, before orderFront, the gate must respect it).
+        var g2 = FirstPaintGate()
+        g2.markOverridden()
+        try expect(g2.shouldArmOnShow() == false)
+        try expect(g2.state == .idle)
+    }
+
+    // MARK: setAlpha body parsing
+
+    test("setAlpha: missing value → nil (reject, don't clamp to 0)") {
+        try expect(StackWindow.parseSetAlpha([:]) == nil)
+    }
+    test("setAlpha: non-numeric value → nil") {
+        try expect(StackWindow.parseSetAlpha(["value": "0.5"]) == nil)
+    }
+    test("setAlpha: NaN → nil") {
+        try expect(StackWindow.parseSetAlpha(["value": Double.nan]) == nil)
+    }
+    test("setAlpha: +infinity → nil") {
+        try expect(StackWindow.parseSetAlpha(["value": Double.infinity]) == nil)
+    }
+    test("setAlpha: valid mid-range passes through") {
+        try expectEqual(StackWindow.parseSetAlpha(["value": 0.5]), 0.5)
+    }
+    test("setAlpha: 0 passes through") {
+        try expectEqual(StackWindow.parseSetAlpha(["value": 0.0]), 0.0)
+    }
+    test("setAlpha: 1 passes through") {
+        try expectEqual(StackWindow.parseSetAlpha(["value": 1.0]), 1.0)
+    }
+    test("setAlpha: negative clamps to 0") {
+        try expectEqual(StackWindow.parseSetAlpha(["value": -0.5]), 0.0)
+    }
+    test("setAlpha: above 1 clamps to 1") {
+        try expectEqual(StackWindow.parseSetAlpha(["value": 1.7]), 1.0)
+    }
 }

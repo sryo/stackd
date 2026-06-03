@@ -308,6 +308,32 @@ final class StackWindow: NSPanel, WKNavigationDelegate {
         orderOut(nil)
     }
 
+    /// JS-controlled alpha. The first call permanently disables the
+    /// FirstPaintGate's auto-reveal — once a stack takes manual control of
+    /// alphaValue, the gate stops trying to set it to 1 (otherwise a JS call
+    /// to hide the panel during init would be silently overwritten by the
+    /// gate firing on `didFinishNavigation`).
+    ///
+    /// Used by `sd.window.setAlpha(value)` for fading HUDs (SideSwipe's
+    /// volume/brightness disc, transient toasts) and any stack that needs
+    /// the whole window to fade rather than the WebView contents — CSS
+    /// `opacity` on body doesn't reach the NSGlassEffectView's glass layer,
+    /// which renders independently of contentView alpha.
+    func setAlpha(_ alpha: CGFloat) {
+        gate.markOverridden()
+        revealFallbackTimer?.invalidate()
+        revealFallbackTimer = nil
+        self.alphaValue = max(0, min(1, alpha))
+    }
+
+    /// Parse a `window.setAlpha` body into a clamped `[0, 1]` CGFloat.
+    /// Returns nil for missing / non-numeric / non-finite input — the bridge
+    /// then responds `false` rather than silently clamping garbage to 0.
+    static func parseSetAlpha(_ body: [String: Any]) -> CGFloat? {
+        guard let raw = body["value"] as? Double, raw.isFinite else { return nil }
+        return CGFloat(max(0.0, min(1.0, raw)))
+    }
+
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         FileHandle.standardError.write(Data("stackd: webview did-finish \(webView.url?.absoluteString ?? "?")\n".utf8))
         webView.evaluateJavaScript("window.dispatchEvent(new Event('stackd:load'))", completionHandler: nil)
@@ -343,38 +369,52 @@ final class StackWindow: NSPanel, WKNavigationDelegate {
 struct FirstPaintGate {
     enum State { case idle, armed, revealed }
     private(set) var state: State = .idle
+    private(set) var overridden: Bool = false
 
     /// Called from orderFront / orderFrontRegardless / makeKeyAndOrderFront.
     /// Returns true the first time only — caller should set alphaValue=0
     /// and schedule the fallback timer. Subsequent calls return false so
     /// re-ordering an already-revealed window doesn't hide it again.
+    /// Once overridden by JS, never arms again — stack manages its own alpha.
     mutating func shouldArmOnShow() -> Bool {
-        guard state == .idle else { return false }
+        guard state == .idle, !overridden else { return false }
         state = .armed
         return true
     }
 
     /// Called from WKNavigationDelegate.didFinishNavigation. Returns true
     /// only on the transition .armed → .revealed; later navigations within
-    /// the same window (e.g. JS-driven reloads) are no-ops.
+    /// the same window (e.g. JS-driven reloads) are no-ops. Returns false
+    /// if JS has taken alpha control via `sd.window.setAlpha` — the stack
+    /// owns visibility now, the gate stops auto-revealing.
     mutating func shouldRevealOnLoadFinish() -> Bool {
-        guard state == .armed else { return false }
+        guard state == .armed, !overridden else { return false }
         state = .revealed
         return true
     }
 
     /// Called from didFail / didFailProvisionalNavigation. Same transition
-    /// as load-finish — we'd rather show a broken stack than a hidden one.
+    /// as load-finish — we'd rather show a broken stack than a hidden one,
+    /// EXCEPT when JS has taken alpha control (the stack chose its visibility
+    /// state deliberately; we don't second-guess on a load error).
     mutating func shouldRevealOnLoadFail() -> Bool {
-        guard state == .armed else { return false }
+        guard state == .armed, !overridden else { return false }
         state = .revealed
         return true
     }
 
     /// Called when the fallback timer fires. Same transition.
     mutating func fallbackFired() -> Bool {
-        guard state == .armed else { return false }
+        guard state == .armed, !overridden else { return false }
         state = .revealed
         return true
+    }
+
+    /// Called by `StackWindow.setAlpha` — JS has taken control of alphaValue.
+    /// The gate stops auto-revealing (or auto-arming on re-orderFront) so
+    /// the stack's chosen alpha isn't overwritten. State transition: any →
+    /// overridden (the prior state stays as-is for inspectability).
+    mutating func markOverridden() {
+        overridden = true
     }
 }

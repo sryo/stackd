@@ -926,7 +926,16 @@ export const sd = {
     // manifest. Such stacks start hidden; .invoke() shows + takes keyboard
     // focus; .dismiss() hides + returns focus to the previous app.
     invoke()  { return request({ type: "window.invoke" }); },
-    dismiss() { return request({ type: "window.dismiss" }); }
+    dismiss() { return request({ type: "window.dismiss" }); },
+    // Fade the entire panel (glass material + WebView) to `value` in [0, 1].
+    // Out-of-range values are clamped. The first call permanently disables
+    // the daemon's FirstPaintGate auto-reveal — once a stack takes manual
+    // alpha control, the daemon stops setting alphaValue itself, so the
+    // stack owns visibility from then on. Use this when CSS opacity on
+    // body isn't enough (e.g. material: glass — the NSGlassEffectView
+    // renders independently of WebView contentView alpha and stays visible
+    // even when the body is opacity:0).
+    setAlpha(value) { return request({ type: "window.setAlpha", value }); }
   },
   hotkey: {
     // Dynamically bind a Carbon hotkey from JS. Equivalent to the manifest

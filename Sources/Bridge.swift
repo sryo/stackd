@@ -1638,6 +1638,28 @@ final class Bridge: NSObject, WKScriptMessageHandler {
                 }
             }
         },
+        // JS-controlled window alpha. Not gated to invocable — any stack can
+        // fade its panel (SideSwipe's volume/brightness disc, transient toasts,
+        // anything that wants the whole window to fade rather than just the
+        // WebView contents — CSS opacity on body doesn't reach the
+        // NSGlassEffectView's glass layer).
+        //
+        // First call disables the FirstPaintGate's auto-reveal — see
+        // StackWindow.setAlpha / FirstPaintGate.markOverridden.
+        .custom("window.setAlpha", denyValue: false) { bridge, body, requestId in
+            guard let alpha = StackWindow.parseSetAlpha(body) else {
+                bridge.respond(requestId: requestId, value: false)
+                return
+            }
+            DispatchQueue.main.async { [weak bridge] in
+                if let win = bridge?.webView?.window as? StackWindow {
+                    win.setAlpha(alpha)
+                    bridge?.respond(requestId: requestId, value: true)
+                } else {
+                    bridge?.respond(requestId: requestId, value: false)
+                }
+            }
+        },
 
         // Native popup menu — async (resolves on user pick / cancel).
         .custom("menu.popup", permission: "menu") { bridge, body, requestId in
