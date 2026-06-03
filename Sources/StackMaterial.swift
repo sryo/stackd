@@ -137,3 +137,48 @@ enum StackCornerRadius {
         return max(0, raw)
     }
 }
+
+/// Where the WebView should be attached relative to the backing material.
+///
+/// Glass and vibrancy require different view hierarchies — this enum lifts the
+/// decision out of `StackWindow.init` so it can be unit-tested without
+/// instantiating a real panel.
+///
+///   - `directContent`     — no material, no radius. WebView is the panel's
+///                           contentView directly.
+///   - `siblingInContainer` — vibrancy (or pre-Tahoe `.glass` fallback, or
+///                           `.none` with a rounded corner). Effect view sits
+///                           behind the WebView as a sibling inside a plain
+///                           NSView container. `blendingMode = .behindWindow`
+///                           on NSVisualEffectView renders desktop blur through
+///                           the transparent WebView chain.
+///   - `embeddedInGlass`    — Liquid Glass on macOS 26+. WebView is set as the
+///                           NSGlassEffectView's `contentView`. The SDK header
+///                           is explicit: glass effects only render correctly
+///                           when content is embedded via `contentView` —
+///                           arbitrary sibling subviews are documented as
+///                           undefined z-order. Without this, glass renders as
+///                           a flat plate underneath the WebView and the
+///                           refraction / specular highlight never fires.
+enum MaterialAttachment: Equatable {
+    case directContent
+    case siblingInContainer
+    case embeddedInGlass
+
+    /// Pure decision: given the material, an optional corner radius, and
+    /// whether NSGlassEffectView is available (i.e. macOS 26+), how should the
+    /// WebView be attached?
+    static func mode(
+        material: StackMaterial,
+        cornerRadius: Double?,
+        supportsGlass: Bool
+    ) -> MaterialAttachment {
+        if case .none = material, (cornerRadius ?? 0) <= 0 {
+            return .directContent
+        }
+        if case .glass = material, supportsGlass {
+            return .embeddedInGlass
+        }
+        return .siblingInContainer
+    }
+}

@@ -149,4 +149,63 @@ func registerMaterialTests() {
     test("cornerRadius: negative clamps to 0") {
         try expectEqual(StackCornerRadius.parse(-5.0), 0.0)
     }
+
+    // MARK: MaterialAttachment.mode — view-hierarchy decision
+    //
+    // Liquid Glass needs the WebView embedded INSIDE NSGlassEffectView's
+    // `contentView` (sibling subviews are undefined per the SDK header).
+    // Vibrancy and the pre-Tahoe glass fallback want the WebView as a sibling
+    // above NSVisualEffectView so `blendingMode = .behindWindow` reads the
+    // desktop. `.none` with no corner radius skips the container entirely.
+
+    test("attachment: .none + no radius → directContent") {
+        try expectEqual(
+            MaterialAttachment.mode(material: .none, cornerRadius: nil, supportsGlass: true),
+            .directContent)
+    }
+    test("attachment: .none + zero radius → directContent (clamped)") {
+        try expectEqual(
+            MaterialAttachment.mode(material: .none, cornerRadius: 0, supportsGlass: true),
+            .directContent)
+    }
+    test("attachment: .none + positive radius → siblingInContainer (rounded transparent)") {
+        try expectEqual(
+            MaterialAttachment.mode(material: .none, cornerRadius: 10, supportsGlass: true),
+            .siblingInContainer)
+    }
+    test("attachment: .vibrancy(.hudWindow) → siblingInContainer (any macOS)") {
+        try expectEqual(
+            MaterialAttachment.mode(material: .vibrancy(.hudWindow), cornerRadius: nil, supportsGlass: true),
+            .siblingInContainer)
+        try expectEqual(
+            MaterialAttachment.mode(material: .vibrancy(.hudWindow), cornerRadius: nil, supportsGlass: false),
+            .siblingInContainer)
+    }
+    test("attachment: .glass(.regular) on Tahoe → embeddedInGlass") {
+        try expectEqual(
+            MaterialAttachment.mode(material: .glass(.regular), cornerRadius: nil, supportsGlass: true),
+            .embeddedInGlass)
+    }
+    test("attachment: .glass(.regular) pre-Tahoe → siblingInContainer (fallback)") {
+        try expectEqual(
+            MaterialAttachment.mode(material: .glass(.regular), cornerRadius: nil, supportsGlass: false),
+            .siblingInContainer)
+    }
+    test("attachment: .glass(.clear) on Tahoe → embeddedInGlass") {
+        try expectEqual(
+            MaterialAttachment.mode(material: .glass(.clear), cornerRadius: 12, supportsGlass: true),
+            .embeddedInGlass)
+    }
+    test("attachment: .glass(.tinted) on Tahoe → embeddedInGlass") {
+        let color = NSColor(srgbRed: 1, green: 0, blue: 0, alpha: 1)
+        try expectEqual(
+            MaterialAttachment.mode(material: .glass(.tinted(color)), cornerRadius: nil, supportsGlass: true),
+            .embeddedInGlass)
+    }
+    test("attachment: .glass(.tinted) pre-Tahoe → siblingInContainer (fallback)") {
+        let color = NSColor(srgbRed: 1, green: 0, blue: 0, alpha: 1)
+        try expectEqual(
+            MaterialAttachment.mode(material: .glass(.tinted(color)), cornerRadius: nil, supportsGlass: false),
+            .siblingInContainer)
+    }
 }

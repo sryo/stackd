@@ -83,20 +83,58 @@ final class StackWindow: NSPanel, WKNavigationDelegate {
         self.ignoresMouseEvents = clickThrough
         self.isMovableByWindowBackground = false
 
-        // Optional native material backing. Without it the window stays pure
-        // transparent (`.none`) and stacks render however their HTML paints.
-        // With it, a system-blessed material view sits behind the WebView
-        // (NSVisualEffectView for `.vibrancy`, NSGlassEffectView for `.glass`
-        // on macOS 26+, NSVisualEffectView.hudWindow fallback on older OSes).
-        // WebView's drawsBackground=false above lets the material show through
-        // wherever the HTML hasn't painted.
-        //
-        // `cornerRadius` applies regardless of material — masking the WebView
-        // layer rounds the rendered HTML; masking the effect layer rounds the
-        // backing material so the corners are consistent.
-        if case .none = material, (cornerRadius ?? 0) <= 0 {
+        // Material backing — see `MaterialAttachment` in StackMaterial.swift for
+        // the decision matrix. The crucial split: Liquid Glass needs the WebView
+        // EMBEDDED inside the NSGlassEffectView's `contentView` (the SDK header
+        // is explicit that sibling subviews are undefined). Vibrancy and the
+        // pre-Tahoe glass fallback want the WebView as a SIBLING above an
+        // NSVisualEffectView, so `blendingMode = .behindWindow` can read the
+        // desktop through the transparent webview chain. `.none` with no corner
+        // radius skips the container entirely.
+        let supportsGlass: Bool = {
+            if #available(macOS 26.0, *) { return true }
+            return false
+        }()
+        let attachment = MaterialAttachment.mode(
+            material: material, cornerRadius: cornerRadius, supportsGlass: supportsGlass)
+
+        switch attachment {
+        case .directContent:
             self.contentView = webView
-        } else {
+
+        case .embeddedInGlass:
+            // Guarded by `mode()`: only reached when material == .glass and
+            // supportsGlass is true. The `#available` here satisfies the
+            // compiler and is a no-op at runtime.
+            if #available(macOS 26.0, *), case .glass(let variant) = material {
+                let glass = NSGlassEffectView(frame: NSRect(origin: .zero, size: frame.size))
+                glass.autoresizingMask = [.width, .height]
+                switch variant {
+                case .regular:
+                    glass.style = .regular
+                case .clear:
+                    glass.style = .clear
+                case .tinted(let color):
+                    glass.style = .regular
+                    glass.tintColor = color
+                }
+                if let r = cornerRadius, r > 0 {
+                    glass.cornerRadius = CGFloat(r)
+                }
+                webView.frame = glass.bounds
+                webView.autoresizingMask = [.width, .height]
+                if let r = cornerRadius, r > 0 {
+                    webView.wantsLayer = true
+                    webView.layer?.cornerRadius = CGFloat(r)
+                    webView.layer?.masksToBounds = true
+                }
+                glass.contentView = webView
+                self.contentView = glass
+            } else {
+                self.contentView = webView  // defensive; unreachable per mode()
+            }
+
+        case .siblingInContainer:
             let container = NSView(frame: NSRect(origin: .zero, size: frame.size))
             container.autoresizingMask = [.width, .height]
             if let effect = StackWindow.makeEffectView(material: material, frame: container.bounds, cornerRadius: cornerRadius) {
