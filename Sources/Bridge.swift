@@ -14,6 +14,8 @@ final class Bridge: NSObject, WKScriptMessageHandler {
     // bundleId because pids recycle but bundleIds are stable across launches.
     // Not a string cache, so it sits next to lastState rather than inside it.
     private var lastAppsByBundle: [String: [String: Any]] = [:]
+    // Same shape for sd.windows.changed — keyed by CGWindowID.
+    private var lastWindowsByID: [Int: [String: Any]] = [:]
     private var settings: StackSettings?
     private var fsWatches: [Int: FSWatch] = [:]
     private var handlesBangs: Set<String> = []
@@ -2394,6 +2396,7 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         ("app",         "frontApp"),
         ("windows",     "focusedWindow"),
         ("windows",     "windowsAll"),
+        ("windows",     "windowsChanged"),
         ("appearance",  "appearance"),
         ("input",       "inputLayout"),
         ("net",         "netWifi"),
@@ -2855,10 +2858,34 @@ final class Bridge: NSObject, WKScriptMessageHandler {
                     self.lastState["focusedWindow"] = json
                     self.push(channel: "focusedWindow", json: json)
                 }
-                let allJson = Bridge.jsonify(Windows.all())
+                let snapshot = Windows.all()
+                let allJson = Bridge.jsonify(snapshot)
                 if allJson != self.lastState["windowsAll"] {
                     self.lastState["windowsAll"] = allJson
                     self.push(channel: "windowsAll", json: allJson)
+                    // Compute the diff parallel to sd.apps.changed so
+                    // consumers (windowscape / undoclose / framemaster) can
+                    // pay diff-size instead of full-list-size. Suppress the
+                    // first-tick `added: everything` noise — that's the
+                    // same data sd.windows.all already delivered.
+                    let delta = Bridge.windowsDelta(snapshot: snapshot, previous: self.lastWindowsByID)
+                    self.lastWindowsByID = delta.nowByID
+                    let primed = (self.lastState["windowsChanged"] ?? "").isEmpty == false
+                    if primed && (!delta.added.isEmpty || !delta.removed.isEmpty || !delta.changed.isEmpty) {
+                        let payload: [String: Any] = [
+                            "added":   delta.added,
+                            "removed": delta.removed,
+                            "changed": delta.changed
+                        ]
+                        let deltaJson = Bridge.jsonify(payload)
+                        self.lastState["windowsChanged"] = deltaJson
+                        self.push(channel: "windowsChanged", json: deltaJson)
+                    } else if !primed {
+                        // Prime the marker so subsequent ticks know they
+                        // can emit. Marker value doesn't matter — only
+                        // its non-empty presence is checked above.
+                        self.lastState["windowsChanged"] = "primed"
+                    }
                 }
             }
         }
@@ -2972,6 +2999,44 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         spec.menu    = body["menu"]    as? [[String: Any]]
         spec.tooltip = body["tooltip"] as? String
         return spec
+    }
+
+    /// Pure delta computation between two window snapshots. Identity is
+    /// CGWindowID (recycled at most across reboots, monotonic within a
+    /// session). The "changed" detector compares only the mutable fields
+    /// consumers actually care about — title, frame.{x,y,w,h} — so a
+    /// jsonify round-trip can't false-fire on Swift dict key-order noise.
+    /// Returns the new id-keyed cache too so the caller doesn't rebuild it.
+    static func windowsDelta(snapshot: [[String: Any]], previous: [Int: [String: Any]])
+        -> (added: [[String: Any]], removed: [[String: Any]], changed: [[String: Any]], nowByID: [Int: [String: Any]])
+    {
+        var nowByID: [Int: [String: Any]] = [:]
+        for w in snapshot {
+            if let id = w["id"] as? Int { nowByID[id] = w }
+        }
+        var added:   [[String: Any]] = []
+        var removed: [[String: Any]] = []
+        var changed: [[String: Any]] = []
+        for (id, w) in nowByID {
+            if let prev = previous[id] {
+                let t1 = (prev["title"] as? String) ?? ""
+                let t2 = (w["title"]    as? String) ?? ""
+                let f1 = (prev["frame"] as? [String: Any]) ?? [:]
+                let f2 = (w["frame"]    as? [String: Any]) ?? [:]
+                let same = t1 == t2 &&
+                    (f1["x"] as? Int) == (f2["x"] as? Int) &&
+                    (f1["y"] as? Int) == (f2["y"] as? Int) &&
+                    (f1["w"] as? Int) == (f2["w"] as? Int) &&
+                    (f1["h"] as? Int) == (f2["h"] as? Int)
+                if !same { changed.append(w) }
+            } else {
+                added.append(w)
+            }
+        }
+        for (id, w) in previous where nowByID[id] == nil {
+            removed.append(w)
+        }
+        return (added, removed, changed, nowByID)
     }
 
     static func jsonify(_ obj: Any) -> String {

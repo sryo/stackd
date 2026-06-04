@@ -399,6 +399,14 @@ export const sd = {
   windows:    {
     focused: channel("focusedWindow"),
     all:     channel("windowsAll", []),
+    // Transition deltas alongside the full-list `all` channel: same shape
+    // as sd.apps.changed — { added: [...], removed: [...], changed: [...] }.
+    // Identity is CGWindowID; "changed" detects title + frame transitions.
+    // Suppresses the first-tick "every window added" — for that subscribe
+    // to .all. Consumers that diff sd.windows.all themselves (windowscape,
+    // undoclose, framemaster) pay diff-size after migration instead of
+    // full-list-size on every push.
+    changed: channel("windowsChanged"),
     // Lifecycle channels — sugar over the sd.window.* bangs. Stack must
     // declare `handles: ["sd.window.created", ...]` in stack.json for the
     // daemon to route the bang to it. Each .subscribe(fn) re-fires whenever
@@ -2360,6 +2368,7 @@ const __sdSignalPaths = {
   "windows.focusedChanged": sd.windows.focusedChanged,
   "windows.titleChanged":   sd.windows.titleChanged,
   "windows.all":        sd.windows.all,
+  "windows.changed":    sd.windows.changed,
   "input.layout":       sd.input.layout,
   "net.wifi":           sd.net.wifi,
   "net.lan":            sd.net.lan,
