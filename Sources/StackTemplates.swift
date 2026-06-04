@@ -240,7 +240,28 @@ enum StackDoctor {
         }
         require("id")
         require("name")
-        require("size")
+
+        // Headless stacks have no UI surface — daemon defaults size/anchor/
+        // clickThrough and ignores visual chrome. Validate the flag's type
+        // first, then either enforce headless contract or require `size`.
+        let isHeadless: Bool = {
+            if let v = dict["headless"] as? Bool { return v }
+            if dict["headless"] != nil {
+                print("❌ \(dirName): 'headless' must be a boolean, got \(type(of: dict["headless"]!))")
+                issues += 1
+            }
+            return false
+        }()
+        if isHeadless {
+            // Fields the headless path silently overrides — warn so authors
+            // know the value is inert and remove it.
+            for inertField in ["anchor", "size", "material", "cornerRadius", "clickThrough", "shape", "padding"] where dict[inertField] != nil {
+                print("⚠️  \(dirName): 'headless: true' ignores '\(inertField)' — drop it from the manifest")
+                issues += 1
+            }
+        } else {
+            require("size")
+        }
 
         if let id = dict["id"] as? String, id != dirName {
             print("⚠️  \(dirName): id is '\(id)' but folder is '\(dirName)' — these usually match")

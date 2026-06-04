@@ -60,7 +60,7 @@ func registerStackSourceTests() {
         }
         try expectEqual(src.manifest.id, "demo")
         try expectEqual(src.manifest.name, "Demo")
-        try expectEqual(src.manifest.size.h, 24)
+        try expectEqual(src.manifest.size?.h, 24)
         try expectEqual(src.rootURL.path, dir)
     }
 

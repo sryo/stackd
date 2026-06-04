@@ -5,8 +5,15 @@ struct StackManifest: Decodable {
     let name: String
     let anchor: Anchor?
     let region: String?             // "menubar" — overrides anchor, spans screen width
-    let size: Size
+    let size: Size?
     let clickThrough: Bool?
+    /// First-class background-only stack. When true, daemon defaults
+    /// anchor / size / clickThrough so the panel sits invisible in the
+    /// bottom-right corner. Manifest fields that would override those
+    /// (anchor, size, material, cornerRadius, clickThrough) are ignored
+    /// and StackDoctor warns. Replaces the manual 1×1 + clickThrough
+    /// boilerplate every "no-UI" stack used to repeat.
+    let headless: Bool?
     // Mutable so StackHost can merge auto-inferred channel permissions
     // (scanned from the stack's source) before passing to Bridge.start.
     var permissions: [String]
@@ -276,22 +283,28 @@ final class StackHost {
         let frame = frameFor(manifest: manifest, screen: screen)
 
         let invocable = manifest.invocable ?? false
+        let isHeadless = manifest.headless == true
         let level = StackHost.resolveLevel(manifest: manifest)
-        let resolvedMaterial = StackMaterial.parse(manifest.material)
-        let resolvedRadius = StackCornerRadius.parse(manifest.cornerRadius)
-        let resolvedPadding = StackPadding.effectivePadding(
+        // Headless stacks never render visible chrome — material / corner radius
+        // / shape / padding are inert. Force them off so they can't accidentally
+        // leak (e.g. glass effect rendering 1×1 in the corner).
+        let resolvedMaterial = isHeadless ? StackMaterial.none : StackMaterial.parse(manifest.material)
+        let resolvedRadius   = isHeadless ? nil : StackCornerRadius.parse(manifest.cornerRadius)
+        let resolvedPadding  = isHeadless ? 0  : StackPadding.effectivePadding(
             manifest: manifest.padding,
             material: resolvedMaterial,
             cornerRadius: resolvedRadius)
         let win = StackWindow(
             frame: frame,
-            clickThrough: invocable ? false : (manifest.clickThrough ?? true),
+            // Headless implies clickThrough — the invisible panel must not
+            // intercept clicks aimed at the desktop / dock / menubar.
+            clickThrough: invocable ? false : (isHeadless ? true : (manifest.clickThrough ?? true)),
             schemeHandler: schemeHandler,
             level: level,
             invocable: invocable,
             material: resolvedMaterial,
             cornerRadius: resolvedRadius,
-            shape: StackShape.parse(manifest.shape)
+            shape: isHeadless ? StackShape.rect : StackShape.parse(manifest.shape)
         )
         let bridge = Bridge(webView: win.webView, screen: screen, screenIndex: screenIndex, padding: resolvedPadding, injectReset: manifest.reset ?? true)
         bridge.start(manifest: manifest)
@@ -309,7 +322,7 @@ final class StackHost {
     /// Compute the on-screen frame for a stack, honoring `region:` overrides
     /// (menubar, fullscreen) and otherwise falling back to anchor/inset.
     private func frameFor(manifest: StackManifest, screen: NSScreen) -> NSRect {
-        let h = CGFloat(manifest.size.h)
+        let h = CGFloat(manifest.size?.h ?? 1)
 
         if manifest.region == "menubar" {
             // Full-bleed top bar that covers the system menu bar. screen.frame
@@ -335,8 +348,11 @@ final class StackHost {
         }
 
         let vf = screen.visibleFrame
-        let w = CGFloat(manifest.size.w ?? Int(vf.width))
-        let anchor = manifest.anchor ?? StackManifest.Anchor(edge: "top-right", inset: [16, 16])
+        let w = CGFloat(manifest.size?.w ?? Int(vf.width))
+        let defaultAnchor: StackManifest.Anchor = (manifest.headless == true)
+            ? StackManifest.Anchor(edge: "bottom-right", inset: [0, 0])
+            : StackManifest.Anchor(edge: "top-right", inset: [16, 16])
+        let anchor = manifest.anchor ?? defaultAnchor
         let insetY = CGFloat(anchor.inset.indices.contains(0) ? anchor.inset[0] : 16)
         let insetX = CGFloat(anchor.inset.indices.contains(1) ? anchor.inset[1] : 16)
         return StackHost.anchorRect(edge: anchor.edge, w: w, h: h, insetX: insetX, insetY: insetY, visibleFrame: vf)
