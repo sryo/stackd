@@ -71,6 +71,9 @@ TEST_SOURCES=(
   Tests/TemplateEngineTests.swift
   Tests/SignalFirstTests.swift
   Tests/ResetInjectionTests.swift
+  Tests/WindowConfigureTests.swift
+  Tests/BangRegistryTests.swift
+  Tests/HandlersRegisterTests.swift
   Tests/UtilTests.swift
   Tests/DisplayHelpersTests.swift
   Tests/MaterialTests.swift

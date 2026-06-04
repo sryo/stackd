@@ -221,6 +221,53 @@ function __windowBang(bangSlug) {
   return ch;
 }
 
+// Generic slot-registration: replaces the `window.on<Kind>_<name> = fn`
+// global-mutation pattern with a call that returns a disposer. The daemon
+// still dispatches via the same window slot, so this is purely a JS-side
+// ergonomic shim — back-compat is total. Kind is "Tap" / "Hotkey" / etc.
+// (already capitalized to match the daemon's fireGlobal slot names in
+// Bridge.swift). Name is the manifest-declared callback id (unsanitized
+// for hotkey/tap — the daemon dispatches against the raw name).
+function __registerSlotHandler(kindPascal, name, fn) {
+  const slot = "on" + kindPascal + "_" + name;
+  const prior = window[slot];
+  window[slot] = fn;
+  return () => {
+    // Only clear if we're still the active handler; otherwise a later
+    // .on() with the same name has rightfully replaced us.
+    if (window[slot] === fn) window[slot] = prior || undefined;
+  };
+}
+
+// Bang slugging — matches Bridge.swift sanitization (lowercase, non-alphanumeric
+// → underscore). Producer side fires the original `name`; the daemon dispatches
+// to `window.onBang_<slug>`. Consumer side resolves the same slug so producers
+// and consumers find each other through one shared router.
+function __bangSlug(name) {
+  return String(name).toLowerCase().replace(/[^a-z0-9]/g, "_");
+}
+
+// Bang declarations: shared router per slug, plus a set of listeners.
+// First declare() installs the router on window.onBang_<slug>, chaining any
+// pre-existing handler. Multiple consumers can attach via .on(fn); each gets
+// a disposer. Legacy stacks that overwrite window.onBang_<slug> AFTER declare()
+// will still take over the slot (last-write-wins is the existing contract);
+// adoption is monotonic — once everyone uses declare() this stays clean.
+const bangDeclarations = new Map();
+function __ensureBangRouter(slug) {
+  let dec = bangDeclarations.get(slug);
+  if (dec) return dec;
+  dec = { listeners: new Set() };
+  bangDeclarations.set(slug, dec);
+  const slot = "onBang_" + slug;
+  const prior = window[slot];
+  window[slot] = (detail) => {
+    if (prior) { try { prior(detail); } catch (_) {} }
+    for (const fn of dec.listeners) { try { fn(detail); } catch (_) {} }
+  };
+  return dec;
+}
+
 // Pure-JS helpers — no IPC, no permission. Same shape across every
 // stack: stop reinventing debounce, throttle, and per-screen helpers.
 const util = {
@@ -885,7 +932,14 @@ export const sd = {
     // cursor is over a native traffic-light button.
     setTapRects(callback, rects) {
       return request({ type: "events.setTapRects", callback, rects: rects ?? null });
-    }
+    },
+    // Register the handler for a manifest-declared eventtap callback name.
+    // Replaces the `window.onTap_<name> = (e) => {...}` global-mutation
+    // pattern; returns a disposer that clears the slot on dispose. The
+    // daemon still dispatches via window.onTap_<name>, so legacy assignments
+    // keep working untouched.
+    //   sd.events.on("snapshotsScroll", (e) => handleScroll(e));
+    on(name, fn) { return __registerSlotHandler("Tap", name, fn); }
   },
   // Cursor — warp / read. Top-left global coords by default (same convention
   // as sd.mouse). Pass `display` (CGDirectDisplayID from sd.display.all) to
@@ -1045,7 +1099,28 @@ export const sd = {
     // the menubar "bar" stack, which polls sd.mouse and flips this as the
     // cursor crosses its item rects so the system menubar stays clickable
     // outside the bar's items.
-    setClickThrough(value) { return request({ type: "window.setClickThrough", value: !!value }); }
+    setClickThrough(value) { return request({ type: "window.setClickThrough", value: !!value }); },
+    // Aggregator over setAlpha / setClickThrough / setFrame. Lets stacks
+    // drive every runtime panel attribute from one place instead of
+    // seeding via manifest then immediately overriding. Unspecified fields
+    // are left untouched (no implicit reset).
+    //
+    //   sd.window.configure({ alpha: 0, clickThrough: true });
+    //   sd.window.configure({ frame: { x, y, w, h }, alpha: 1 });
+    //
+    // Returns Promise.all of the inner RPCs; await if you need every
+    // change visible before the next line runs.
+    configure(spec) {
+      const s = spec || {};
+      const out = [];
+      if (typeof s.alpha === "number") out.push(request({ type: "window.setAlpha", value: s.alpha }));
+      if (s.clickThrough !== undefined) out.push(request({ type: "window.setClickThrough", value: !!s.clickThrough }));
+      if (s.frame) {
+        const r = s.frame;
+        out.push(request({ type: "window.setFrame", x: r.x, y: r.y, w: r.w, h: r.h }));
+      }
+      return Promise.all(out);
+    }
   },
   hotkey: {
     // Dynamically bind a Carbon hotkey from JS. Equivalent to the manifest
@@ -1087,7 +1162,14 @@ export const sd = {
       enter(name)  { return request({ type: "hotkey.mode.enter", name }); },
       exit()       { return request({ type: "hotkey.mode.exit" }); },
       current()    { return request({ type: "hotkey.mode.current" }); }
-    }
+    },
+    // Register the handler for a manifest-declared hotkey callback name.
+    // Replaces the `window.onHotkey_<name> = fn` global-mutation pattern;
+    // returns a disposer that clears the slot on unbind. The daemon still
+    // dispatches via window.onHotkey_<name>, so legacy assignments keep
+    // working untouched.
+    //   sd.hotkey.on("toggleDebug", () => state.debug = !state.debug);
+    on(name, fn) { return __registerSlotHandler("Hotkey", name, fn); }
   },
   // Generic NSDistributedNotificationCenter subscription. The same machinery
   // Caffeinate uses internally (com.apple.screenIsLocked, etc.) but exposed
@@ -1268,7 +1350,40 @@ export const sd = {
   //   sd.window.deminimized    { id }                         — CGS
   //   sd.window.reordered      { id }                         — CGS (z-order change)
   //   sd.window.focusedByMouse { }                            — CGS (frontmost-app change)
-  bang(name, detail) { return request({ type: "bang", name, detail: detail || {} }); },
+  // Two shapes:
+  //   sd.bang(name, detail)              — fire-and-forget emit (legacy, still supported)
+  //   sd.bang.declare(name)              — typed registry: { emit, on } pair so
+  //                                        producer and consumer reference the
+  //                                        SAME declared handle. Typos surface
+  //                                        as unpaired declarations StackDoctor
+  //                                        can flag.
+  // Both routes dispatch through the same `window.onBang_<slug>` slot, so
+  // mixing styles in one daemon process works. Adoption is per-stack.
+  // Generic slot-registration entry — `sd.handlers.register("Tap", "foo", fn)`
+  // is equivalent to `sd.events.on("foo", fn)` / `sd.hotkey.on("foo", fn)`
+  // depending on kind. Surface for any future slot the daemon adds; per-kind
+  // sugar (sd.events.on, sd.hotkey.on) stays the discoverable path. Returns
+  // a disposer.
+  handlers: {
+    register(kind, name, fn) { return __registerSlotHandler(kind, name, fn); }
+  },
+  bang: Object.assign(
+    (name, detail) => request({ type: "bang", name, detail: detail || {} }),
+    {
+      declare(name) {
+        const slug = __bangSlug(name);
+        const dec = __ensureBangRouter(slug);
+        return {
+          name,
+          emit(detail) { return request({ type: "bang", name, detail: detail || {} }); },
+          on(fn) {
+            dec.listeners.add(fn);
+            return () => dec.listeners.delete(fn);
+          }
+        };
+      }
+    }
+  ),
   // Per-screen Spaces info via SkyLight private SPI:
   //   { [screenUUID]: { spaces: [id, ...], active: id|null, isFullscreen: bool } }
   // Fires on NSWorkspaceActiveSpaceDidChangeNotification.
