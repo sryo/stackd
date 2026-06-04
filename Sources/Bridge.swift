@@ -3078,32 +3078,30 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         return spec
     }
 
-    /// Pure delta computation between two menubar snapshots. Identity is
-    /// `"<owner>|<title>"` — menubar items have no stable id, so we key
-    /// by the closest persistent thing (owner app + item title). A rename
-    /// in place surfaces as a paired removed+added.
-    static func menubarDelta(snapshot: [[String: Any]], previous: [String: [String: Any]])
-        -> (added: [[String: Any]], removed: [[String: Any]], changed: [[String: Any]], nowByKey: [String: [String: Any]])
-    {
-        func key(_ item: [String: Any]) -> String {
-            let owner = (item["owner"] as? String) ?? ""
-            let title = (item["title"] as? String) ?? ""
-            return owner + "|" + title
+    /// Generic added/removed/changed walk shared by `windowsDelta`,
+    /// `displaysDelta`, `menubarDelta`. Each caller plugs in its own
+    /// identity (how to key a row) and equality (which fields gate
+    /// `changed`); the loop below is identical. Returns the new
+    /// key-indexed cache so callers don't re-walk the snapshot.
+    ///
+    /// Rows whose `identity` returns nil are dropped — matches what the
+    /// per-channel adapters used to do (missing `id` / `displayID`).
+    static func computeDelta<K: Hashable>(
+        snapshot: [[String: Any]],
+        previous: [K: [String: Any]],
+        identity: (_ item: [String: Any]) -> K?,
+        equal: (_ prev: [String: Any], _ now: [String: Any]) -> Bool
+    ) -> (added: [[String: Any]], removed: [[String: Any]], changed: [[String: Any]], nowByKey: [K: [String: Any]]) {
+        var nowByKey: [K: [String: Any]] = [:]
+        for item in snapshot {
+            if let k = identity(item) { nowByKey[k] = item }
         }
-        var nowByKey: [String: [String: Any]] = [:]
-        for item in snapshot { nowByKey[key(item)] = item }
         var added:   [[String: Any]] = []
         var removed: [[String: Any]] = []
         var changed: [[String: Any]] = []
         for (k, item) in nowByKey {
             if let prev = previous[k] {
-                // x + width + hidden are the only transition-y fields.
-                // owner / title are part of the key; they can't differ
-                // here by construction.
-                let same = (prev["x"]      as? Double) == (item["x"]      as? Double) &&
-                           (prev["width"]  as? Double) == (item["width"]  as? Double) &&
-                           (prev["hidden"] as? Bool)   == (item["hidden"] as? Bool)
-                if !same { changed.append(item) }
+                if !equal(prev, item) { changed.append(item) }
             } else {
                 added.append(item)
             }
@@ -3112,6 +3110,32 @@ final class Bridge: NSObject, WKScriptMessageHandler {
             removed.append(item)
         }
         return (added, removed, changed, nowByKey)
+    }
+
+    /// Pure delta computation between two menubar snapshots. Identity is
+    /// `"<owner>|<title>"` — menubar items have no stable id, so we key
+    /// by the closest persistent thing (owner app + item title). A rename
+    /// in place surfaces as a paired removed+added.
+    static func menubarDelta(snapshot: [[String: Any]], previous: [String: [String: Any]])
+        -> (added: [[String: Any]], removed: [[String: Any]], changed: [[String: Any]], nowByKey: [String: [String: Any]])
+    {
+        return computeDelta(
+            snapshot: snapshot,
+            previous: previous,
+            identity: { item in
+                let owner = (item["owner"] as? String) ?? ""
+                let title = (item["title"] as? String) ?? ""
+                return owner + "|" + title
+            },
+            equal: { prev, item in
+                // x + width + hidden are the only transition-y fields.
+                // owner / title are part of the key; they can't differ
+                // here by construction.
+                return (prev["x"]      as? Double) == (item["x"]      as? Double) &&
+                       (prev["width"]  as? Double) == (item["width"]  as? Double) &&
+                       (prev["hidden"] as? Bool)   == (item["hidden"] as? Bool)
+            }
+        )
     }
 
     /// Pure delta computation between two display snapshots. Identity is
@@ -3123,33 +3147,23 @@ final class Bridge: NSObject, WKScriptMessageHandler {
     static func displaysDelta(snapshot: [[String: Any]], previous: [Int: [String: Any]])
         -> (added: [[String: Any]], removed: [[String: Any]], changed: [[String: Any]], nowByID: [Int: [String: Any]])
     {
-        var nowByID: [Int: [String: Any]] = [:]
-        for d in snapshot {
-            if let id = d["displayID"] as? Int { nowByID[id] = d }
-        }
-        var added:   [[String: Any]] = []
-        var removed: [[String: Any]] = []
-        var changed: [[String: Any]] = []
-        for (id, d) in nowByID {
-            if let prev = previous[id] {
+        let d = computeDelta(
+            snapshot: snapshot,
+            previous: previous,
+            identity: { $0["displayID"] as? Int },
+            equal: { prev, now in
                 let b1 = (prev["brightness"] as? Float)
-                let b2 = (d["brightness"]    as? Float)
+                let b2 = (now["brightness"]  as? Float)
                 let f1 = (prev["frame"] as? [String: Any]) ?? [:]
-                let f2 = (d["frame"]    as? [String: Any]) ?? [:]
-                let same = b1 == b2 &&
+                let f2 = (now["frame"]  as? [String: Any]) ?? [:]
+                return b1 == b2 &&
                     (f1["x"] as? Int) == (f2["x"] as? Int) &&
                     (f1["y"] as? Int) == (f2["y"] as? Int) &&
                     (f1["w"] as? Int) == (f2["w"] as? Int) &&
                     (f1["h"] as? Int) == (f2["h"] as? Int)
-                if !same { changed.append(d) }
-            } else {
-                added.append(d)
             }
-        }
-        for (id, d) in previous where nowByID[id] == nil {
-            removed.append(d)
-        }
-        return (added, removed, changed, nowByID)
+        )
+        return (d.added, d.removed, d.changed, d.nowByKey)
     }
 
     /// Pure delta computation between two window snapshots. Identity is
@@ -3161,33 +3175,23 @@ final class Bridge: NSObject, WKScriptMessageHandler {
     static func windowsDelta(snapshot: [[String: Any]], previous: [Int: [String: Any]])
         -> (added: [[String: Any]], removed: [[String: Any]], changed: [[String: Any]], nowByID: [Int: [String: Any]])
     {
-        var nowByID: [Int: [String: Any]] = [:]
-        for w in snapshot {
-            if let id = w["id"] as? Int { nowByID[id] = w }
-        }
-        var added:   [[String: Any]] = []
-        var removed: [[String: Any]] = []
-        var changed: [[String: Any]] = []
-        for (id, w) in nowByID {
-            if let prev = previous[id] {
+        let d = computeDelta(
+            snapshot: snapshot,
+            previous: previous,
+            identity: { $0["id"] as? Int },
+            equal: { prev, now in
                 let t1 = (prev["title"] as? String) ?? ""
-                let t2 = (w["title"]    as? String) ?? ""
+                let t2 = (now["title"]  as? String) ?? ""
                 let f1 = (prev["frame"] as? [String: Any]) ?? [:]
-                let f2 = (w["frame"]    as? [String: Any]) ?? [:]
-                let same = t1 == t2 &&
+                let f2 = (now["frame"]  as? [String: Any]) ?? [:]
+                return t1 == t2 &&
                     (f1["x"] as? Int) == (f2["x"] as? Int) &&
                     (f1["y"] as? Int) == (f2["y"] as? Int) &&
                     (f1["w"] as? Int) == (f2["w"] as? Int) &&
                     (f1["h"] as? Int) == (f2["h"] as? Int)
-                if !same { changed.append(w) }
-            } else {
-                added.append(w)
             }
-        }
-        for (id, w) in previous where nowByID[id] == nil {
-            removed.append(w)
-        }
-        return (added, removed, changed, nowByID)
+        )
+        return (d.added, d.removed, d.changed, d.nowByKey)
     }
 
     static func jsonify(_ obj: Any) -> String {
