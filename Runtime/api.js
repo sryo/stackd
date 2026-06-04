@@ -2522,8 +2522,18 @@ function __sdProcessAttribute(el, attrName, raw) {
 // `<li sd-each="sd.camera">{{ item.name }} ({{ index }})</li>` clones the
 // element once per array item. `item` and `index` are bound inside any
 // `{{ … }}` (text content or attributes) on the element or its descendants.
-// Full re-render on every signal fire — fine for typical list sizes
-// (cameras, displays, USB, focused-app windows). Not keyed/diffed.
+//
+// Reconciliation modes:
+//   - WITHOUT `sd-key`: full re-render on every signal fire — every active
+//     clone removed, all new clones inserted. Cheap for short stable lists
+//     (cameras, displays, USB, focused-app windows). The historical default.
+//   - WITH `sd-key="<expr>"`: keyed reconciliation. The expression is
+//     evaluated per item with `item` + `index` in scope; matching keys reuse
+//     the existing DOM node (text/attribute slots re-applied), missing keys
+//     are removed, new keys are cloned. DOM-stable: focus, scroll, in-flight
+//     animations, and IME composition survive list updates. Use when the
+//     list size is significant (`sd.windows.all`, ~50 entries) or when DOM
+//     state matters across pushes.
 //
 // Limitations (v1):
 //   - Nested sd-each not supported; an inner loop is silently ignored with a
@@ -2533,14 +2543,19 @@ function __sdProcessAttribute(el, attrName, raw) {
 //   - sd-if INSIDE a sd-each subtree is not honored per-clone — the each's
 //     clones don't re-run sd-if compilation. Use a `{{ cond ? … : '' }}`
 //     placeholder for per-item conditionals.
+//   - sd-key MUST produce primitive keys (string/number/bool). Object keys
+//     short-circuit to unkeyed behavior with a console.warn.
 
 function __sdProcessEachElement(el) {
   const expr = el.getAttribute("sd-each");
   const sourceCompiled = __sdCompilePlaceholder(expr);
+  const keyExprRaw = el.getAttribute("sd-key");
+  const keyCompiled = keyExprRaw ? __sdCompilePlaceholder(keyExprRaw) : null;
   const anchor = document.createComment(" sd-each:" + expr + " ");
   el.parentNode.insertBefore(anchor, el);
   el.remove();
   el.removeAttribute("sd-each");
+  if (keyExprRaw) el.removeAttribute("sd-key");
 
   // Pre-scan template (the detached `el`) for `{{ … }}` in text + attributes.
   // Record paths so we can re-locate each slot in a fresh clone without
@@ -2600,31 +2615,113 @@ function __sdProcessEachElement(el) {
     return out;
   }
 
-  let active = [];
+  let active = [];                  // ordered DOM nodes currently rendered
+  let activeKeys = [];              // parallel array of keys (or null if unkeyed)
 
-  function render() {
+  // Build or update a clone in place: re-apply every text + attribute slot
+  // against the current `item` / `index`. Returns the node (possibly the
+  // input one in the keyed-reuse case).
+  function applyTemplateOps(node, item, index) {
+    for (const op of textOps) {
+      const target = findByPath(node, op.path);
+      if (!target || target.nodeType !== 3) continue;
+      target.nodeValue = applyParts(op.parts, op.slots, item, index);
+    }
+    for (const op of attrOps) {
+      const target = findByPath(node, op.path);
+      if (!target || target.nodeType !== 1) continue;
+      target.setAttribute(op.attrName, applyParts(op.parts, op.slots, item, index));
+    }
+    return node;
+  }
+
+  function evalKey(item, index) {
+    let k;
+    try { k = keyCompiled.fn(sd, item, index); } catch (e) { k = undefined; }
+    const t = typeof k;
+    if (t === "string" || t === "number" || t === "boolean") return k;
+    // Non-primitive keys (objects, null, undefined) can't be Map keys
+    // reliably — short-circuit. Warn once per render cycle; the caller's
+    // unkeyed branch handles the actual rendering.
+    if (!evalKey._warned) {
+      console.warn("[stackd] sd-each: sd-key produced non-primitive value; falling back to unkeyed render");
+      evalKey._warned = true;
+    }
+    return undefined;
+  }
+
+  function renderUnkeyed(arr) {
     for (const n of active) n.remove();
     active = [];
-    let arr;
-    try { arr = sourceCompiled.fn(sd, undefined, undefined); } catch (e) { arr = null; }
-    if (!Array.isArray(arr)) return;
-
+    activeKeys = [];
     for (let i = 0; i < arr.length; i++) {
       const item = arr[i];
-      const clone = el.cloneNode(true);
-      for (const op of textOps) {
-        const node = findByPath(clone, op.path);
-        if (!node || node.nodeType !== 3) continue;
-        node.nodeValue = applyParts(op.parts, op.slots, item, i);
-      }
-      for (const op of attrOps) {
-        const node = findByPath(clone, op.path);
-        if (!node || node.nodeType !== 1) continue;
-        node.setAttribute(op.attrName, applyParts(op.parts, op.slots, item, i));
-      }
+      const clone = applyTemplateOps(el.cloneNode(true), item, i);
       anchor.parentNode.insertBefore(clone, anchor.nextSibling);
       active.push(clone);
     }
+  }
+
+  function renderKeyed(arr) {
+    // Index existing clones by their key for O(n) reuse lookup.
+    const byKey = new Map();
+    for (let i = 0; i < active.length; i++) {
+      const k = activeKeys[i];
+      if (k !== undefined) byKey.set(k, active[i]);
+    }
+    // First pass: collect keys, fall back to unkeyed if any key is bad.
+    const keys = new Array(arr.length);
+    for (let i = 0; i < arr.length; i++) {
+      const k = evalKey(arr[i], i);
+      if (k === undefined) { renderUnkeyed(arr); return; }
+      keys[i] = k;
+    }
+    // Second pass: walk the new array in order; reuse existing nodes
+    // where keys match (re-applying slot content), clone for new keys.
+    // Insertion cursor starts at anchor — each placed node becomes the
+    // new cursor so order matches `arr`.
+    const newActive = new Array(arr.length);
+    const reused = new Set();
+    let cursor = anchor;
+    for (let i = 0; i < arr.length; i++) {
+      const item = arr[i];
+      const k = keys[i];
+      let node = byKey.get(k);
+      if (node) {
+        reused.add(node);
+        applyTemplateOps(node, item, i);
+        // Move into position only if not already adjacent — preserves
+        // focus / scroll / animation state when order is stable.
+        if (cursor.nextSibling !== node) {
+          anchor.parentNode.insertBefore(node, cursor.nextSibling);
+        }
+      } else {
+        node = applyTemplateOps(el.cloneNode(true), item, i);
+        anchor.parentNode.insertBefore(node, cursor.nextSibling);
+      }
+      cursor = node;
+      newActive[i] = node;
+    }
+    // Drop any active nodes that aren't part of the new list.
+    for (const n of active) {
+      if (!reused.has(n)) n.remove();
+    }
+    active = newActive;
+    activeKeys = keys;
+  }
+
+  function render() {
+    evalKey._warned = false;
+    let arr;
+    try { arr = sourceCompiled.fn(sd, undefined, undefined); } catch (e) { arr = null; }
+    if (!Array.isArray(arr)) {
+      for (const n of active) n.remove();
+      active = [];
+      activeKeys = [];
+      return;
+    }
+    if (keyCompiled) renderKeyed(arr);
+    else             renderUnkeyed(arr);
   }
 
   __sdSubscribeAll(allDeps, render);
