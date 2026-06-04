@@ -247,7 +247,16 @@ enum Windows {
             // Both cached per (pid, id) with a TTL so a 50-window
             // CGWindowList push doesn't fan out 50+50 AX RPCs every time.
             let probe = WindowAddressabilityCache.probe(pid: pid_t(pid), windowID: CGWindowID(num))
-            return [
+            let originX = Int(bounds["X"] ?? 0)
+            let originY = Int(bounds["Y"] ?? 0)
+            // Mirror Windows.focused()'s display enrichment for every entry
+            // in the list. Stacks iterating sd.windows.all (windowscape tiler,
+            // window switchers, focus-per-display HUDs) get the containing
+            // screen without a per-id RPC roundtrip. Space deliberately
+            // omitted here — Spaces.windowSpaces is a per-window CGS call,
+            // and a 50-window list shouldn't pay 50 of them per push.
+            // sd.spaces.forWindow(id) stays the path for that.
+            var out: [String: Any] = [
                 "id": num,
                 "app": owner,
                 "pid": pid,
@@ -257,12 +266,16 @@ enum Windows {
                 "isStandard":  probe.isStandard,
                 "isMinimized": probe.isMinimized,
                 "frame": [
-                    "x": Int(bounds["X"] ?? 0),
-                    "y": Int(bounds["Y"] ?? 0),
+                    "x": originX,
+                    "y": originY,
                     "w": Int(bounds["Width"] ?? 0),
                     "h": Int(bounds["Height"] ?? 0)
                 ]
             ]
+            if let d = Display.forPoint(CGPoint(x: originX, y: originY)) {
+                out["display"] = d
+            }
+            return out
         }
     }
 }

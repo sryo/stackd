@@ -411,6 +411,14 @@ export const sd = {
     //   (sticky / fullscreen aux) still surface a usable value here; call
     //   sd.spaces.forWindow(id) for the full set.
     focused: channel("focusedWindow"),
+    // Each entry: { id, app, pid, title, onscreen, addressable,
+    //   isStandard, isMinimized, frame: {x,y,w,h},
+    //   display: { id, frame } | undefined }
+    // The `display` field mirrors the focused-channel enrichment so per-
+    // display tiling / switcher stacks don't paginate sd.display.forPoint
+    // calls. `space` deliberately omitted from the list entries (the
+    // per-window CGS lookup is cheap but a 50-window push would still pay
+    // 50 of them); call sd.spaces.forWindow(id) for that.
     all:     channel("windowsAll", []),
     // Transition deltas alongside the full-list `all` channel: same shape
     // as sd.apps.changed — { added: [...], removed: [...], changed: [...] }.
