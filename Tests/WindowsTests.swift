@@ -352,4 +352,61 @@ func registerWindowsTests() {
         try expectEqual(cached.ts, first.ts,
                         "within failTtl, probe must return cached entry (same ts)")
     }
+
+    // MARK: - WindowEvents.tahoeMinimizeBang — Tahoe poll bang gating
+    //
+    // The Tahoe synth-poll watches CGS `onscreen` bits to fan out the
+    // sd.window.minimized / .deminimized bangs (Tahoe killed the dedicated
+    // CGS events). Tab-merged background windows (Terminal / Safari / Finder)
+    // flip onscreen→false on tab switch even though the underlying window
+    // isn't minimized in the AX sense — they're just hidden behind a tab
+    // sibling. Bang would fire, snapshot subsystems (windowscape) capture
+    // a minimized thumbnail, user sees their previous foreground tab in the
+    // minimized strip. Decision gate filters via AX-confirmed isMinimized.
+
+    test("WindowEvents.tahoeMinimizeBang: no transition yields nil") {
+        // Steady-state ticks are the common case — most ids don't change
+        // onscreen between 100ms ticks. Locking nil here keeps the pure
+        // helper allocation-free for the hot path.
+        try expect(WindowEvents.tahoeMinimizeBang(
+            prevOnscreen: true, curOnscreen: true, axMinimizedNow: false) == nil)
+        try expect(WindowEvents.tahoeMinimizeBang(
+            prevOnscreen: false, curOnscreen: false, axMinimizedNow: false) == nil)
+        try expect(WindowEvents.tahoeMinimizeBang(
+            prevOnscreen: true, curOnscreen: true, axMinimizedNow: true) == nil)
+    }
+
+    test("WindowEvents.tahoeMinimizeBang: off→on always fires deminimize") {
+        // Spurious for a background-tab-becoming-foreground transition but
+        // benign (snapshot subsystems no-op on never-snapshotted ids). The
+        // common real case — a Cmd+M'd window being dock-clicked back — is
+        // covered by the same branch. axMinimizedNow is ignored here by
+        // design; document the contract via explicit assertions for both.
+        try expectEqual(WindowEvents.tahoeMinimizeBang(
+            prevOnscreen: false, curOnscreen: true, axMinimizedNow: false),
+            "sd.window.deminimized")
+        try expectEqual(WindowEvents.tahoeMinimizeBang(
+            prevOnscreen: false, curOnscreen: true, axMinimizedNow: true),
+            "sd.window.deminimized")
+    }
+
+    test("WindowEvents.tahoeMinimizeBang: on→off + AX-confirmed minimize fires minimize bang") {
+        // The legitimate-Cmd+M case. AX-side check has already read
+        // kAXMinimized=true so it's safe to fan out the bang.
+        try expectEqual(WindowEvents.tahoeMinimizeBang(
+            prevOnscreen: true, curOnscreen: false, axMinimizedNow: true),
+            "sd.window.minimized")
+    }
+
+    test("WindowEvents.tahoeMinimizeBang: on→off WITHOUT AX-confirmed minimize is the regression-fix nil branch") {
+        // The bug: Terminal tab switch flips onscreen 1→0 on the previous
+        // foreground tab's CGWindowID. AX has no element for that id
+        // (it's now a tab-merged background sibling), so WindowsByID
+        // .isMinimized returns false. Without this nil branch, the bang
+        // would fire and windowscape's snapshot subsystem would render
+        // the hidden tab as a minimized thumbnail.
+        try expect(WindowEvents.tahoeMinimizeBang(
+            prevOnscreen: true, curOnscreen: false, axMinimizedNow: false) == nil,
+            "tab-switch transition (onscreen 1→0 without real minimize) must NOT fire bang")
+    }
 }

@@ -1511,11 +1511,44 @@ enum WindowEvents {
                 host.bang(name: "sd.window.resized", detail: d)
             }
             if p.onscreen != cur.onscreen {
-                let name = cur.onscreen ? "sd.window.deminimized" : "sd.window.minimized"
-                host.bang(name: name, detail: ["id": Int(wid)])
+                // Gate the minimize bang on AX-confirmed kAXMinimized=true.
+                // Without the gate, a tab-merged background window flips
+                // onscreen 1→0 every time the user switches Terminal/Safari
+                // tabs — the previous foreground tab's CGWindowID goes off-
+                // screen but the underlying window wasn't minimized in the
+                // AX sense. Hidden-tab CGWindowIDs have no AX element so
+                // WindowsByID.isMinimized returns false → bang skipped.
+                // Real Cmd+M sets kAXMinimized=true → bang fires.
+                let axMin = cur.onscreen ? false : WindowsByID.isMinimized(windowID: wid)
+                if let name = tahoeMinimizeBang(
+                    prevOnscreen: p.onscreen, curOnscreen: cur.onscreen, axMinimizedNow: axMin
+                ) {
+                    host.bang(name: name, detail: ["id": Int(wid)])
+                }
             }
         }
         tahoePollPrev = next
+    }
+
+    /// Pure decision: which minimize-family bang should the Tahoe poll fire
+    /// for an `onscreen` transition? Extracted so the tab-switch regression
+    /// fix is unit-testable without holding live CGS state.
+    ///
+    /// - `prev == cur`                      → nil (no transition)
+    /// - `cur=true` (off→on)                → `"sd.window.deminimized"` —
+    ///   fires unconditionally. Spurious for a background-tab-becoming-
+    ///   foreground transition, but downstream snapshot subsystems no-op
+    ///   on never-snapshotted ids so the spurious case is benign. A future
+    ///   pass can tighten this by tracking prev `axMinimized` per id.
+    /// - `cur=false` (on→off) + `axMinNow`  → `"sd.window.minimized"`
+    /// - `cur=false` (on→off) + `!axMinNow` → nil — the regression-fix path:
+    ///   tab-switching flips onscreen without minimizing, AX confirms the
+    ///   window isn't really minimized, so no bang.
+    static func tahoeMinimizeBang(prevOnscreen: Bool, curOnscreen: Bool,
+                                  axMinimizedNow: Bool) -> String? {
+        if prevOnscreen == curOnscreen { return nil }
+        if curOnscreen { return "sd.window.deminimized" }
+        return axMinimizedNow ? "sd.window.minimized" : nil
     }
 
     /// Build a sd.window.created detail dict via CGWindowList lookup. One CG
