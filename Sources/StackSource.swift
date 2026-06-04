@@ -59,54 +59,44 @@ struct StackSource {
 // MARK: - Channel inference
 
 /// Channel-permission inference: scan a stack's source text for `sd.<path>`
-/// references and return the set of channel permissions implied. Pure
-/// channels only — RPC actions (fs.*, proc.exec, hotkey.bind, etc.) keep
-/// their explicit declarations because they have real side-effects.
+/// references and return the set of permissions implied. Covers both
+/// read-only channels (sd.battery, sd.windows.focused, …) and RPC
+/// namespaces that map identity-to-permission (sd.fs.*, sd.proc.*, …) so
+/// authors don't have to repeat the manifest list.
 ///
-/// The mapping is intentionally hardcoded here rather than derived from the
-/// runtime: the JS-side `sd` proxy is dynamic and a regex can't tell
-/// `sd.audio.output` (channel) from `sd.audio.setVolume(...)` (RPC) without
-/// this list. Match the table in StackHost docs / the task description.
+/// Top-level identity inference is preferred over sub-path entries because
+/// most permissions name their entire `sd.<perm>.*` namespace (no
+/// ambiguity). The boundary-aware scanner prevents false positives —
+/// `sd.applescript.run` does NOT trigger "app" because the prev/next-char
+/// check rejects partial-identifier matches.
+///
+/// Composite permissions (`menubar.item`) stay explicit and are NOT
+/// inferred — they carry stricter side-effects than the base namespace and
+/// should require visible opt-in.
 enum ChannelInference {
-    /// Channels that map 1:1 to a top-level `sd.<name>`. The presence of
-    /// `sd.battery`, `sd.mouse`, `sd.appearance`, etc. anywhere in the
-    /// source implies the corresponding permission.
+    /// Permissions inferred by identity match — `sd.<name>.*` anywhere in
+    /// the source implies the permission. Includes every single-token
+    /// permission in the StackDoctor allowlist. Drop here when adding a
+    /// new identity-named permission; composites stay out.
     private static let topLevelChannels: [String] = [
+        // Read-only channel signals
         "battery", "mouse", "appearance", "caffeinate",
-        "sensors", "location", "usb", "camera", "touchdevice", "displayLink"
+        "sensors", "location", "usb", "camera", "touchdevice", "displayLink",
+        // Composite top-level (RPC + channel under one namespace)
+        "app", "windows", "input", "net", "audio", "display", "media",
+        "pasteboard", "apps", "spaces", "host", "calendar", "menubar", "privacy",
+        // Pure RPC namespaces — identity-named permission
+        "fs", "proc", "applescript", "notify", "settings", "defaults",
+        "broadcasts", "ax", "spotlight", "speech", "vision", "nlp", "bonjour",
+        "httpserver", "sqlite", "update", "cursor", "overlay", "shortcuts",
+        "sound", "icons", "thumbnails", "events", "menu"
     ]
 
-    /// Channels whose permission name differs from the `sd.` prefix, or where
-    /// only specific sub-paths count as channels. Map each sub-path to the
-    /// permission to enable. Sub-path keys are the FULL path after `sd.`
-    /// (e.g. "app.frontmost"); presence of `sd.app.frontmost` implies "app".
-    private static let subPathChannels: [String: String] = [
-        "app.frontmost":     "app",
-        "app.activated":     "app",
-        "windows.focused":   "windows",
-        "windows.focusedChanged": "windows",
-        "windows.titleChanged":   "windows",
-        "windows.all":       "windows",
-        "input.layout":      "input",
-        "net.wifi":          "net",
-        "net.lan":           "net",
-        "net.path":          "net",
-        "net.throughput":    "net",
-        "audio.output":      "audio",
-        "audio.input":       "audio",
-        "display.all":       "display",
-        "media.nowPlaying":  "media",
-        "pasteboard.changed":"pasteboard",
-        "apps.running":      "apps",
-        "apps.changed":      "apps",
-        "spaces.all":        "spaces",
-        "host.load":         "host",
-        "host.info":         "host",
-        "host.diskIO":       "host",
-        "calendar.observe":  "calendar",
-        "menubar.observe":   "menubar",
-        "privacy.observe":   "privacy"
-    ]
+    /// Sub-path entries are kept as an extension hook for permissions whose
+    /// name doesn't match their `sd.` namespace (today: none — composite
+    /// permissions like `menubar.item` are intentionally NOT inferred and
+    /// require explicit manifest opt-in).
+    private static let subPathChannels: [String: String] = [:]
 
     /// Scan `text` (an HTML/JS/CSS source blob) for sd-channel references
     /// and return the implied permission set. Matches both `{{ sd.x.y }}`
