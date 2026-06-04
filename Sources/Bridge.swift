@@ -16,6 +16,15 @@ final class Bridge: NSObject, WKScriptMessageHandler {
     private var lastAppsByBundle: [String: [String: Any]] = [:]
     // Same shape for sd.windows.changed — keyed by CGWindowID.
     private var lastWindowsByID: [Int: [String: Any]] = [:]
+    // First-tick suppression for windows.changed (and apps.changed had this
+    // implicitly via lastAppsByBundle being empty). Set true after the first
+    // windowsAll push lands; only then do we start emitting deltas, so the
+    // initial "every window added" noise — duplicating sd.windows.all — is
+    // suppressed. Boolean flag instead of an in-lastState marker because
+    // replayState pushes lastState[channel] verbatim into JS via
+    // `__sd_push("name", <RAW>)`, and any non-JSON marker like "primed"
+    // becomes an undefined-identifier ReferenceError.
+    private var windowsChangedPrimed: Bool = false
     private var settings: StackSettings?
     private var fsWatches: [Int: FSWatch] = [:]
     private var handlesBangs: Set<String> = []
@@ -2870,8 +2879,9 @@ final class Bridge: NSObject, WKScriptMessageHandler {
                     // same data sd.windows.all already delivered.
                     let delta = Bridge.windowsDelta(snapshot: snapshot, previous: self.lastWindowsByID)
                     self.lastWindowsByID = delta.nowByID
-                    let primed = (self.lastState["windowsChanged"] ?? "").isEmpty == false
-                    if primed && (!delta.added.isEmpty || !delta.removed.isEmpty || !delta.changed.isEmpty) {
+                    if self.windowsChangedPrimed
+                        && (!delta.added.isEmpty || !delta.removed.isEmpty || !delta.changed.isEmpty)
+                    {
                         let payload: [String: Any] = [
                             "added":   delta.added,
                             "removed": delta.removed,
@@ -2880,12 +2890,8 @@ final class Bridge: NSObject, WKScriptMessageHandler {
                         let deltaJson = Bridge.jsonify(payload)
                         self.lastState["windowsChanged"] = deltaJson
                         self.push(channel: "windowsChanged", json: deltaJson)
-                    } else if !primed {
-                        // Prime the marker so subsequent ticks know they
-                        // can emit. Marker value doesn't matter — only
-                        // its non-empty presence is checked above.
-                        self.lastState["windowsChanged"] = "primed"
                     }
+                    self.windowsChangedPrimed = true
                 }
             }
         }
