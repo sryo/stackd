@@ -666,6 +666,12 @@ export const sd = {
     // stack's fanout (event-driven re-fires still arrive):
     //   sd.display.all.subscribe(d => updateUI(d), { interval: 10 });
     all:        channel("displays", []),
+    // Transition deltas paralleling sd.windows.changed / sd.apps.changed:
+    // { added: [...], removed: [...], changed: [...] }. Identity is
+    // displayID; "changed" tracks frame + brightness (arrangement /
+    // resolution / slider). First-tick "everything added" suppressed —
+    // for the initial list subscribe to .all instead. Permission: "display".
+    changed:    channel("displaysChanged"),
     // Display lookup helpers — read sd.display.all's last-pushed value and
     // return the display whose frame contains the given point/window.
     // Replaces the ~5 copies of this loop sitting in cursor-overlay stacks
@@ -2377,6 +2383,7 @@ const __sdSignalPaths = {
   "audio.output":       sd.audio.output,
   "audio.input":        sd.audio.input,
   "display.all":        sd.display.all,
+  "display.changed":    sd.display.changed,
   "media.nowPlaying":   sd.media.nowPlaying,
   "pasteboard.changed": sd.pasteboard.changed,
   "apps.running":       sd.apps.running,

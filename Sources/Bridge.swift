@@ -25,6 +25,9 @@ final class Bridge: NSObject, WKScriptMessageHandler {
     // `__sd_push("name", <RAW>)`, and any non-JSON marker like "primed"
     // becomes an undefined-identifier ReferenceError.
     private var windowsChangedPrimed: Bool = false
+    // Same shape again for sd.displays.changed — keyed by displayID.
+    private var lastDisplaysByID: [Int: [String: Any]] = [:]
+    private var displaysChangedPrimed: Bool = false
     private var settings: StackSettings?
     private var fsWatches: [Int: FSWatch] = [:]
     private var handlesBangs: Set<String> = []
@@ -2415,6 +2418,7 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         ("audio",       "audioOutput"),
         ("audio",       "audioInput"),
         ("display",     "displays"),
+        ("display",     "displaysChanged"),
         ("media",       "media"),
         ("calendar",    "calendarChanged"),
         ("menubar",     "menubarItems"),
@@ -2595,9 +2599,34 @@ final class Bridge: NSObject, WKScriptMessageHandler {
     }
 
     private func startDisplay() {
-        startChannel(name: "displays", observer: DisplayObserver.shared) {
-            Display.all()
+        // Custom push instead of startChannel so we can compute the
+        // sd.displays.changed delta inside the same dedupe branch — same
+        // shape as startApps / startWorkspace's windowsAll path.
+        let pushFn: () -> Void = { [weak self] in
+            guard let self = self else { return }
+            let snapshot = Display.all()
+            let json = Bridge.jsonify(snapshot)
+            if json == self.lastState["displays"] { return }
+            self.lastState["displays"] = json
+            self.push(channel: "displays", json: json)
+            let delta = Bridge.displaysDelta(snapshot: snapshot, previous: self.lastDisplaysByID)
+            self.lastDisplaysByID = delta.nowByID
+            if self.displaysChangedPrimed
+                && (!delta.added.isEmpty || !delta.removed.isEmpty || !delta.changed.isEmpty)
+            {
+                let payload: [String: Any] = [
+                    "added":   delta.added,
+                    "removed": delta.removed,
+                    "changed": delta.changed
+                ]
+                let deltaJson = Bridge.jsonify(payload)
+                self.lastState["displaysChanged"] = deltaJson
+                self.push(channel: "displaysChanged", json: deltaJson)
+            }
+            self.displaysChangedPrimed = true
         }
+        pushFn()
+        scope.adopt(DisplayObserver.shared.subscribe(pushFn))
     }
 
     // Async snapshot: Media.nowPlaying delivers the dict on a background
@@ -3005,6 +3034,44 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         spec.menu    = body["menu"]    as? [[String: Any]]
         spec.tooltip = body["tooltip"] as? String
         return spec
+    }
+
+    /// Pure delta computation between two display snapshots. Identity is
+    /// displayID (CGDirectDisplayID); the "changed" detector compares
+    /// frame.{x,y,w,h} and brightness — the two fields that change at
+    /// macro frequency (arrangement / resolution / slider). Name, scale,
+    /// uuid, builtin are treated as immutable; if they ever do change
+    /// they'll surface as a paired removed+added.
+    static func displaysDelta(snapshot: [[String: Any]], previous: [Int: [String: Any]])
+        -> (added: [[String: Any]], removed: [[String: Any]], changed: [[String: Any]], nowByID: [Int: [String: Any]])
+    {
+        var nowByID: [Int: [String: Any]] = [:]
+        for d in snapshot {
+            if let id = d["displayID"] as? Int { nowByID[id] = d }
+        }
+        var added:   [[String: Any]] = []
+        var removed: [[String: Any]] = []
+        var changed: [[String: Any]] = []
+        for (id, d) in nowByID {
+            if let prev = previous[id] {
+                let b1 = (prev["brightness"] as? Float)
+                let b2 = (d["brightness"]    as? Float)
+                let f1 = (prev["frame"] as? [String: Any]) ?? [:]
+                let f2 = (d["frame"]    as? [String: Any]) ?? [:]
+                let same = b1 == b2 &&
+                    (f1["x"] as? Int) == (f2["x"] as? Int) &&
+                    (f1["y"] as? Int) == (f2["y"] as? Int) &&
+                    (f1["w"] as? Int) == (f2["w"] as? Int) &&
+                    (f1["h"] as? Int) == (f2["h"] as? Int)
+                if !same { changed.append(d) }
+            } else {
+                added.append(d)
+            }
+        }
+        for (id, d) in previous where nowByID[id] == nil {
+            removed.append(d)
+        }
+        return (added, removed, changed, nowByID)
     }
 
     /// Pure delta computation between two window snapshots. Identity is
