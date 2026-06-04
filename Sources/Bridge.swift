@@ -2498,9 +2498,15 @@ final class Bridge: NSObject, WKScriptMessageHandler {
     private func startMouse() {
         // Truncate to Int for the dedupe — sub-pixel jitter would otherwise
         // push every tick. Matches the original ad-hoc interpolation.
+        // Enrich with the containing display so stacks don't reimplement the
+        // O(displays) forPoint loop on every tick. Display.forPoint is cheap
+        // (NSScreen.screens iteration, no DDC); on a typical 1-2 display
+        // setup this is sub-microsecond.
         startChannel(name: "mouse", observer: MouseObserver.shared) {
             let p = Mouse.location()
-            return ["x": Int(p.x), "y": Int(p.y)]
+            var payload: [String: Any] = ["x": Int(p.x), "y": Int(p.y)]
+            if let d = Display.forPoint(p) { payload["display"] = d }
+            return payload
         }
     }
 

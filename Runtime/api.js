@@ -373,9 +373,18 @@ export const sd = {
   screen:     { current: window.__sd_screen || null },
   battery:    channel("battery"),
   mouse:      Object.assign(channel("mouse"), {
+    // Subscribe payload: { x, y, display: { id, frame: {x,y,w,h} } | null }.
+    // The `display` field is the screen containing the cursor at push time —
+    // daemon-precomputed so stacks don't reimplement the for-each-display
+    // `forPoint` loop on every 30Hz tick. null when off-screen (mid-display-
+    // arrangement race or before screens come online).
+    //   sd.mouse.subscribe(m => {
+    //     if (!m || !m.display) return;
+    //     const localX = m.x - m.display.frame.x;
+    //   });
+    //
     // Move the cursor without clicking. Top-left origin (same coord space
-    // as sd.windows.focused().frame). Pairs with the subscribe channel:
-    //   sd.mouse.subscribe(pt => /* read .x .y */);
+    // as sd.windows.focused().frame).
     //   sd.mouse.warp(100, 200);
     warp(x, y) { return request({ type: "mouse.warp", x, y }); }
   }),

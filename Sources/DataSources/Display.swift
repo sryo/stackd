@@ -90,6 +90,39 @@ enum Display {
         ["x": Int(r.origin.x), "y": Int(r.origin.y),
          "w": Int(r.size.width), "h": Int(r.size.height)]
     }
+
+    /// Cheap "which display contains this CG point" lookup. Returns the
+    /// minimal `{ id, frame }` dict — much lighter than `all()` since it
+    /// skips brightness (DDC round-trip on externals) and UUID lookup.
+    /// Used for live mouse-push enrichment where the cost matters at 30Hz.
+    /// Returns nil for off-screen points (e.g. mid-display-arrangement
+    /// race, or before screens come online).
+    static func forPoint(_ p: CGPoint) -> [String: Any]? {
+        for screen in NSScreen.screens {
+            let id = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID ?? 0
+            let cgFrame = CGDisplayBounds(id)
+            if cgFrame.contains(p) {
+                return [
+                    "id":    Int(id),
+                    "frame": rect(cgFrame)
+                ]
+            }
+        }
+        return nil
+    }
+
+    /// Pure-helper variant: given a CG point + an explicit displays list
+    /// (each entry `[id: Int, frame: { x, y, w, h }]`), return the first
+    /// containing display. Lets tests cover the lookup without NSScreen.
+    static func forPoint(_ p: CGPoint, in displays: [[String: Any]]) -> [String: Any]? {
+        for d in displays {
+            guard let f = d["frame"] as? [String: Int],
+                  let x = f["x"], let y = f["y"], let w = f["w"], let h = f["h"] else { continue }
+            let frame = CGRect(x: x, y: y, width: w, height: h)
+            if frame.contains(p) { return d }
+        }
+        return nil
+    }
 }
 
 /// Resolves DisplayServices private SPI at runtime. Returns nil getters/setters
