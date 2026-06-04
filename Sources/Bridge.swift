@@ -405,7 +405,17 @@ final class Bridge: NSObject, WKScriptMessageHandler {
                     }
                     scope.adopt(token)
                 } else {
-                    scope.adopt(EventTapRegistry.shared.register(eventType: type) { [weak self] event in
+                    // Observe-side rect gate (same key shape as the consume
+                    // path) lets framemaster-style hot corners stop polling
+                    // sd.mouse at 30Hz: declare the tap with requireRects,
+                    // push the hit zones via sd.events.setTapRects, and the
+                    // callback only fires when the cursor lands inside one.
+                    let key = "\(manifest.id):\(cb)"
+                    if et.requireRects == true {
+                        EventTapRegistry.shared.setConsumerRects(key: key, rects: [])
+                    }
+                    let observerKey: String? = (et.requireRects == true) ? key : nil
+                    scope.adopt(EventTapRegistry.shared.register(eventType: type, key: observerKey) { [weak self] event in
                         self?.fireEventTap(callback: cb, type: type, event: event)
                     })
                 }

@@ -147,6 +147,47 @@ func registerInputTests() {
         EventTapRegistry.shared.setConsumerRects(key: k2, rects: nil)
     }
 
+    // MARK: - EventTapRegistry.rectGateAllows — pure gate predicate shared by
+    // the observe + consume paths. The dispatch code paths around it require a
+    // live CGEventTap; this pure helper lets us pin the three-state contract.
+
+    test("rectGateAllows: nil rects (no gate) allows every point") {
+        // No setTapRects call → no entry in rectsByKey → no gate → fire on
+        // every event. Original observer-tap semantics for back-compat with
+        // every existing eventtap manifest entry.
+        try expect(EventTapRegistry.rectGateAllows(rects: nil, point: CGPoint(x: 0, y: 0)))
+        try expect(EventTapRegistry.rectGateAllows(rects: nil, point: CGPoint(x: 9999, y: 9999)))
+    }
+
+    test("rectGateAllows: empty rects [] rejects everything (requireRects boot state)") {
+        // requireRects: true installs an empty array at registration so the
+        // tap never matches until JS pushes real rects. The framemaster
+        // hot-corner migration relies on this — if the rects haven't been
+        // pushed yet, the mouseMoved tap must not wake the callback.
+        try expect(!EventTapRegistry.rectGateAllows(rects: [], point: CGPoint(x: 0, y: 0)))
+        try expect(!EventTapRegistry.rectGateAllows(rects: [], point: CGPoint(x: 500, y: 500)))
+    }
+
+    test("rectGateAllows: populated rects gate by point-in-rect (CGRect.contains)") {
+        let zones = [
+            CGRect(x: 0, y: 0, width: 8, height: 8),         // top-left corner band
+            CGRect(x: 1504, y: 0, width: 8, height: 8)       // top-right corner band on a 1512px-wide display
+        ]
+        try expect(EventTapRegistry.rectGateAllows(rects: zones, point: CGPoint(x: 4, y: 4)))    // in top-left
+        try expect(EventTapRegistry.rectGateAllows(rects: zones, point: CGPoint(x: 1508, y: 4))) // in top-right
+        try expect(!EventTapRegistry.rectGateAllows(rects: zones, point: CGPoint(x: 100, y: 100))) // middle
+        try expect(!EventTapRegistry.rectGateAllows(rects: zones, point: CGPoint(x: 0, y: 9)))     // just below band
+    }
+
+    test("rectGateAllows: first-rect-wins, no need to scan further on hit") {
+        // The early-return matters because rect lists can grow with the
+        // window count (e.g. traffic-light gates across every standard
+        // window); per-event we want O(matches), not O(rects).
+        let rects = (0..<100).map { CGRect(x: $0 * 10, y: 0, width: 5, height: 5) }
+        try expect(EventTapRegistry.rectGateAllows(rects: rects, point: CGPoint(x: 2, y: 2)))   // hit rect 0
+        try expect(EventTapRegistry.rectGateAllows(rects: rects, point: CGPoint(x: 502, y: 2))) // hit rect 50
+    }
+
     // MARK: - HotkeyRegistry.keyCode token table
 
     test("HotkeyRegistry.keyCode resolves letters, digits, and named keys to their Carbon constants") {

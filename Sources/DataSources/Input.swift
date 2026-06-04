@@ -345,7 +345,16 @@ struct EventTapPredicate {
 final class EventTapRegistry {
     static let shared = EventTapRegistry()
 
-    private var handlers: [CGEventType: [Int: (CGEvent) -> Void]] = [:]
+    // Observer handler with optional rect-gate key. nil key → no gate
+    // (fires on every event of the type — original observer behavior).
+    // Non-nil key looks up the same rectsByKey table consumers use, so
+    // sd.events.setTapRects(callback, rects) gates both consume and observe
+    // taps under the same `"<stackId>:<callback>"` key.
+    private struct ObserverHandler {
+        let key: String?
+        let fn: (CGEvent) -> Void
+    }
+    private var handlers: [CGEventType: [Int: ObserverHandler]] = [:]
     private var nextHandlerId: Int = 1
     private var tap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
@@ -455,17 +464,35 @@ final class EventTapRegistry {
     // the Token into their StackScope; cancel removes just this handler. The
     // CGEventTap itself stays installed once created — cheaper than tearing
     // down + reinstalling on every stack reload.
-    func register(eventType: CGEventType, handler: @escaping (CGEvent) -> Void) -> Token? {
+    func register(eventType: CGEventType,
+                  key: String? = nil,
+                  handler: @escaping (CGEvent) -> Void) -> Token? {
         guard ensureTap() else { return nil }
         let id = nextHandlerId
         nextHandlerId += 1
-        handlers[eventType, default: [:]][id] = handler
+        handlers[eventType, default: [:]][id] = ObserverHandler(key: key, fn: handler)
         return Token { [weak self] in
             self?.handlers[eventType]?.removeValue(forKey: id)
             if self?.handlers[eventType]?.isEmpty == true {
                 self?.handlers.removeValue(forKey: eventType)
             }
+            if let key = key { self?.rectsByKey.removeValue(forKey: key) }
         }
+    }
+
+    /// Pure rect-gate predicate shared by the observe and consume paths.
+    /// `rects == nil`  → no gate registered → always allow.
+    /// `rects == []`   → empty gate (suppress until JS pushes real rects) → reject.
+    /// `rects.count>0` → allow only when the event location is inside any rect.
+    static func rectGateAllows(rects: [CGRect]?, point p: CGPoint) -> Bool {
+        guard let rects = rects else { return true }
+        for r in rects where r.contains(p) { return true }
+        return false
+    }
+
+    private func observerGateAllows(key: String?, event: CGEvent) -> Bool {
+        guard let key = key else { return true }
+        return EventTapRegistry.rectGateAllows(rects: rectsByKey[key], point: event.location)
     }
 
     private func dispatch(type: CGEventType, event: CGEvent) {
@@ -475,7 +502,10 @@ final class EventTapRegistry {
         // handler for the same eventType) would mutate handlers[type] mid-
         // iteration — undefined behavior in Swift.
         guard let snap = handlers[type] else { return }
-        for cb in Array(snap.values) { cb(event) }
+        for h in Array(snap.values) {
+            if !observerGateAllows(key: h.key, event: event) { continue }
+            h.fn(event)
+        }
     }
 
     // MARK: - Consume side
