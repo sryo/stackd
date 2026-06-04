@@ -82,6 +82,7 @@ TEST_SOURCES=(
   Tests/WindowLifecycleTests.swift
   Tests/WindowChannelTests.swift
   Tests/AnchorTests.swift
+  Tests/MenubarFrameTests.swift
   Tests/main.swift
 )
 

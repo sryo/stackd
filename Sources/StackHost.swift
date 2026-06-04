@@ -325,8 +325,7 @@ final class StackHost {
         let h = CGFloat(manifest.size?.h ?? 1)
 
         if manifest.region == "menubar" {
-            // Full-bleed top bar that covers the system menu bar. screen.frame
-            // includes the menu-bar region; visibleFrame excludes it.
+            // Full-bleed top bar that covers the system menu bar.
             //
             // Sizing modes:
             //   size.h == 0 (or unset) → exactly match THIS display's menubar
@@ -336,7 +335,7 @@ final class StackHost {
             //   size.h > 0 → max(h, menuBarHeight) — legacy behavior, keeps
             //     stacks that want a guaranteed minimum unaffected.
             let full = screen.frame
-            let menuBarHeight = full.size.height - screen.visibleFrame.size.height
+            let menuBarHeight = StackHost.menubarHeight(frame: full, visibleFrame: screen.visibleFrame)
             let height = h > 0 ? max(h, menuBarHeight) : menuBarHeight
             return NSRect(x: full.minX, y: full.maxY - height, width: full.size.width, height: height)
         }
@@ -356,6 +355,23 @@ final class StackHost {
         let insetY = CGFloat(anchor.inset.indices.contains(0) ? anchor.inset[0] : 16)
         let insetX = CGFloat(anchor.inset.indices.contains(1) ? anchor.inset[1] : 16)
         return StackHost.anchorRect(edge: anchor.edge, w: w, h: h, insetX: insetX, insetY: insetY, visibleFrame: vf)
+    }
+
+    /// Per-display menubar height for `region: "menubar"` stacks.
+    /// Pure function so the math can be tested without NSScreen.
+    ///
+    /// Uses ONLY the top inset (`frame.maxY - visibleFrame.maxY`) — NOT
+    /// `frame.height - visibleFrame.height`. The latter sums every reserved
+    /// inset including the dock when the dock sits on the same display,
+    /// which inflates the bar's height by the dock height and pushes the
+    /// bar window dock-height below the actual menubar (the regression
+    /// fixed here). The top inset is unambiguously the menubar.
+    ///
+    /// Returns 0 when no menubar (e.g. external display with "Displays
+    /// have separate Spaces" off). The caller's `h > 0 ? max(h, …) : …`
+    /// arm decides whether to floor with a manifest-supplied minimum.
+    static func menubarHeight(frame: NSRect, visibleFrame: NSRect) -> CGFloat {
+        return max(0, frame.maxY - visibleFrame.maxY)
     }
 
     /// Resolve a non-fullscreen, non-menubar anchor edge into a frame rect.
