@@ -397,11 +397,19 @@ export const sd = {
     activated: channel("appActivated")
   },
   windows:    {
-    // Subscribe payload: { id, pid, app, title, frame: {x,y,w,h},
-    // display: { id, frame } | null }. The `display` field is the screen
-    // containing the window's top-left at push time — daemon-precomputed
-    // so stacks don't reimplement the forPoint loop. null when off-screen
-    // (mid-arrangement, minimized off-display, etc).
+    // Subscribe payload: {
+    //   id, pid, app, bundleId, title, frame: {x,y,w,h},
+    //   display: { id, frame } | undefined,
+    //   space:   <CGSpaceID Int> | undefined
+    // }
+    // - bundleId: stable across launches (pid recycles, bundleId doesn't);
+    //   stacks routing by app should key on this, not on pid or name.
+    // - display: the screen containing the window's top-left at push time,
+    //   daemon-precomputed so stacks don't reimplement the forPoint loop.
+    //   Omitted when off-screen.
+    // - space: first CGSpaceID the window appears on. Multi-space windows
+    //   (sticky / fullscreen aux) still surface a usable value here; call
+    //   sd.spaces.forWindow(id) for the full set.
     focused: channel("focusedWindow"),
     all:     channel("windowsAll", []),
     // Transition deltas alongside the full-list `all` channel: same shape

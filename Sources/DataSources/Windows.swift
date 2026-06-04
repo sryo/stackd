@@ -134,11 +134,25 @@ enum Windows {
             "frame": ["x": Int(pt.x), "y": Int(pt.y), "w": Int(sz.width), "h": Int(sz.height)]
         ]
         if let id = idVal { out["id"] = id }
+        // Bundle identifier — stable across launches (pid recycles), so
+        // stacks routing by app should key on this. Free off the same
+        // NSRunningApplication we already grabbed for pid.
+        if let bid = app.bundleIdentifier { out["bundleId"] = bid }
         // Enrich with the containing display so consumers don't reimplement
         // the forPoint loop. Probe at the window's top-left in CG coords —
         // matches every other xy in sd.*. Display.forPoint is cheap
         // (NSScreen.screens iteration, no DDC). null when off-screen.
         if let d = Display.forPoint(pt) { out["display"] = d }
+        // CGSpaceID of the space the window appears on — first entry, since
+        // 99% of windows live on exactly one space (the user-arranged case).
+        // Multi-space windows (sticky-on-all-spaces / fullscreen-with-aux)
+        // still get a sensible space here; consumers that need the full set
+        // call sd.spaces.forWindow(id).
+        if let id = idVal {
+            if let first = Spaces.windowSpaces(windowID: UInt32(id)).first {
+                out["space"] = Int(first)
+            }
+        }
         return out
     }
 
