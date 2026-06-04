@@ -397,6 +397,11 @@ export const sd = {
     activated: channel("appActivated")
   },
   windows:    {
+    // Subscribe payload: { id, pid, app, title, frame: {x,y,w,h},
+    // display: { id, frame } | null }. The `display` field is the screen
+    // containing the window's top-left at push time — daemon-precomputed
+    // so stacks don't reimplement the forPoint loop. null when off-screen
+    // (mid-arrangement, minimized off-display, etc).
     focused: channel("focusedWindow"),
     all:     channel("windowsAll", []),
     // Transition deltas alongside the full-list `all` channel: same shape

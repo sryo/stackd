@@ -134,6 +134,11 @@ enum Windows {
             "frame": ["x": Int(pt.x), "y": Int(pt.y), "w": Int(sz.width), "h": Int(sz.height)]
         ]
         if let id = idVal { out["id"] = id }
+        // Enrich with the containing display so consumers don't reimplement
+        // the forPoint loop. Probe at the window's top-left in CG coords —
+        // matches every other xy in sd.*. Display.forPoint is cheap
+        // (NSScreen.screens iteration, no DDC). null when off-screen.
+        if let d = Display.forPoint(pt) { out["display"] = d }
         return out
     }
 
