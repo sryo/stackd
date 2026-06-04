@@ -37,6 +37,12 @@ struct StackManifest: Decodable {
     /// corners are auto-computed to stay CONCENTRIC with the outer material
     /// edge (mirrors SwiftUI's `RoundedRectangularShapeCorners.concentric`).
     let padding: Double?
+    /// Inject a minimal CSS reset (`:where(html,body){margin:0;padding:0;
+    /// background:transparent}`) at document end. Default true. Set `false`
+    /// when the stack manages its own root layout end-to-end. The reset uses
+    /// `:where()` so stack CSS always wins via specificity — no cascade
+    /// fighting.
+    let reset: Bool?
 
     struct Anchor: Decodable { let edge: String; let inset: [Int] }
     struct Size: Decodable { let w: Int?; let h: Int }
@@ -287,7 +293,7 @@ final class StackHost {
             cornerRadius: resolvedRadius,
             shape: StackShape.parse(manifest.shape)
         )
-        let bridge = Bridge(webView: win.webView, screen: screen, screenIndex: screenIndex, padding: resolvedPadding)
+        let bridge = Bridge(webView: win.webView, screen: screen, screenIndex: screenIndex, padding: resolvedPadding, injectReset: manifest.reset ?? true)
         bridge.start(manifest: manifest)
         bridges[key] = bridge
 

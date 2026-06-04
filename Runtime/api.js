@@ -33,6 +33,24 @@ function signal(initial, name) {
       return () => subs.delete(fn);
     },
     peek() { return value; },
+    // Await the first value matching `predicate` (default: any non-null).
+    // Resolves synchronously-microtask if `peek()` already matches; otherwise
+    // subscribes and unsubscribes on first match. Lets stacks write
+    //   const m = await sd.mouse.first();
+    // instead of hand-rolling subscribe+unsub at init time.
+    first(predicate) {
+      const pred = (typeof predicate === "function") ? predicate : (v) => v != null;
+      if (pred(value)) return Promise.resolve(value);
+      return new Promise((resolve) => {
+        let unsub;
+        const handler = (v) => {
+          if (!pred(v)) return;
+          unsub();
+          resolve(v);
+        };
+        unsub = this.subscribe(handler);
+      });
+    },
   };
   // Proxy fall-through: `sd.appearance.dark` reads `dark` off the current
   // payload when the signal itself doesn't own that key. Lets templates

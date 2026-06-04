@@ -170,7 +170,14 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         return WKUserScript(source: source, injectionTime: .atDocumentEnd, forMainFrameOnly: true)
     }()
 
-    init(webView: WKWebView, screen: NSScreen? = nil, screenIndex: Int = 0, padding: Double = 0) {
+    /// Minimal CSS reset injected by default. `:where()` gives every selector
+    /// inside zero specificity so any stack rule (specificity ≥ (0,0,1)) wins
+    /// without authors having to override or know about cascade order. Authors
+    /// opt out via `"reset": false` in the manifest when they want full
+    /// control of the root box.
+    static let resetStyle = ":where(html,body){margin:0;padding:0;background:transparent}"
+
+    init(webView: WKWebView, screen: NSScreen? = nil, screenIndex: Int = 0, padding: Double = 0, injectReset: Bool = true) {
         self.webView = webView
         super.init()
         let ucc = webView.configuration.userContentController
@@ -220,6 +227,22 @@ final class Bridge: NSObject, WKScriptMessageHandler {
             // `body { padding: 0 }`. Stacks that want zero padding can opt
             // out via the manifest (`"padding": 0`) instead of fighting the
             // cascade.
+            let inject = WKUserScript(source: source, injectionTime: .atDocumentEnd, forMainFrameOnly: true)
+            ucc.addUserScript(inject)
+        }
+        // CSS reset — wraps every rule in `:where()` so specificity is (0,0,0)
+        // and any stack rule wins naturally. Opposite cascade story from the
+        // padding block above on purpose: the reset is a sensible default the
+        // stack should easily override, not a daemon-owned setting like padding.
+        if injectReset {
+            let source = """
+            (function(){
+              var s = document.createElement('style');
+              s.setAttribute('data-sd', 'reset');
+              s.textContent = \(Bridge.jsonify(Bridge.resetStyle));
+              (document.head || document.documentElement).appendChild(s);
+            })();
+            """
             let inject = WKUserScript(source: source, injectionTime: .atDocumentEnd, forMainFrameOnly: true)
             ucc.addUserScript(inject)
         }

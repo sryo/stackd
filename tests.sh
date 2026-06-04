@@ -69,6 +69,8 @@ TEST_SOURCES=(
   Tests/SafePredicateTests.swift
   Tests/CLITests.swift
   Tests/TemplateEngineTests.swift
+  Tests/SignalFirstTests.swift
+  Tests/ResetInjectionTests.swift
   Tests/UtilTests.swift
   Tests/DisplayHelpersTests.swift
   Tests/MaterialTests.swift
