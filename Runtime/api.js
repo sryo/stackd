@@ -268,29 +268,61 @@ function __ensureBangRouter(slug) {
   return dec;
 }
 
-// Pure-JS helpers — no IPC, no permission. Same shape across every
-// stack: stop reinventing debounce, throttle, and per-screen helpers.
-const util = {
-  // Trailing-edge debounce. Returns a function that delays invoking `fn`
-  // until `ms` has elapsed since the last call. `.cancel()` aborts a
-  // pending call. Used to consolidate sd.windows.* bursts, drag-end
-  // detection, search-as-you-type, etc.
-  //   const onChange = sd.util.debounce(saveLayout, 300);
+// Timer registry — every timer minted through sd.timer.* lands here so
+// the pagehide listener below can clear pending callbacks before the
+// document unloads / reloads. Plain setTimeout / setInterval is NOT
+// tracked; stacks that want reload-safe lifecycle must use sd.timer.
+const __sdTimers = new Set();
+function __sdTrack(id) { __sdTimers.add(id); return id; }
+function __sdCancel(id, isInterval) {
+  __sdTimers.delete(id);
+  if (isInterval) clearInterval(id); else clearTimeout(id);
+}
+// On hot-reload the WKWebView reloads its document but the JSC heap +
+// pending timers survive — old timeouts would fire into the new document
+// with stale closures. pagehide is the WebKit signal for "the document is
+// about to go away" and runs synchronously before the new load begins.
+window.addEventListener("pagehide", () => {
+  for (const id of __sdTimers) { try { clearTimeout(id); clearInterval(id); } catch (_) {} }
+  __sdTimers.clear();
+});
+
+// sd.timer.* — reload-safe scheduling. Every minted handle auto-cancels on
+// pagehide AND returns a disposer for explicit cancellation. The whole
+// point: stacks stop hand-rolling { let t = null; clearTimeout(t); t = … }
+// state machines that leak across hot-reload.
+const timer = {
+  // One-shot delayed call. Returns a disposer that cancels the pending fire.
+  //   const stop = sd.timer.timeout(() => panel.hide(), 400);
+  //   stop();   // cancel before it fires
+  timeout(fn, ms) {
+    const id = __sdTrack(setTimeout(() => { __sdTimers.delete(id); fn(); }, ms));
+    return () => __sdCancel(id, false);
+  },
+  // Repeating call at `ms` cadence. Returns a disposer; remember it — there
+  // is no other way to stop the interval. Auto-clears on pagehide regardless.
+  //   const stop = sd.timer.interval(() => tick(), 1000);
+  interval(fn, ms) {
+    const id = __sdTrack(setInterval(fn, ms));
+    return () => __sdCancel(id, true);
+  },
+  // Trailing-edge debounce. Returns a callable that delays invoking `fn`
+  // until `ms` has elapsed since the last call. Disposer plus a `.cancel()`
+  // method on the callable itself (matches sd.util.debounce's prior shape).
+  //   const onChange = sd.timer.debounce(saveLayout, 300);
   //   sd.windows.all.subscribe(onChange);
   debounce(fn, ms) {
     let t = null;
     const wrapped = function (...args) {
-      if (t) clearTimeout(t);
-      t = setTimeout(() => { t = null; fn.apply(this, args); }, ms);
+      if (t !== null) __sdCancel(t, false);
+      t = __sdTrack(setTimeout(() => { __sdTimers.delete(t); t = null; fn.apply(this, args); }, ms));
     };
-    wrapped.cancel = () => { if (t) { clearTimeout(t); t = null; } };
+    wrapped.cancel = () => { if (t !== null) { __sdCancel(t, false); t = null; } };
     return wrapped;
   },
-  // Leading-edge throttle. First call fires immediately; subsequent
-  // calls within `ms` are dropped. Trailing edge re-arms after the
-  // window expires.
-  //   const tick = sd.util.throttle(updateHUD, 100);
-  //   sd.mouse.subscribe(tick);
+  // Leading-edge throttle. First call fires immediately; subsequent calls
+  // within `ms` are dropped; trailing edge re-arms after the window expires.
+  //   const tick = sd.timer.throttle(updateHUD, 100);
   throttle(fn, ms) {
     let last = 0, scheduled = null;
     return function (...args) {
@@ -298,21 +330,43 @@ const util = {
       const remaining = ms - (now - last);
       if (remaining <= 0) {
         last = now;
-        if (scheduled) { clearTimeout(scheduled); scheduled = null; }
+        if (scheduled !== null) { __sdCancel(scheduled, false); scheduled = null; }
         fn.apply(this, args);
-      } else if (!scheduled) {
-        scheduled = setTimeout(() => {
+      } else if (scheduled === null) {
+        scheduled = __sdTrack(setTimeout(() => {
           last = Date.now();
+          __sdTimers.delete(scheduled);
           scheduled = null;
           fn.apply(this, args);
-        }, remaining);
+        }, remaining));
       }
     };
   }
 };
 
+// Pure-JS helpers — no IPC, no permission. Same shape across every
+// stack: stop reinventing debounce, throttle, and per-screen helpers.
+// debounce / throttle delegate to sd.timer.* so existing call sites
+// automatically gain pagehide auto-cleanup without a code change.
+const util = {
+  // Trailing-edge debounce. Returns a function that delays invoking `fn`
+  // until `ms` has elapsed since the last call. `.cancel()` aborts a
+  // pending call. Used to consolidate sd.windows.* bursts, drag-end
+  // detection, search-as-you-type, etc.
+  //   const onChange = sd.util.debounce(saveLayout, 300);
+  //   sd.windows.all.subscribe(onChange);
+  debounce(fn, ms) { return timer.debounce(fn, ms); },
+  // Leading-edge throttle. First call fires immediately; subsequent
+  // calls within `ms` are dropped. Trailing edge re-arms after the
+  // window expires.
+  //   const tick = sd.util.throttle(updateHUD, 100);
+  //   sd.mouse.subscribe(tick);
+  throttle(fn, ms) { return timer.throttle(fn, ms); }
+};
+
 export const sd = {
   util,
+  timer,
   // Per-instance screen info, injected before this script runs (see Bridge.swift).
   // Read .current synchronously — items like spacenum + brightness need to
   // know which screen they're rendered on without an async round-trip.

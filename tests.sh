@@ -75,6 +75,7 @@ TEST_SOURCES=(
   Tests/BangRegistryTests.swift
   Tests/HandlersRegisterTests.swift
   Tests/HeadlessStackTests.swift
+  Tests/TimerTests.swift
   Tests/UtilTests.swift
   Tests/DisplayHelpersTests.swift
   Tests/MaterialTests.swift
