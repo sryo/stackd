@@ -28,6 +28,12 @@ final class Bridge: NSObject, WKScriptMessageHandler {
     // Same shape again for sd.displays.changed — keyed by displayID.
     private var lastDisplaysByID: [Int: [String: Any]] = [:]
     private var displaysChangedPrimed: Bool = false
+    // Same shape again for sd.menubar.changed — keyed by "<owner>|<title>"
+    // since menubar items have no stable id. owner+title is the closest
+    // thing to an identity (a third-party icon doesn't usually rename
+    // itself mid-session; if it does the diff fires removed+added once).
+    private var lastMenubarByKey: [String: [String: Any]] = [:]
+    private var menubarChangedPrimed: Bool = false
     private var settings: StackSettings?
     private var fsWatches: [Int: FSWatch] = [:]
     private var handlesBangs: Set<String> = []
@@ -2432,6 +2438,7 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         ("media",       "media"),
         ("calendar",    "calendarChanged"),
         ("menubar",     "menubarItems"),
+        ("menubar",     "menubarChanged"),
         ("pasteboard",  "pasteboard"),
         ("apps",        "apps"),
         ("spaces",      "spaces"),
@@ -2701,9 +2708,34 @@ final class Bridge: NSObject, WKScriptMessageHandler {
     // owner-name cache alive across polls so the NSRunningApplication
     // lookup (the slow part) doesn't repeat for steady-state items.
     private func startMenubarItems() {
-        startChannel(name: "menubarItems", observer: MenubarItemsObserver.shared) {
-            MenubarItemsObserver.shared.snapshot()
+        // Custom push instead of startChannel so we can compute the
+        // sd.menubar.changed delta inside the same dedupe branch —
+        // same shape as startDisplay / startApps.
+        let pushFn: () -> Void = { [weak self] in
+            guard let self = self else { return }
+            let snapshot = MenubarItemsObserver.shared.snapshot()
+            let json = Bridge.jsonify(snapshot)
+            if json == self.lastState["menubarItems"] { return }
+            self.lastState["menubarItems"] = json
+            self.push(channel: "menubarItems", json: json)
+            let delta = Bridge.menubarDelta(snapshot: snapshot, previous: self.lastMenubarByKey)
+            self.lastMenubarByKey = delta.nowByKey
+            if self.menubarChangedPrimed
+                && (!delta.added.isEmpty || !delta.removed.isEmpty || !delta.changed.isEmpty)
+            {
+                let payload: [String: Any] = [
+                    "added":   delta.added,
+                    "removed": delta.removed,
+                    "changed": delta.changed
+                ]
+                let deltaJson = Bridge.jsonify(payload)
+                self.lastState["menubarChanged"] = deltaJson
+                self.push(channel: "menubarChanged", json: deltaJson)
+            }
+            self.menubarChangedPrimed = true
         }
+        pushFn()
+        scope.adopt(MenubarItemsObserver.shared.subscribe(pushFn))
     }
 
     private func startPasteboard() {
@@ -3044,6 +3076,42 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         spec.menu    = body["menu"]    as? [[String: Any]]
         spec.tooltip = body["tooltip"] as? String
         return spec
+    }
+
+    /// Pure delta computation between two menubar snapshots. Identity is
+    /// `"<owner>|<title>"` — menubar items have no stable id, so we key
+    /// by the closest persistent thing (owner app + item title). A rename
+    /// in place surfaces as a paired removed+added.
+    static func menubarDelta(snapshot: [[String: Any]], previous: [String: [String: Any]])
+        -> (added: [[String: Any]], removed: [[String: Any]], changed: [[String: Any]], nowByKey: [String: [String: Any]])
+    {
+        func key(_ item: [String: Any]) -> String {
+            let owner = (item["owner"] as? String) ?? ""
+            let title = (item["title"] as? String) ?? ""
+            return owner + "|" + title
+        }
+        var nowByKey: [String: [String: Any]] = [:]
+        for item in snapshot { nowByKey[key(item)] = item }
+        var added:   [[String: Any]] = []
+        var removed: [[String: Any]] = []
+        var changed: [[String: Any]] = []
+        for (k, item) in nowByKey {
+            if let prev = previous[k] {
+                // x + width + hidden are the only transition-y fields.
+                // owner / title are part of the key; they can't differ
+                // here by construction.
+                let same = (prev["x"]      as? Double) == (item["x"]      as? Double) &&
+                           (prev["width"]  as? Double) == (item["width"]  as? Double) &&
+                           (prev["hidden"] as? Bool)   == (item["hidden"] as? Bool)
+                if !same { changed.append(item) }
+            } else {
+                added.append(item)
+            }
+        }
+        for (k, item) in previous where nowByKey[k] == nil {
+            removed.append(item)
+        }
+        return (added, removed, changed, nowByKey)
     }
 
     /// Pure delta computation between two display snapshots. Identity is

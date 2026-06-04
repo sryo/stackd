@@ -86,6 +86,7 @@ TEST_SOURCES=(
   Tests/MousePayloadTests.swift
   Tests/WindowsChangedTests.swift
   Tests/DisplaysChangedTests.swift
+  Tests/MenubarChangedTests.swift
   Tests/main.swift
 )
 

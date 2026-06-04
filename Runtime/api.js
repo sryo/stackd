@@ -798,6 +798,12 @@ export const sd = {
     //   sd.menubar.observe.subscribe(items => render(items), { interval: 5 });
     // Same "menubar" permission gate as items() / suppress / restore.
     observe: channel("menubarItems"),
+    // Transition deltas paralleling sd.windows.changed / sd.apps.changed:
+    // { added: [...], removed: [...], changed: [...] }. Identity is
+    // owner+title (menubar items have no stable id); "changed" tracks
+    // x / width / hidden transitions. Suppresses the first-tick
+    // "everything added" — for that subscribe to .observe.
+    changed: channel("menubarChanged"),
 
     // Add an NSStatusItem to the system menu bar. Requires "menubar.item"
     // permission (distinct from "menubar", which gates suppress/restore).
