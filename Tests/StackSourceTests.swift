@@ -64,6 +64,35 @@ func registerStackSourceTests() {
         try expectEqual(src.rootURL.path, dir)
     }
 
+    test("loadFolder: sourceText walks subdirectories recursively") {
+        // Real stacks (windowscape, cloudpad, bar) split source into
+        // `modules/`, `items/`, `assets/`. Without recursive scan the
+        // top-level index.html / index.js sees a stub and every
+        // permission referenced only in a submodule fails to infer —
+        // shipped 2026-06-04, broke windowscape tiling because every
+        // sd.windows.setFrame call lives in modules/tiler.js.
+        let dir = makeTempDir()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        write(minimalManifest, to: dir + "/stack.json")
+        write("// top-level shim", to: dir + "/index.js")
+        let subdir = dir + "/modules"
+        try? FileManager.default.createDirectory(atPath: subdir, withIntermediateDirectories: true)
+        write("await sd.fs.read('x');", to: subdir + "/io.js")
+        let deeper = subdir + "/nested"
+        try? FileManager.default.createDirectory(atPath: deeper, withIntermediateDirectories: true)
+        write("sd.proc.exec('/bin/ls');", to: deeper + "/proc.js")
+
+        guard let src = StackSource.loadFolder(at: dir, defaults: [:]) else {
+            try expect(false, "expected non-nil StackSource"); return
+        }
+        try expect(src.sourceText.contains("sd.fs.read"), "module file missed by walker")
+        try expect(src.sourceText.contains("sd.proc.exec"), "nested-subdir file missed by walker")
+        // Inference layered on top must see both submodule references.
+        let perms = ChannelInference.infer(from: src.sourceText)
+        try expect(perms.contains("fs"))
+        try expect(perms.contains("proc"))
+    }
+
     test("loadFolder: sourceText aggregates html/css/js/mjs contents") {
         let dir = makeTempDir()
         defer { try? FileManager.default.removeItem(atPath: dir) }

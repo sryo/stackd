@@ -35,15 +35,22 @@ struct StackSource {
         // Scan every text asset in the stack dir so an inferred permission
         // works whether the channel reference lives in index.html, index.css
         // (via something like `attr(data-pct) px` patterns), or a separate
-        // .js module imported by the stack.
+        // .js module imported by the stack. Walks recursively because
+        // structured stacks split source into `modules/`, `assets/`, etc.
+        // — a top-level scan would miss every channel referenced only in a
+        // submodule (e.g. windowscape's setFrame calls in modules/tiler.js).
         let scanExts: Set<String> = ["html", "htm", "css", "js", "mjs"]
         var combined = ""
-        if let entries = try? FileManager.default.contentsOfDirectory(atPath: path) {
-            for entry in entries {
-                let ext = (entry as NSString).pathExtension.lowercased()
+        let walker = FileManager.default.enumerator(
+            at: url,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsHiddenFiles]
+        )
+        if let walker = walker {
+            for case let fileURL as URL in walker {
+                let ext = fileURL.pathExtension.lowercased()
                 guard scanExts.contains(ext) else { continue }
-                let p = path + "/" + entry
-                if let s = try? String(contentsOfFile: p, encoding: .utf8) {
+                if let s = try? String(contentsOf: fileURL, encoding: .utf8) {
                     combined += s + "\n"
                 }
             }
