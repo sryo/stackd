@@ -13,15 +13,17 @@ func registerResetInjectionTests() {
         try expectEqual(Bridge.resetStyle.contains(":where("), true)
     }
 
-    test("reset style: covers margin / padding / background on html and body") {
-        // These three properties are what every user stack repeats in its own
-        // index.css. Anything else (overflow, font, color-scheme) is stack-
-        // specific and intentionally omitted to avoid surprising overrides.
+    test("reset style: covers margin / padding / background / user-select on html and body") {
+        // user-select is inheritable so html/body covers descendants; stacks
+        // that want selection override naturally via :where(). Other globals
+        // (overflow, font, color-scheme) are stack-specific and omitted.
         let s = Bridge.resetStyle
         try expectEqual(s.contains("html,body"), true)
         try expectEqual(s.contains("margin:0"), true)
         try expectEqual(s.contains("padding:0"), true)
         try expectEqual(s.contains("background:transparent"), true)
+        try expectEqual(s.contains("user-select:none"), true)
+        try expectEqual(s.contains("-webkit-user-select:none"), true)
     }
 
     test("reset style: does NOT include overflow / font / color (stack-specific)") {
