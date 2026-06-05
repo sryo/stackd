@@ -76,11 +76,23 @@ struct StackManifest: Decodable {
     /// where the consumer is live but JS hasn't yet pushed rects — without
     /// this flag the consumer's empty predicate matches every event of the
     /// type, eating every click between stack-load and JS-ready.
+    ///
+    /// `emitLeave: true` (observer-tap only; requires `requireRects: true`)
+    /// upgrades the rect gate to transition-aware dispatch. The callback
+    /// fires on the rising edge (point enters any rect) with
+    /// `phase: "enter"`, on subsequent in-rect events with `phase: "move"`,
+    /// AND on the falling edge (next event is outside the rects after a
+    /// previous one was inside) with `phase: "leave"`. This is the daemon-
+    /// side primitive that lets framemaster-class hot-corner stacks drop
+    /// the 30Hz `sd.mouse` polling they were doing just to detect cursor
+    /// exit. Strictly opt-in: when omitted the payload carries no `phase`
+    /// field and the gate behaves identically to the pre-emitLeave path.
     struct EventTap: Decodable {
         let event: String
         let callback: String
         let consume: Bool?
         let requireRects: Bool?
+        let emitLeave: Bool?
         let `if`: Predicate?
 
         struct Predicate: Decodable {

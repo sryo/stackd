@@ -86,9 +86,12 @@ final class Bridge: NSObject, WKScriptMessageHandler {
     // "bonjour:browse:<id>" — JS sd.bonjour.browse() builds the same name
     // from the returned handle id and subscribes via the standard channel()
     // signal machinery.
-    fileprivate var bonjourPublishHandles: [Int: Token] = [:]
-    fileprivate var bonjourBrowseHandles: [Int: Token] = [:]
-    fileprivate var nextBonjourId: Int = 1
+    // Widened from fileprivate to internal so BridgeBonjour.swift's
+    // bonjour.publish / .publish.stop / .browse.start / .browse.stop closures
+    // can mint and release listener / browser handles.
+    var bonjourPublishHandles: [Int: Token] = [:]
+    var bonjourBrowseHandles: [Int: Token] = [:]
+    var nextBonjourId: Int = 1
     // Spotlight live-query handles. Each entry owns a Spotlight.LiveQuery
     // (long-lived NSMetadataQuery in continuous-update mode); cancel calls
     // LiveQuery.stop() which tears down the query + its NSNotificationCenter
@@ -108,8 +111,10 @@ final class Bridge: NSObject, WKScriptMessageHandler {
     // channel push name is "camera:stream:<id>"; JS sd.camera.stream() builds
     // the same name from the returned handle id. Scope drain on stack unload
     // stops every active capture so reload doesn't strand the camera LED on.
-    fileprivate var cameraStreamHandles: [Int: Token] = [:]
-    fileprivate var nextCameraStreamId: Int = 1
+    // Widened from fileprivate to internal so BridgeCamera.swift's
+    // camera.stream.start / .stop closures can mint and release stream handles.
+    var cameraStreamHandles: [Int: Token] = [:]
+    var nextCameraStreamId: Int = 1
     // sd.speech.listen handles — one Listener per active listen() call. The
     // Listener owns the SFSpeechRecognizer task + AVAudioEngine + tap, so the
     // Token's cancel calls listener.stop() (which removes the tap, cancels
@@ -130,16 +135,21 @@ final class Bridge: NSObject, WKScriptMessageHandler {
     // SIGTERM; the wrapped Process strongly retains the underlying task so
     // the terminationHandler still fires after unload. Scope drain SIGTERMs
     // any still-running child so stack reload doesn't strand subprocesses.
-    fileprivate var procStreamHandles: [Int: ProcStreamHandle] = [:]
-    fileprivate var nextProcStreamId: Int = 1
+    // Widened from fileprivate to internal so BridgeProc.swift's
+    // proc.stream.start / .cancel closures can mint and release child handles.
+    var procStreamHandles: [Int: ProcStreamHandle] = [:]
+    var nextProcStreamId: Int = 1
     // Active IOPMAssertion handles minted by sd.caffeinate.assert(). Keyed
     // by a per-bridge counter (the id we hand back to JS); value is the raw
     // IOPMAssertionID returned by IOPMAssertionCreateWithName. Released
     // explicitly via sd.caffeinate.release(handleId) — or in bulk by the
     // scope drain on stack unload (so a forgotten wake-lock doesn't outlive
     // the stack that took it).
-    fileprivate var caffeinateAssertions: [Int: IOPMAssertionID] = [:]
-    fileprivate var nextCaffeinateId: Int = 1
+    // Widened from fileprivate to internal so BridgeCaffeinate.swift's
+    // caffeinate.assert / .release closures can mint and release IOPMAssertion
+    // handles.
+    var caffeinateAssertions: [Int: IOPMAssertionID] = [:]
+    var nextCaffeinateId: Int = 1
     // Per-channel JS-requested fanout cadence (seconds). Set via the
     // sd.channel.setInterval IPC when a stack calls e.g.
     // `sd.sensors.subscribe(fn, { interval: 5 })`. Channels not listed here
@@ -451,8 +461,11 @@ final class Bridge: NSObject, WKScriptMessageHandler {
                         EventTapRegistry.shared.setConsumerRects(key: key, rects: [])
                     }
                     let observerKey: String? = (et.requireRects == true) ? key : nil
-                    scope.adopt(EventTapRegistry.shared.register(eventType: type, key: observerKey) { [weak self] event in
-                        self?.fireEventTap(callback: cb, type: type, event: event)
+                    let emitLeave = (et.emitLeave == true) && (et.requireRects == true)
+                    scope.adopt(EventTapRegistry.shared.register(
+                        eventType: type, key: observerKey, emitLeave: emitLeave
+                    ) { [weak self] event, phase in
+                        self?.fireEventTap(callback: cb, type: type, event: event, phase: phase)
                     })
                 }
             }
@@ -764,6 +777,11 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         + Bridge.fsPrimitives()
         + Bridge.spotlightPrimitives()
         + Bridge.speechPrimitives()
+        + Bridge.displayPrimitives()
+        + Bridge.cameraPrimitives()
+        + Bridge.bonjourPrimitives()
+        + Bridge.procPrimitives()
+        + Bridge.caffeinatePrimitives()
         + Bridge.inlinePrimitives()
 
     /// Every permission string declared by any primitive — `.sync(...)`,
@@ -820,64 +838,8 @@ final class Bridge: NSObject, WKScriptMessageHandler {
 
         // Audio primitives → BridgeAudio.swift (audioPrimitives()).
 
-        // Display
-        //
-        // `displayID` is the CGDirectDisplayID returned by sd.display.all.
-        // When 0 / missing, falls back to CGMainDisplayID so single-display
-        // callers can just pass the value without enumerating screens.
-        // Routing between internal (DisplayServices) and external (DDC/CI
-        // via IOAVService) happens inside Display.setBrightness.
-        .sync("display.setBrightness", permission: "display", denyValue: false) { body in
-            let id: CGDirectDisplayID
-            if let raw = body["displayID"] as? Int, raw != 0 {
-                id = CGDirectDisplayID(raw)
-            } else {
-                id = CGMainDisplayID()
-            }
-            return Display.setBrightness(
-                displayID: id,
-                Float((body["value"] as? Double) ?? 0))
-        },
-        // Mirror of setBrightness — reads back current brightness as a 0..1
-        // Double or null. External monitors often nil out (DDC-read is
-        // optional in the spec); built-in always returns a value.
-        .sync("display.getBrightness", permission: "display", denyValue: NSNull()) { body in
-            let id: CGDirectDisplayID
-            if let raw = body["displayID"] as? Int, raw != 0 {
-                id = CGDirectDisplayID(raw)
-            } else {
-                id = CGMainDisplayID()
-            }
-            return Display.brightness(of: id).map { Double($0) } ?? NSNull()
-        },
-
-        // Display snapshot — single-frame ScreenCaptureKit grab (14+) or
-        // CGWindowListCreateImage on 13. Returns { dataURL, width, height }
-        // or null on failure. Folded under the existing "display" permission
-        // because every consumer that needs pixels already wants sd.display.all
-        // to enumerate screens.
-        .custom("display.snapshot", permission: "display") { bridge, body, requestId in
-            let id = (body["displayID"] as? Int).map { CGDirectDisplayID($0) }
-                ?? CGMainDisplayID()
-            var region: CGRect? = nil
-            if let r = body["region"] as? [String: Any] {
-                region = CGRect(
-                    x: (r["x"] as? Double) ?? 0,
-                    y: (r["y"] as? Double) ?? 0,
-                    width:  (r["w"] as? Double) ?? 0,
-                    height: (r["h"] as? Double) ?? 0
-                )
-            }
-            let opts = DisplaySnapshot.Options(
-                displayID: id,
-                region: region,
-                format: body["format"] as? String ?? "png",
-                quality: body["quality"] as? Double ?? 0.85
-            )
-            DisplaySnapshot.capture(opts) { [weak bridge] result in
-                bridge?.respond(requestId: requestId, value: result as Any? ?? NSNull())
-            }
-        },
+        // Display primitives (setBrightness / getBrightness / snapshot) →
+        // BridgeDisplay.swift (displayPrimitives()).
 
         // Menubar suppression — refcounted via per-Bridge stack of tokens.
         .syncBridge("menubar.suppress", permission: "menubar", denyValue: false) { bridge, _ in
@@ -995,59 +957,8 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         // listen.start / .stop / .cancel) → BridgeSearch.swift
         // (speechPrimitives()).
 
-        // Camera — one-shot frame grab. Triggers the Camera TCC prompt the
-        // first time. `deviceId` matches sd.camera channel ids; nil = system
-        // default. Format jpeg/png, quality 0..1 (jpeg only). Returns
-        // { dataURL, width, height } or null. Pairs with sd.vision.*.
-        .custom("camera.frame", permission: "camera") { bridge, body, requestId in
-            let deviceId = body["deviceId"] as? String
-            let format   = body["format"]   as? String ?? "jpeg"
-            let quality  = body["quality"]  as? Double ?? 0.85
-            let timeout  = body["timeoutSeconds"] as? Double ?? 3.0
-            Camera.frame(deviceId: deviceId, format: format,
-                         quality: quality, timeoutSeconds: timeout) { [weak bridge] result in
-                bridge?.respond(requestId: requestId, value: result as Any? ?? NSNull())
-            }
-        },
-
-        // Camera streaming — long-lived AVCaptureSession that pushes one
-        // dataURL payload per tick to a per-handle channel ("camera:stream:<id>").
-        // Same handle-table + scope-drain pattern as bonjour.browse.start.
-        // The first call triggers the Camera TCC prompt iff a prior
-        // camera.frame hasn't already granted it. fps defaults to 10 and
-        // is capped at 60 — caps documented on CameraStream.clampedFps.
-        // Returns the handle id (JS wraps it as { id, subscribe, stop }),
-        // or null if the device can't be opened.
-        .custom("camera.stream.start", permission: "camera") { bridge, body, requestId in
-            let deviceId = body["deviceId"] as? String
-            let format   = CameraStream.normalizedFormat(body["format"] as? String)
-            let quality  = CameraStream.clampedQuality(body["quality"] as? Double)
-            let fps      = CameraStream.clampedFps(body["fps"] as? Double)
-            let id = bridge.nextCameraStreamId
-            bridge.nextCameraStreamId += 1
-            let channel = "camera:stream:\(id)"
-            let stream = Camera.openStream(
-                deviceId: deviceId,
-                format: format,
-                quality: quality,
-                fps: fps
-            ) { [weak bridge] payload in
-                guard let bridge = bridge else { return }
-                let json = Bridge.jsonify(payload)
-                bridge.push(channel: channel, json: json)
-            }
-            guard let stream = stream else {
-                bridge.respond(requestId: requestId, value: NSNull()); return
-            }
-            bridge.cameraStreamHandles[id] = Token { stream.stop() }
-            bridge.respond(requestId: requestId, value: id)
-        },
-        .syncBridge("camera.stream.stop", permission: "camera", denyValue: false) { b, body in
-            guard let id = body["id"] as? Int,
-                  let t  = b.cameraStreamHandles.removeValue(forKey: id) else { return false }
-            t.cancel()
-            return true
-        },
+        // Camera primitives (frame / stream.start / stream.stop) →
+        // BridgeCamera.swift (cameraPrimitives()).
 
         // Calendar — read-only EventKit query. Triggers the Calendar TCC
         // prompt on first use. `from` / `to` are epoch seconds; `calendarIds`
@@ -1211,59 +1122,8 @@ final class Bridge: NSObject, WKScriptMessageHandler {
             return SQLite.close(handle: h)
         },
 
-        // Process exec — async; respond from the completion callback.
-        .custom("proc.exec", permission: "proc") { bridge, body, requestId in
-            Proc.exec(
-                cmd:     body["cmd"]   as? String ?? "",
-                args:    body["args"]  as? [String] ?? [],
-                input:   body["input"] as? String,
-                timeoutSeconds: body["timeout"] as? Double
-            ) { [weak bridge] result in
-                bridge?.respond(requestId: requestId, value: result)
-            }
-        },
-
-        // Streamed proc — progressive stdout/stderr via per-chunk callbacks,
-        // SIGTERM via cancel. Mints an id (returned synchronously to JS);
-        // each chunk + the final exit event fire via __sd_proc_stream_fire.
-        // Same handle-table pattern as broadcasts.observe / hotkey.bind.
-        .custom("proc.stream.start", permission: "proc") { bridge, body, requestId in
-            let cmd  = body["cmd"]  as? String ?? ""
-            let args = body["args"] as? [String] ?? []
-            let env  = body["env"]  as? [String: String]
-            let cwd  = body["cwd"]  as? String
-            let id = bridge.nextProcStreamId
-            bridge.nextProcStreamId += 1
-            let handle = Proc.stream(cmd: cmd, args: args, env: env, cwd: cwd) { [weak bridge] payload in
-                guard let bridge = bridge, let webView = bridge.webView else { return }
-                let json = Bridge.jsonify(payload)
-                // Proc.stream already hops to main before invoking onEvent;
-                // evaluateJavaScript runs synchronously from here.
-                webView.evaluateJavaScript(
-                    "window.__sd_proc_stream_fire && window.__sd_proc_stream_fire(\(id), \(json));",
-                    completionHandler: nil
-                )
-                // Final event drops the handle so cancel() after exit no-ops
-                // and the per-stack drain doesn't try to SIGTERM a dead child.
-                if (payload["stream"] as? String) == "exit" {
-                    bridge.procStreamHandles.removeValue(forKey: id)
-                }
-            }
-            guard let handle = handle else {
-                bridge.respond(requestId: requestId, value: NSNull()); return
-            }
-            bridge.procStreamHandles[id] = handle
-            bridge.respond(requestId: requestId, value: id)
-        },
-        .syncBridge("proc.stream.cancel", permission: "proc", denyValue: false) { b, body in
-            guard let id = body["id"] as? Int,
-                  let h = b.procStreamHandles[id] else { return false }
-            h.cancel()
-            // Don't remove from the table here — the exit event handler does
-            // that. Removing now would let a subsequent cancel slip through
-            // as "not found" even though the SIGTERM was already in flight.
-            return true
-        },
+        // Proc primitives (exec / stream.start / stream.cancel) →
+        // BridgeProc.swift (procPrimitives()).
 
         // Shortcuts CLI invocation — async like proc.exec. Gated by the
         // "shortcuts" permission so a stack must opt in explicitly (a shortcut
@@ -1889,31 +1749,8 @@ final class Bridge: NSObject, WKScriptMessageHandler {
             return true
         },
 
-        // ── Caffeinate.assert (wake-lock setter) ───────────────────────────
-        // Mints an IOPMAssertion held until release. Three JS types map to
-        // three IOPM assertion strings — see Caffeinate.assert(type:reason:).
-        // Returns a per-bridge handle id; JS wraps it as { id, release() }.
-        // Stack unload drains every outstanding assertion via scope so a
-        // forgotten wake-lock can't outlive the stack. Permission: "caffeinate".
-        .custom("caffeinate.assert", permission: "caffeinate") { bridge, body, requestId in
-            // The IPC envelope already owns the "type" key (used to dispatch
-            // to this primitive), so the assertion kind comes in on
-            // "assertionType" — JS api.js renames spec.type accordingly.
-            let kind = body["assertionType"] as? String ?? ""
-            let reason = body["reason"] as? String ?? ""
-            guard let assertionId = Caffeinate.assert(type: kind, reason: reason) else {
-                bridge.respond(requestId: requestId, value: NSNull()); return
-            }
-            let id = bridge.nextCaffeinateId
-            bridge.nextCaffeinateId += 1
-            bridge.caffeinateAssertions[id] = assertionId
-            bridge.respond(requestId: requestId, value: id)
-        },
-        .syncBridge("caffeinate.release", permission: "caffeinate", denyValue: false) { b, body in
-            guard let id = body["id"] as? Int,
-                  let assertionId = b.caffeinateAssertions.removeValue(forKey: id) else { return false }
-            return Caffeinate.release(id: assertionId)
-        },
+        // Caffeinate primitives (assert / release) → BridgeCaffeinate.swift
+        // (caffeinatePrimitives()).
 
         // ── Overlay (WebKit overlay primitive) ─────────────────────────────
         // Attach a borderless click-through NSPanel + WKWebView pinned to a
@@ -2106,64 +1943,8 @@ final class Bridge: NSObject, WKScriptMessageHandler {
             return true
         },
 
-        // ── Bonjour / mDNS ──────────────────────────────────────────────────
-        // Publish: long-lived NWListener that advertises {name, type, port}
-        // over mDNS. Returns a handle id; JS wraps it as { id, stop() }.
-        // Browse: long-lived NWBrowser that fires per-handle channel pushes
-        // ("bonjour:browse:<id>") with the full current result-set on every
-        // change. JS sd.bonjour.browse(type) returns { id, subscribe(fn),
-        // stop() } that wires the same channel name to the standard signal
-        // machinery. Permission: "bonjour". macOS 15+ surfaces a Local
-        // Network privacy prompt on first publish/browse; Network.framework
-        // raises it — we don't preflight.
-        .custom("bonjour.publish", permission: "bonjour") { bridge, body, requestId in
-            // IPC envelope's `type` key is reserved for primitive dispatch
-            // ("bonjour.publish"), so the service type travels under
-            // `serviceType` — matches the caffeinate.assert/assertionType
-            // workaround elsewhere in this file.
-            let name = body["name"] as? String ?? ""
-            let type = body["serviceType"] as? String ?? ""
-            let port = UInt16((body["port"] as? Int) ?? 0)
-            let txt  = body["txt"] as? [String: String]
-            guard !name.isEmpty, !type.isEmpty, port > 0,
-                  let handle = Bonjour.publish(name: name, type: type, port: port, txt: txt) else {
-                bridge.respond(requestId: requestId, value: NSNull()); return
-            }
-            let id = bridge.nextBonjourId
-            bridge.nextBonjourId += 1
-            bridge.bonjourPublishHandles[id] = Token { handle.stop() }
-            bridge.respond(requestId: requestId, value: id)
-        },
-        .syncBridge("bonjour.publish.stop", permission: "bonjour", denyValue: false) { b, body in
-            guard let id = body["id"] as? Int,
-                  let t  = b.bonjourPublishHandles.removeValue(forKey: id) else { return false }
-            t.cancel()
-            return true
-        },
-        .custom("bonjour.browse.start", permission: "bonjour") { bridge, body, requestId in
-            // serviceType (not `type`) for the same envelope-collision reason
-            // documented on bonjour.publish above.
-            let type = body["serviceType"] as? String ?? ""
-            guard !type.isEmpty else {
-                bridge.respond(requestId: requestId, value: NSNull()); return
-            }
-            let id = bridge.nextBonjourId
-            bridge.nextBonjourId += 1
-            let channel = "bonjour:browse:\(id)"
-            let browser = Bonjour.Browser(type: type) { [weak bridge] entries in
-                guard let bridge = bridge else { return }
-                let json = Bridge.jsonify(entries)
-                bridge.push(channel: channel, json: json)
-            }
-            bridge.bonjourBrowseHandles[id] = Token { browser.stop() }
-            bridge.respond(requestId: requestId, value: id)
-        },
-        .syncBridge("bonjour.browse.stop", permission: "bonjour", denyValue: false) { b, body in
-            guard let id = body["id"] as? Int,
-                  let t  = b.bonjourBrowseHandles.removeValue(forKey: id) else { return false }
-            t.cancel()
-            return true
-        },
+        // Bonjour primitives (publish / publish.stop / browse.start /
+        // browse.stop) → BridgeBonjour.swift (bonjourPrimitives()).
 
         // Tunable poll cadence. JS calls `sd.sensors.subscribe(fn, { interval })`
         // → api.js forwards this IPC → the bridge gates the per-stack fanout for
@@ -2798,7 +2579,7 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         fireGlobal(handler: "onHotkey_\(safe)")
     }
 
-    private func fireEventTap(callback: String, type: CGEventType, event: CGEvent) {
+    private func fireEventTap(callback: String, type: CGEventType, event: CGEvent, phase: String? = nil) {
         let typeName = EventTapRegistry.name(for: type)
         let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
         let flags = event.flags.rawValue
@@ -2826,6 +2607,13 @@ final class Bridge: NSObject, WKScriptMessageHandler {
            let g = Gesture.describe(cgEvent: event) {
             for (k, v) in g { payload[k] = v }
         }
+        // `phase` is only present when the manifest opted in via
+        // `emitLeave: true`. The observer-tap dispatch path supplies
+        // "enter" / "move" / "leave" for transition-aware handlers; every
+        // other observer-tap call site (and every consume-side fire) leaves
+        // it nil so the payload stays byte-identical to the pre-leave
+        // shape that existing stacks read.
+        if let phase = phase { payload["phase"] = phase }
 
         fireGlobal(handler: "onTap_\(callback)", args: [Bridge.jsonify(payload)])
     }

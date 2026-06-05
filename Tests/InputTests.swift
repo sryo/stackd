@@ -188,6 +188,137 @@ func registerInputTests() {
         try expect(EventTapRegistry.rectGateAllows(rects: rects, point: CGPoint(x: 502, y: 2))) // hit rect 50
     }
 
+    // MARK: - EventTapRegistry.rectGateTransition — pure leave-detection helper
+    //
+    // Same justification as rectGateAllows: the dispatch path runs inside a
+    // live CGEventTap, but the transition logic itself is pure. Pinning it
+    // here so framemaster's hot-corner migration off `sd.mouse` 30Hz polling
+    // can't silently regress when someone refactors the inside/outside
+    // bookkeeping.
+
+    test("rectGateTransition: outside → inside fires `enter` and flips nowInside") {
+        // The rising edge — first observed event where the cursor lands in
+        // a corner band. JS-side state machine arms the corner here. Before
+        // this, no event ever reaches the callback (the existing rect gate
+        // suppressed every mouseMoved outside).
+        let zones = [CGRect(x: 0, y: 0, width: 8, height: 8)]
+        let (fire, phase, nowInside) = EventTapRegistry.rectGateTransition(
+            rects: zones, point: CGPoint(x: 4, y: 4), wasInside: false)
+        try expect(fire)
+        try expectEqual(phase, "enter")
+        try expect(nowInside)
+    }
+
+    test("rectGateTransition: inside → inside fires `move` (continuation, not re-enter)") {
+        // While the cursor stays inside the gate, the handler keeps firing
+        // — same cadence as the original "fires while inside" semantics —
+        // but tagged `move` so JS knows it's a continuation, not a new arm.
+        let zones = [CGRect(x: 0, y: 0, width: 8, height: 8)]
+        let (fire, phase, nowInside) = EventTapRegistry.rectGateTransition(
+            rects: zones, point: CGPoint(x: 5, y: 5), wasInside: true)
+        try expect(fire)
+        try expectEqual(phase, "move")
+        try expect(nowInside)
+    }
+
+    test("rectGateTransition: inside → outside fires `leave` and flips nowInside off") {
+        // The falling edge — the whole point of the new primitive. WITHOUT
+        // this synthesized fire, the next mouseMoved outside the gate would
+        // be dropped by the rectGateAllows path and the JS state machine
+        // would never learn the cursor left. With it, the handler hears a
+        // single "leave" with the outside point so JS can un-arm cleanly.
+        let zones = [CGRect(x: 0, y: 0, width: 8, height: 8)]
+        let (fire, phase, nowInside) = EventTapRegistry.rectGateTransition(
+            rects: zones, point: CGPoint(x: 100, y: 100), wasInside: true)
+        try expect(fire)
+        try expectEqual(phase, "leave")
+        try expect(!nowInside)
+    }
+
+    test("rectGateTransition: outside → outside suppresses (no fire, no phase)") {
+        // The hot path — events that never touched the gate stay invisible
+        // to the JS callback. Without this suppression we'd flood JS with
+        // a leave for every mouseMoved at 60+ Hz globally — defeating the
+        // whole point of letting the daemon do the gating.
+        let zones = [CGRect(x: 0, y: 0, width: 8, height: 8)]
+        let (fire, phase, nowInside) = EventTapRegistry.rectGateTransition(
+            rects: zones, point: CGPoint(x: 200, y: 200), wasInside: false)
+        try expect(!fire)
+        try expect(phase == nil)
+        try expect(!nowInside)
+    }
+
+    test("rectGateTransition: empty rects [] suppress in BOTH directions and reset wasInside") {
+        // Mirrors the rectGateAllows empty-gate semantics: an empty rect
+        // array means "consumer never matches right now". A subsequent
+        // re-population MUST start cold — if we left wasInside=true while
+        // suppressed, the first event after re-population would fire an
+        // immediate spurious "leave" against the now-active rects. The
+        // helper's nowInside contract is "false on suppression" so the
+        // caller resets its bookkeeping.
+        let (fireOut, phaseOut, nowOut) = EventTapRegistry.rectGateTransition(
+            rects: [], point: CGPoint(x: 0, y: 0), wasInside: false)
+        try expect(!fireOut)
+        try expect(phaseOut == nil)
+        try expect(!nowOut)
+        let (fireIn, phaseIn, nowIn) = EventTapRegistry.rectGateTransition(
+            rects: [], point: CGPoint(x: 0, y: 0), wasInside: true)
+        try expect(!fireIn)
+        try expect(phaseIn == nil)
+        try expect(!nowIn, "empty gate must reset wasInside so re-population starts cold")
+    }
+
+    test("rectGateTransition: nil rects (no gate) is the degenerate `always-move` shape") {
+        // Defensive path. Bridge gates emitLeave on requireRects == true,
+        // but if the wiring is ever loosened (or a test passes nil rects
+        // directly), the helper must still return a fire-able shape with
+        // a `move` phase — the leave-tracking JS code should never crash
+        // on a missing phase string.
+        let (fire, phase, nowInside) = EventTapRegistry.rectGateTransition(
+            rects: nil, point: CGPoint(x: 4, y: 4), wasInside: false)
+        try expect(fire)
+        try expectEqual(phase, "move")
+        try expect(nowInside)
+    }
+
+    test("rectGateTransition: enter → move → leave round-trip mirrors a full hot-corner visit") {
+        // End-to-end shape the framemaster migration relies on:
+        //   1. cursor outside corner → no fire
+        //   2. cursor enters corner → enter (arm)
+        //   3. cursor still in corner → move
+        //   4. cursor leaves corner → leave (un-arm)
+        //   5. cursor stays away → no fire
+        // Threading the wasInside state through manually because that's
+        // exactly what the dispatcher's `insideByKey[key]` slot does.
+        let zones = [CGRect(x: 100, y: 100, width: 8, height: 8)]
+        var wasInside = false
+
+        // step 1
+        var r = EventTapRegistry.rectGateTransition(
+            rects: zones, point: CGPoint(x: 50, y: 50), wasInside: wasInside)
+        try expect(!r.fire)
+        wasInside = r.nowInside
+        // step 2
+        r = EventTapRegistry.rectGateTransition(
+            rects: zones, point: CGPoint(x: 102, y: 102), wasInside: wasInside)
+        try expect(r.fire); try expectEqual(r.phase, "enter")
+        wasInside = r.nowInside
+        // step 3
+        r = EventTapRegistry.rectGateTransition(
+            rects: zones, point: CGPoint(x: 104, y: 104), wasInside: wasInside)
+        try expect(r.fire); try expectEqual(r.phase, "move")
+        wasInside = r.nowInside
+        // step 4
+        r = EventTapRegistry.rectGateTransition(
+            rects: zones, point: CGPoint(x: 200, y: 200), wasInside: wasInside)
+        try expect(r.fire); try expectEqual(r.phase, "leave")
+        wasInside = r.nowInside
+        // step 5
+        r = EventTapRegistry.rectGateTransition(
+            rects: zones, point: CGPoint(x: 300, y: 300), wasInside: wasInside)
+        try expect(!r.fire); try expect(r.phase == nil)
+    }
+
     // MARK: - HotkeyRegistry.keyCode token table
 
     test("HotkeyRegistry.keyCode resolves letters, digits, and named keys to their Carbon constants") {

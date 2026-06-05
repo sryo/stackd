@@ -207,7 +207,7 @@ final class MouseObserver: RefCountedObserver {
         // stack that's already subscribed when the user grants Accessibility
         // wakes up the moment the next signal subscribe arrives (or just
         // toggles itself off+on).
-        return EventTapRegistry.shared.register(eventType: .mouseMoved) { [weak self] _ in
+        return EventTapRegistry.shared.register(eventType: .mouseMoved) { [weak self] _, _ in
             self?.fire()
         }
     }
@@ -350,9 +350,18 @@ final class EventTapRegistry {
     // Non-nil key looks up the same rectsByKey table consumers use, so
     // sd.events.setTapRects(callback, rects) gates both consume and observe
     // taps under the same `"<stackId>:<callback>"` key.
+    //
+    // `emitLeave` opts the handler into transition-aware dispatch (see
+    // `rectGateTransition` below). When true, the handler is invoked with
+    // `phase ∈ {"enter","move","leave"}` so JS-side state machines
+    // (framemaster's hot corners) can drop polling sd.mouse at 30Hz.
+    // When false (default), the handler is invoked with `phase == nil` and
+    // gating follows the original "fire only when inside" semantics — no
+    // payload field added, no behavior change for existing stacks.
     private struct ObserverHandler {
         let key: String?
-        let fn: (CGEvent) -> Void
+        let emitLeave: Bool
+        let fn: (CGEvent, String?) -> Void
     }
     private var handlers: [CGEventType: [Int: ObserverHandler]] = [:]
     private var nextHandlerId: Int = 1
@@ -386,6 +395,13 @@ final class EventTapRegistry {
     // can adapt to runtime state (windowscape pushes traffic-light rects on
     // focus change + drag-bracket close, then clears on display change).
     private var rectsByKey: [String: [CGRect]] = [:]
+
+    // Per-key "was the cursor inside the gate at the previous event?" state,
+    // used only by emitLeave-opted observer handlers. Tracked here (not in
+    // the handler struct) because the state is per-rect-key — multiple
+    // handlers under the same key share the same inside/outside answer.
+    // Reset to false when the rects are cleared so a re-arm starts cold.
+    private var insideByKey: [String: Bool] = [:]
 
     private init() {}
 
@@ -464,19 +480,32 @@ final class EventTapRegistry {
     // the Token into their StackScope; cancel removes just this handler. The
     // CGEventTap itself stays installed once created — cheaper than tearing
     // down + reinstalling on every stack reload.
+    //
+    // `emitLeave` requires `key != nil` (the leave is keyed off the rect
+    // gate's inside/outside transition). Passing emitLeave with a nil key
+    // is silently treated as false — without a rect gate, "leave" has no
+    // boundary to fire against. The handler receives `phase` as a String?
+    // — nil in the original observer mode, a phase name when emitLeave is
+    // active. Bridge maps phase → a `phase` field in the JS payload.
     func register(eventType: CGEventType,
                   key: String? = nil,
-                  handler: @escaping (CGEvent) -> Void) -> Token? {
+                  emitLeave: Bool = false,
+                  handler: @escaping (CGEvent, String?) -> Void) -> Token? {
         guard ensureTap() else { return nil }
         let id = nextHandlerId
         nextHandlerId += 1
-        handlers[eventType, default: [:]][id] = ObserverHandler(key: key, fn: handler)
+        let effectiveEmitLeave = emitLeave && key != nil
+        handlers[eventType, default: [:]][id] = ObserverHandler(
+            key: key, emitLeave: effectiveEmitLeave, fn: handler)
         return Token { [weak self] in
             self?.handlers[eventType]?.removeValue(forKey: id)
             if self?.handlers[eventType]?.isEmpty == true {
                 self?.handlers.removeValue(forKey: eventType)
             }
-            if let key = key { self?.rectsByKey.removeValue(forKey: key) }
+            if let key = key {
+                self?.rectsByKey.removeValue(forKey: key)
+                self?.insideByKey.removeValue(forKey: key)
+            }
         }
     }
 
@@ -488,6 +517,59 @@ final class EventTapRegistry {
         guard let rects = rects else { return true }
         for r in rects where r.contains(p) { return true }
         return false
+    }
+
+    /// Pure transition computation for emitLeave-opted observer handlers.
+    /// Combines the inside-test with the wasInside state to classify the
+    /// event into one of {enter, move, leave, suppressed}. Kept pure and
+    /// static so the same logic that runs inside the CGEventTap callback
+    /// can be unit-tested without installing a tap (which needs
+    /// Accessibility TCC and a live run loop).
+    ///
+    /// Semantics:
+    ///   - `rects == nil`  → no gate; degenerate case (caller should have
+    ///                       set `emitLeave = false` since there's no
+    ///                       boundary to transition against). Returns
+    ///                       (fire: true, phase: "move", nowInside: true)
+    ///                       so the handler still gets the event with a
+    ///                       consistent shape, but no enter/leave is ever
+    ///                       synthesized.
+    ///   - `rects == []`   → empty gate; reject in BOTH directions. No
+    ///                       phase, no fire — the same boot-state behavior
+    ///                       as the plain rectGateAllows path. Resets
+    ///                       wasInside to false so a later re-population
+    ///                       of rects starts cold.
+    ///   - point in rects, wasInside == false → enter (rising edge).
+    ///   - point in rects, wasInside == true  → move (continuation).
+    ///   - point NOT in rects, wasInside == true  → leave (falling edge).
+    ///   - point NOT in rects, wasInside == false → suppress.
+    ///
+    /// `nowInside` is the bookkeeping value the caller stores into
+    /// `insideByKey[key]` after firing — exposed in the tuple so the
+    /// dispatcher doesn't have to recompute the contains() check.
+    static func rectGateTransition(
+        rects: [CGRect]?, point p: CGPoint, wasInside: Bool
+    ) -> (fire: Bool, phase: String?, nowInside: Bool) {
+        guard let rects = rects else {
+            // Degenerate — caller shouldn't have emitLeave on without a
+            // gate. Treat as a plain move so the handler still sees the
+            // event and JS code paths don't crash on a missing phase.
+            return (true, "move", true)
+        }
+        if rects.isEmpty {
+            // Empty gate suppresses in both directions. Reset wasInside
+            // so a subsequent gate population doesn't accidentally fire
+            // "leave" on the first outside event.
+            return (false, nil, false)
+        }
+        var inside = false
+        for r in rects where r.contains(p) { inside = true; break }
+        switch (wasInside, inside) {
+        case (false, true):  return (true,  "enter", true)
+        case (true,  true):  return (true,  "move",  true)
+        case (true,  false): return (true,  "leave", false)
+        case (false, false): return (false, nil,     false)
+        }
     }
 
     private func observerGateAllows(key: String?, event: CGEvent) -> Bool {
@@ -503,8 +585,24 @@ final class EventTapRegistry {
         // iteration — undefined behavior in Swift.
         guard let snap = handlers[type] else { return }
         for h in Array(snap.values) {
-            if !observerGateAllows(key: h.key, event: event) { continue }
-            h.fn(event)
+            if h.emitLeave, let key = h.key {
+                // Transition path — fires on enter/move/leave per the
+                // rectGateTransition contract. The leave fire is the
+                // important one: it's the only way the handler hears
+                // about an event that lands OUTSIDE the gate (when the
+                // previous event was inside). Bookkeeping is centralized
+                // in insideByKey because multiple handlers under the
+                // same rect-gate key must share inside/outside truth.
+                let prev = insideByKey[key] ?? false
+                let (fire, phase, nowInside) = EventTapRegistry.rectGateTransition(
+                    rects: rectsByKey[key], point: event.location, wasInside: prev)
+                if nowInside != prev { insideByKey[key] = nowInside }
+                if !fire { continue }
+                h.fn(event, phase)
+            } else {
+                if !observerGateAllows(key: h.key, event: event) { continue }
+                h.fn(event, nil)
+            }
         }
     }
 
@@ -547,6 +645,12 @@ final class EventTapRegistry {
     func setConsumerRects(key: String, rects: [CGRect]?) {
         if let r = rects { rectsByKey[key] = r }
         else { rectsByKey.removeValue(forKey: key) }
+        // Clear the transition bookkeeping — any wasInside state held
+        // against the OLD rects is meaningless against the new set, and
+        // would otherwise let the next event fire a spurious "leave" /
+        // skip an "enter". Cheaper to reset than to recompute against
+        // both old and new rects at the cursor's current position.
+        insideByKey.removeValue(forKey: key)
     }
 
     /// Test/inspection accessor for the cursor-rect gate. nil = no gate set.
