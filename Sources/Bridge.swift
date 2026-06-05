@@ -42,7 +42,11 @@ final class Bridge: NSObject, WKScriptMessageHandler {
     // Widened from private to internal so BridgeFS.swift's fs.watch.start /
     // fs.watch.stop closures can mint and release watch handles.
     var fsWatches: [Int: FSWatch] = [:]
-    private var handlesBangs: Set<String> = []
+    // Widened to internal so the bang.handle primitive can insert into it
+    // when sd.bang.declare(name).on() runs in JS — auto-registration so
+    // stacks don't have to also list the bang name in their manifest's
+    // `handles` array.
+    var handlesBangs: Set<String> = []
     // Widened from private to internal so BridgeAX.swift's ax.* closures
     // can read/release handles via the per-Bridge HandleStore.
     let axHandles = AX.HandleStore()
@@ -252,8 +256,10 @@ final class Bridge: NSObject, WKScriptMessageHandler {
     /// inside zero specificity so any stack rule (specificity ≥ (0,0,1)) wins
     /// without authors having to override or know about cascade order. Authors
     /// opt out via `"reset": false` in the manifest when they want full
-    /// control of the root box.
-    static let resetStyle = ":where(html,body){margin:0;padding:0;background:transparent}"
+    /// control of the root box. `user-select:none` is inheritable, so applying
+    /// it on html/body covers every descendant — stack chrome is interactive
+    /// UI, not document content. Text-editor / notes-style stacks override.
+    static let resetStyle = ":where(html,body){margin:0;padding:0;background:transparent;-webkit-user-select:none;user-select:none}"
 
     init(webView: WKWebView, screen: NSScreen? = nil, screenIndex: Int = 0, padding: Double = 0, injectReset: Bool = true) {
         self.webView = webView
@@ -1296,6 +1302,18 @@ final class Bridge: NSObject, WKScriptMessageHandler {
                 let fired = AppDelegate.shared?.host?.bang(name: name, detail: detail) ?? 0
                 bridge?.respond(requestId: requestId, value: fired)
             }
+        },
+
+        // Runtime handles-registration. Lets `sd.bang.declare(name).on(fn)` in
+        // JS opt this stack into the dispatch list without requiring the same
+        // name in the manifest `handles` array. The api.js bang router fires
+        // this on first declaration per slug. Idempotent — the set absorbs
+        // repeat calls. No permission gate (subscribing to a bang isn't a
+        // sensitive op — anyone can call .declare() on any name).
+        .syncBridge("bang.handle", permission: nil, denyValue: false) { bridge, body in
+            guard let name = body["name"] as? String, !name.isEmpty else { return false }
+            bridge.handlesBangs.insert(name)
+            return true
         }
     ] }
 

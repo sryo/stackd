@@ -254,11 +254,17 @@ function __bangSlug(name) {
 // will still take over the slot (last-write-wins is the existing contract);
 // adoption is monotonic — once everyone uses declare() this stays clean.
 const bangDeclarations = new Map();
-function __ensureBangRouter(slug) {
+function __ensureBangRouter(slug, originalName) {
   let dec = bangDeclarations.get(slug);
   if (dec) return dec;
   dec = { listeners: new Set() };
   bangDeclarations.set(slug, dec);
+  // Tell the daemon this stack also handles `originalName` so dispatch
+  // reaches us — no manifest `handles` entry required. The RPC is
+  // fire-and-forget; the daemon's `bang.handle` primitive is idempotent
+  // and ungated. originalName falls back to the slug if the caller
+  // didn't pass one (rare back-compat path).
+  request({ type: "bang.handle", name: originalName || slug });
   const slot = "onBang_" + slug;
   const prior = window[slot];
   window[slot] = (detail) => {
@@ -1488,7 +1494,7 @@ export const sd = {
     {
       declare(name) {
         const slug = __bangSlug(name);
-        const dec = __ensureBangRouter(slug);
+        const dec = __ensureBangRouter(slug, name);
         return {
           name,
           emit(detail) { return request({ type: "bang", name, detail: detail || {} }); },
