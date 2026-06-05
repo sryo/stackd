@@ -81,12 +81,13 @@ enum Apps {
         return true
     }
 
-    /// Focus the app if running; otherwise launch it. Matches user intent
-    /// for both launcher hotkeys ("open Safari") and "go to my Calendar".
+    /// `.activateIgnoringOtherApps` is load-bearing: stackd is `.accessory` +
+    /// `.nonactivatingPanel` and never frontmost, so without it AppKit silently
+    /// no-ops the activation.
     @discardableResult
     static func focus(bundleId: String) -> Bool {
         if let app = NSRunningApplication.runningApplications(withBundleIdentifier: bundleId).first {
-            return app.activate(options: [.activateAllWindows])
+            return app.activate(options: [.activateIgnoringOtherApps, .activateAllWindows])
         }
         return launch(bundleId: bundleId)
     }
