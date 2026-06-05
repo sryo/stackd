@@ -19,6 +19,7 @@ SWIFT_SOURCES=(
 
   Sources/Bridge.swift
   Sources/Channels.swift
+  Sources/Permissions.swift
   Sources/IPC.swift
   Sources/CLI.swift
   Sources/StackTemplates.swift

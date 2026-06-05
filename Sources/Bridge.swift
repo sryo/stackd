@@ -2401,6 +2401,15 @@ final class Bridge: NSObject, WKScriptMessageHandler {
     private static let dispatch: [String: Primitive] =
         Dictionary(uniqueKeysWithValues: primitives.map { ($0.type, $0) })
 
+    /// Every permission string declared by a `.sync(...)`, `.custom(...)`,
+    /// `.ax(...)`, or `.syncBridge(...)` registration in `primitives`.
+    /// `Tests/PermissionsRegistryTests.swift` asserts this is a subset of
+    /// `Permissions.all` — adding a new primitive with a permission not in
+    /// the canonical registry fails CI before the commit lands. Same-commit
+    /// guard for the doctor-allowlist rule (see CLAUDE.md).
+    static let primitivePermissions: Set<String> =
+        Set(primitives.compactMap { $0.permission })
+
     /// Dispatch to a JS global handler with pre-formatted JS argument
     /// strings. `handler` is the global property name (e.g. "__sd_fs_event",
     /// "onHotkey_foo", a user-supplied callback name); we look it up via

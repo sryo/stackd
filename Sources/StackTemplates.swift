@@ -268,17 +268,10 @@ enum StackDoctor {
         }
 
         if let perms = dict["permissions"] as? [String] {
-            let known: Set<String> = [
-                "battery", "mouse", "appearance", "input", "net", "audio", "display",
-                "media", "settings", "fs", "pasteboard", "proc", "events", "apps",
-                "icons", "ax", "windows", "spaces", "menubar", "menubar.item", "menu",
-                "app", "defaults", "caffeinate", "notify", "location", "usb",
-                "camera", "broadcasts", "host", "applescript", "sound", "nlp",
-                "touchdevice", "displayLink", "httpserver", "vision", "sqlite",
-                "cursor", "overlay", "shortcuts",
-                "spotlight", "speech", "calendar", "thumbnails", "update",
-                "bonjour", "privacy"
-            ]
+            // Canonical allowlist lives in `Sources/Permissions.swift`. Same
+            // source feeds `ChannelInference` and is cross-validated against
+            // `Bridge.primitivePermissions` by `PermissionsRegistryTests`.
+            let known = Permissions.all
             for p in perms where !known.contains(p) {
                 print("⚠️  \(dirName): unknown permission '\(p)' — typo? Known: \(known.sorted().joined(separator: ", "))")
                 issues += 1

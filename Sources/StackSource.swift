@@ -82,22 +82,11 @@ struct StackSource {
 /// should require visible opt-in.
 enum ChannelInference {
     /// Permissions inferred by identity match — `sd.<name>.*` anywhere in
-    /// the source implies the permission. Includes every single-token
-    /// permission in the StackDoctor allowlist. Drop here when adding a
-    /// new identity-named permission; composites stay out.
-    private static let topLevelChannels: [String] = [
-        // Read-only channel signals
-        "battery", "mouse", "appearance", "caffeinate",
-        "sensors", "location", "usb", "camera", "touchdevice", "displayLink",
-        // Composite top-level (RPC + channel under one namespace)
-        "app", "windows", "input", "net", "audio", "display", "media",
-        "pasteboard", "apps", "spaces", "host", "calendar", "menubar", "privacy",
-        // Pure RPC namespaces — identity-named permission
-        "fs", "proc", "applescript", "notify", "settings", "defaults",
-        "broadcasts", "ax", "spotlight", "speech", "vision", "nlp", "bonjour",
-        "httpserver", "sqlite", "update", "cursor", "overlay", "shortcuts",
-        "sound", "icons", "thumbnails", "events", "menu"
-    ]
+    /// the source implies the permission. Derived from `Permissions.inferable`
+    /// (which is `Permissions.all` minus composites like `menubar.item`).
+    /// Composites stay out because they require explicit opt-in — see the
+    /// header doc on `Permissions.inferable`.
+    private static let topLevelChannels: [String] = Permissions.inferableSorted
 
     /// Sub-path entries are kept as an extension hook for permissions whose
     /// name doesn't match their `sd.` namespace (today: none — composite
