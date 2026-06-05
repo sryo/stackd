@@ -4,7 +4,9 @@ import CoreAudio  // AudioDeviceID — used by sd.audio.setDefaultDevice
 
 final class Bridge: NSObject, WKScriptMessageHandler {
     weak var webView: WKWebView?
-    fileprivate var stackId: String = ""
+    // Widened from fileprivate to internal so BridgeSQLite.swift's
+    // sqlite.open closure can build the default per-stack data/ path.
+    var stackId: String = ""
     private var permissions: [String] = []
     // Per-channel JSON dedupe cache, keyed by the channel name used in
     // push(channel:json:). Every startXxx() reads + writes via this dict so
@@ -50,35 +52,48 @@ final class Bridge: NSObject, WKScriptMessageHandler {
     // JS-bound Carbon hotkeys: id → Token. Each Token's cancel removes the
     // Carbon registration; scope drains them on unload too. The JS side keeps
     // its own map keyed by the same id so __sd_hotkey_fire can find the callback.
-    fileprivate var hotkeyTokens: [Int: Token] = [:]
-    fileprivate var nextHotkeyId: Int = 1
+    // Widened from fileprivate to internal so BridgeHotkey.swift's
+    // hotkey.bind / .unbind closures can mint and release Carbon registrations.
+    var hotkeyTokens: [Int: Token] = [:]
+    var nextHotkeyId: Int = 1
     // JS-bound DN observers: id → Token. Scope drains them on unload.
-    fileprivate var broadcastTokens: [Int: Token] = [:]
-    fileprivate var nextBroadcastId: Int = 1
+    // Widened from fileprivate to internal so BridgeBroadcasts.swift's
+    // broadcasts.observe / .unobserve closures can mint and release DN observers.
+    var broadcastTokens: [Int: Token] = [:]
+    var nextBroadcastId: Int = 1
     // JS-bound URL-scheme handlers: id → Token. Each Token removes this
     // stack's subscriber from the per-scheme SchemeRouter bucket; scope
     // drains them on unload so reloading a stack doesn't accumulate
     // duplicate handlers for the same scheme.
-    fileprivate var urlHandlerTokens: [Int: Token] = [:]
-    fileprivate var nextURLHandlerId: Int = 1
+    // Widened from fileprivate to internal so BridgeURLHandler.swift's
+    // urlhandler.register / .unregister closures can mint and release
+    // per-scheme subscribers.
+    var urlHandlerTokens: [Int: Token] = [:]
+    var nextURLHandlerId: Int = 1
     // sd.overlay handles: id → (handle, displayLink subscription token).
     // Each handle owns a borderless NSPanel + WKWebView pinned to a foreign
     // target wid; the token drives per-vsync reposition + sd.target push via
     // DisplayLinkObserver. Scope drains both on unload (detach closes the
     // panel, token cancel removes the subscription).
-    fileprivate var overlayHandles: [Int: OverlayHandle] = [:]
-    fileprivate var overlayTokens: [Int: Token] = [:]
-    fileprivate var nextOverlayId: Int = 1
+    // Widened from fileprivate to internal so BridgeOverlay.swift's
+    // overlay.attach / .setTarget / .eval / .detach closures can mint and
+    // release OverlayHandles.
+    var overlayHandles: [Int: OverlayHandle] = [:]
+    var overlayTokens: [Int: Token] = [:]
+    var nextOverlayId: Int = 1
     // Reserved for backpressure if a future overlay tick path becomes async
     // (e.g. snapshot-driven reposition). Currently the tick is synchronous —
     // setFrame + an evaluateJavaScript fire-and-forget — so this stays empty.
-    fileprivate var overlayInFlight: Set<Int> = []
+    var overlayInFlight: Set<Int> = []
     // Owned HTTP servers: serverId → Token (cancel = server.stop()).
     // Pending route requests waiting for sd.httpserver.respond() — keyed
     // by mint id, value is the NWConnection-side completion closure.
-    fileprivate var httpServerTokens: [Int: Token] = [:]
-    fileprivate var pendingHttpResponses: [Int: (HTTPResponse) -> Void] = [:]
-    fileprivate var nextHttpId: Int = 1
+    // Widened from fileprivate to internal so BridgeHTTP.swift's
+    // httpserver.serve / .stop / .respond closures can mint and release
+    // NWListener handles and look up pending response completions.
+    var httpServerTokens: [Int: Token] = [:]
+    var pendingHttpResponses: [Int: (HTTPResponse) -> Void] = [:]
+    var nextHttpId: Int = 1
     // Bonjour publish + browse handles. Both are long-lived Network.framework
     // primitives; the publish side owns an NWListener, the browse side an
     // NWBrowser. Stack unload drains both via scope (mirrors httpServerTokens).
@@ -130,7 +145,9 @@ final class Bridge: NSObject, WKScriptMessageHandler {
     // SQLite handles minted via sd.sqlite.open(). Tracked per-Bridge so the
     // scope drain on stack unload closes every connection — the underlying
     // SQLite.HandleStore is process-wide but the *ownership* is stack-scoped.
-    fileprivate var sqliteHandles: Set<Int> = []
+    // Widened from fileprivate to internal so BridgeSQLite.swift's
+    // sqlite.open / .close closures can mint and release SQLite handles.
+    var sqliteHandles: Set<Int> = []
     // Streamed proc invocations minted via sd.proc.stream(). cancel() sends
     // SIGTERM; the wrapped Process strongly retains the underlying task so
     // the terminationHandler still fires after unload. Scope drain SIGTERMs
@@ -782,6 +799,12 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         + Bridge.bonjourPrimitives()
         + Bridge.procPrimitives()
         + Bridge.caffeinatePrimitives()
+        + Bridge.sqlitePrimitives()
+        + Bridge.hotkeyPrimitives()
+        + Bridge.broadcastsPrimitives()
+        + Bridge.urlHandlerPrimitives()
+        + Bridge.overlayPrimitives()
+        + Bridge.httpServerPrimitives()
         + Bridge.inlinePrimitives()
 
     /// Every permission string declared by any primitive — `.sync(...)`,
@@ -1090,37 +1113,8 @@ final class Bridge: NSObject, WKScriptMessageHandler {
             }
         },
 
-        // ── SQLite ──────────────────────────────────────────────────────────
-        // Minimal libsqlite3 wrapper — open / exec / query / close. Default
-        // path lands under ~/stackd/stacks/<id>/data/ (sandbox-style); absolute
-        // paths and ~ paths pass through. Handles are integers minted by a
-        // process-wide store but ownership is per-Bridge so unload closes
-        // every connection. Permission: "sqlite".
-        .syncBridge("sqlite.open", permission: "sqlite") { b, body in
-            let path = body["path"] as? String ?? ""
-            let mode = body["mode"] as? String ?? "readwrite"
-            guard let result = SQLite.open(stackId: b.stackId, path: path, mode: mode) else {
-                return NSNull()
-            }
-            if let h = result["handle"] as? Int { b.sqliteHandles.insert(h) }
-            return result
-        },
-        .syncBridge("sqlite.exec", permission: "sqlite") { _, body in
-            SQLite.exec(
-                handle: body["handle"] as? Int ?? -1,
-                sql:    body["sql"]    as? String ?? "")
-        },
-        .syncBridge("sqlite.query", permission: "sqlite") { _, body in
-            SQLite.query(
-                handle: body["handle"] as? Int ?? -1,
-                sql:    body["sql"]    as? String ?? "",
-                params: body["params"] as? [Any] ?? [])
-        },
-        .syncBridge("sqlite.close", permission: "sqlite", denyValue: false) { b, body in
-            guard let h = body["handle"] as? Int else { return false }
-            b.sqliteHandles.remove(h)
-            return SQLite.close(handle: h)
-        },
+        // SQLite primitives (open / exec / query / close) →
+        // BridgeSQLite.swift (sqlitePrimitives()).
 
         // Proc primitives (exec / stream.start / stream.cancel) →
         // BridgeProc.swift (procPrimitives()).
@@ -1619,329 +1613,25 @@ final class Bridge: NSObject, WKScriptMessageHandler {
             MenubarItems.items()
         },
 
-        // ── Dynamic hotkey bind/unbind from JS ───────────────────────────────
-        // Static manifest hotkeys cover the common case; this lets palettes /
-        // modal stacks register transient chords on demand (Palette verb mode,
-        // ChoiceBox, ForceKeys). Returns the id on success, null on parse error.
-        // Gated on "hotkey" permission so dynamic registration is auditable
-        // (manifest hotkeys are already inspectable in stack.json).
-        .custom("hotkey.bind", permission: "hotkey") { bridge, body, requestId in
-            guard let spec = body["spec"] as? String else {
-                bridge.respond(requestId: requestId, value: NSNull()); return
-            }
-            // Optional skhd-style scoping. `mode` gates dispatch on the
-            // active HotkeyRegistry mode; `apps` whitelists the frontmost
-            // app's bundleID; `excludeApps` blacklists it. All nil = current
-            // always-on behavior. apps + excludeApps compose (both must pass).
-            let mode = body["mode"] as? String
-            let apps = body["apps"] as? [String]
-            let excludeApps = body["excludeApps"] as? [String]
-            let id = bridge.nextHotkeyId
-            bridge.nextHotkeyId += 1
-            let token = HotkeyRegistry.shared.bind(
-                spec: spec, mode: mode, apps: apps, excludeApps: excludeApps
-            ) { [weak bridge] in
-                // Fire on the same hop pattern as fireBang / fireHotkey — the
-                // Carbon callback already runs on main, but the eval has to be
-                // async to keep main from re-entering JS while a script is mid-flight.
-                guard let webView = bridge?.webView else { return }
-                DispatchQueue.main.async {
-                    webView.evaluateJavaScript("window.__sd_hotkey_fire && window.__sd_hotkey_fire(\(id));",
-                                               completionHandler: nil)
-                }
-            }
-            guard let token = token else {
-                bridge.respond(requestId: requestId, value: NSNull()); return
-            }
-            bridge.hotkeyTokens[id] = token
-            bridge.respond(requestId: requestId, value: id)
-        },
-        .syncBridge("hotkey.unbind", permission: "hotkey", denyValue: false) { b, body in
-            guard let id = body["id"] as? Int,
-                  let token = b.hotkeyTokens.removeValue(forKey: id) else { return false }
-            token.cancel()
-            return true
-        },
+        // Hotkey primitives (bind / unbind + mode.enter/exit/current) →
+        // BridgeHotkey.swift (hotkeyPrimitives()). Note: only the JS-bound
+        // runtime API moved — static manifest hotkey wiring still lives in
+        // StackHost (separate from sd.hotkey.bind).
 
-        // Modal keymaps (skhd). Entering a mode suppresses every binding
-        // declared for a different mode until exit; bindings with no mode
-        // declared (mode == nil) stay always-on so the chord that exits the
-        // mode itself can be expressed. Mode is GLOBAL — a single string
-        // shared across stacks, matching skhd's "the keyboard is one
-        // resource" model. Folded under the existing "hotkey" permission.
-        .sync("hotkey.mode.enter", permission: "hotkey", denyValue: false) { body in
-            guard let name = body["name"] as? String else { return false }
-            HotkeyRegistry.shared.enterMode(name)
-            return true
-        },
-        .sync("hotkey.mode.exit", permission: "hotkey", denyValue: false) { _ in
-            HotkeyRegistry.shared.exitMode()
-            return true
-        },
-        .sync("hotkey.mode.current", permission: "hotkey") { _ in
-            HotkeyRegistry.shared.currentMode
-        },
+        // Broadcasts primitives (observe / unobserve) →
+        // BridgeBroadcasts.swift (broadcastsPrimitives()).
 
-        // ── Generic NSDistributedNotificationCenter observer ─────────────────
-        // Complements Caffeinate (which hard-codes screenIsLocked / screenIsUnlocked):
-        // here the stack picks the notification name. Same mint-id + window-global
-        // fire pattern as hotkey.bind. Permission: "broadcasts".
-        .custom("broadcasts.observe", permission: "broadcasts") { bridge, body, requestId in
-            guard let name = body["name"] as? String else {
-                bridge.respond(requestId: requestId, value: NSNull()); return
-            }
-            let id = bridge.nextBroadcastId
-            bridge.nextBroadcastId += 1
-            let token = Broadcasts.observe(name: name) { [weak bridge] payload in
-                guard let webView = bridge?.webView else { return }
-                let json = Bridge.jsonify(payload)
-                DispatchQueue.main.async {
-                    webView.evaluateJavaScript("window.__sd_broadcast_fire && window.__sd_broadcast_fire(\(id), \(json));",
-                                               completionHandler: nil)
-                }
-            }
-            bridge.broadcastTokens[id] = token
-            bridge.respond(requestId: requestId, value: id)
-        },
-        .syncBridge("broadcasts.unobserve", permission: "broadcasts", denyValue: false) { b, body in
-            guard let id = body["id"] as? Int,
-                  let t = b.broadcastTokens.removeValue(forKey: id) else { return false }
-            t.cancel()
-            return true
-        },
-
-        // ── Custom URL scheme handler ──────────────────────────────────────
-        // Register a callback for `<scheme>://…` URLs opened by other apps.
-        // NSAppleEventManager's GURL handler is installed lazily on first
-        // subscribe and stays for the daemon lifetime; per-stack subscribers
-        // live in a SchemeRouter bucket and drain on stack unload.
-        //
-        // Limitation: macOS only ROUTES a custom scheme to stackd if the
-        // daemon's Info.plist declares it under CFBundleURLTypes. Today the
-        // daemon ships as a plain `.build/stackd` binary (no Info.plist),
-        // so the API surface works but URL events won't actually arrive
-        // until stackd ships as an `.app` bundle with the scheme declared.
-        // See Sources/DataSources/URLHandler.swift for the rationale.
-        //
-        // Same mint-id + window-global fire pattern as broadcasts.observe.
-        // Permission: "urlhandler".
-        .custom("urlhandler.register", permission: "urlhandler") { bridge, body, requestId in
-            guard let scheme = body["scheme"] as? String, !scheme.isEmpty else {
-                bridge.respond(requestId: requestId, value: NSNull()); return
-            }
-            let id = bridge.nextURLHandlerId
-            bridge.nextURLHandlerId += 1
-            let token = URLHandler.observe(scheme: scheme) { [weak bridge] payload in
-                guard let webView = bridge?.webView else { return }
-                let json = Bridge.jsonify(payload)
-                DispatchQueue.main.async {
-                    webView.evaluateJavaScript("window.__sd_urlhandler_fire && window.__sd_urlhandler_fire(\(id), \(json));",
-                                               completionHandler: nil)
-                }
-            }
-            bridge.urlHandlerTokens[id] = token
-            bridge.respond(requestId: requestId, value: id)
-        },
-        .syncBridge("urlhandler.unregister", permission: "urlhandler", denyValue: false) { b, body in
-            guard let id = body["id"] as? Int,
-                  let t = b.urlHandlerTokens.removeValue(forKey: id) else { return false }
-            t.cancel()
-            return true
-        },
+        // URL-handler primitives (register / unregister) →
+        // BridgeURLHandler.swift (urlHandlerPrimitives()).
 
         // Caffeinate primitives (assert / release) → BridgeCaffeinate.swift
         // (caffeinatePrimitives()).
 
-        // ── Overlay (WebKit overlay primitive) ─────────────────────────────
-        // Attach a borderless click-through NSPanel + WKWebView pinned to a
-        // target window we don't own. The stack supplies {html, css?, js?};
-        // per vsync we reposition the panel to SLSGetWindowBounds(targetWID)
-        // and push `window.sd.target = {x,y,w,h}` into the overlay's WebView.
-        // The daemon is observe + set only — no CGContext drawing, no spec
-        // DSL. Rendering is plain WebKit. Permission: "overlay".
-        .custom("overlay.attach", permission: "overlay") { bridge, body, requestId in
-            DispatchQueue.main.async { [weak bridge] in
-                guard let bridge = bridge,
-                      let wid = body["targetId"] as? Int else {
-                    bridge?.respond(requestId: requestId, value: NSNull()); return
-                }
-                let html = body["html"] as? String ?? ""
-                let css  = body["css"]  as? String ?? ""
-                let js   = body["js"]   as? String ?? ""
-                let id = bridge.nextOverlayId
-                bridge.nextOverlayId += 1
-                guard let handle = Overlay.attach(
-                    targetID: CGWindowID(wid), id: id,
-                    html: html, css: css, js: js
-                ) else {
-                    bridge.respond(requestId: requestId, value: NSNull()); return
-                }
-                bridge.overlayHandles[id] = handle
+        // Overlay primitives (attach / setTarget / eval / detach) →
+        // BridgeOverlay.swift (overlayPrimitives()).
 
-                // Vsync tick → reposition + sd.target push. We subscribe to
-                // the shared DisplayLinkObserver (also drives sd.displayLink)
-                // so multiple overlays share one CVDisplayLink —
-                // RefCountedObserver handles install/teardown.
-                let token = DisplayLinkObserver.shared.subscribe { [weak bridge] in
-                    guard let bridge = bridge,
-                          let h = bridge.overlayHandles[id] else { return }
-                    // Target gone or hidden (user closed / minimized /
-                    // cmd-H'd the underlying window mid-overlay): hide
-                    // the panel and bail. Without this, the panel stayed
-                    // drawn at lastFrame after the target vanished — a
-                    // ghost border floating in space. Show it again on
-                    // the next tick where the target returns (e.g. user
-                    // un-minimizes).
-                    guard Overlay.isOrderedIn(h.targetWID),
-                          let frame = Overlay.bounds(of: h.targetWID) else {
-                        if h.panel.isVisible { h.panel.orderOut(nil) }
-                        return
-                    }
-                    if !h.panel.isVisible { h.panel.orderFrontRegardless() }
-                    h.tick(targetFrame: frame)
-                }
-                bridge.overlayTokens[id] = token
-                bridge.respond(requestId: requestId, value: id)
-            }
-        },
-        // Retarget an existing overlay at a new window without tearing it
-        // down. Used by overlay-border to keep one overlay across the
-        // session and just move/resize it on focus change — the prior
-        // detach-then-attach cycle produced ghost borders when detach
-        // didn't complete before the next attach ran.
-        .syncBridge("overlay.setTarget", permission: "overlay", denyValue: false) { b, body in
-            guard let id = body["id"] as? Int,
-                  let wid = body["targetId"] as? Int,
-                  let handle = b.overlayHandles[id] else { return false }
-            if Thread.isMainThread {
-                handle.setTarget(CGWindowID(wid))
-            } else {
-                DispatchQueue.main.sync { handle.setTarget(CGWindowID(wid)) }
-            }
-            return true
-        },
-        // Evaluate arbitrary JS in the overlay's WebView. Pairs with
-        // setTarget so the stack can update the overlay's appearance
-        // (color, radius, theme) when retargeting. The overlay's WebView
-        // is otherwise opaque to the host stack — no postMessage channel.
-        .syncBridge("overlay.eval", permission: "overlay", denyValue: false) { b, body in
-            guard let id = body["id"] as? Int,
-                  let js = body["js"] as? String,
-                  let handle = b.overlayHandles[id] else { return false }
-            if Thread.isMainThread {
-                handle.evaluate(js)
-            } else {
-                DispatchQueue.main.sync { handle.evaluate(js) }
-            }
-            return true
-        },
-        // Tear down: cancel the displayLink subscription, then close the
-        // overlay NSPanel. Detaching does NOT touch the target window.
-        .syncBridge("overlay.detach", permission: "overlay", denyValue: false) { b, body in
-            guard let id = body["id"] as? Int else { return false }
-            if let token = b.overlayTokens.removeValue(forKey: id) { token.cancel() }
-            if let handle = b.overlayHandles.removeValue(forKey: id) {
-                // Synchronous teardown — the JS-side await must not resolve
-                // until the NSPanel is actually gone. The old async path
-                // returned success while the panel was still onscreen, so
-                // a follow-up attach (focus change, hot-reload) produced
-                // two overlays visible at the same time. handle.detach is
-                // already main-thread-safe (it sync-hops if needed); we
-                // sync-hop here too rather than fire-and-forget.
-                if Thread.isMainThread {
-                    handle.detach()
-                } else {
-                    DispatchQueue.main.sync { handle.detach() }
-                }
-            }
-            b.overlayInFlight.remove(id)
-            return true
-        },
-
-        // ── HTTP server ─────────────────────────────────────────────────────
-        // Long-running Network.framework listener owned by the stack. Every
-        // request fans out to JS via __sd_http_request(serverId, requestId,
-        // {method,path,query,headers,body}). JS replies with
-        // sd.httpserver.respond(reqId, {status,headers,body}). Stacks own all
-        // dispatch logic — route matching, CORS headers, Content-Type — in JS.
-        // Loopback-only unless bindHost === "0.0.0.0". Permission: "httpserver".
-        .custom("httpserver.serve", permission: "httpserver") { bridge, body, requestId in
-            let port = UInt16((body["port"] as? Int) ?? 0)
-            let bindHost = body["bindHost"] as? String ?? "127.0.0.1"
-            let bonjourType: String? = (body["bonjour"] as? [String: Any])?["type"] as? String
-            let bonjourName: String? = (body["bonjour"] as? [String: Any])?["name"] as? String
-
-            let serverId = bridge.nextHttpId
-            bridge.nextHttpId += 1
-            do {
-                let server = try HTTPServer(
-                    port: port,
-                    bindHost: bindHost,
-                    bonjourType: bonjourType,
-                    bonjourName: bonjourName
-                ) { [weak bridge] req, complete in
-                    guard let bridge = bridge else {
-                        complete(HTTPResponse(status: 503)); return
-                    }
-                    DispatchQueue.main.async {
-                        let reqId = bridge.nextHttpId
-                        bridge.nextHttpId += 1
-                        bridge.pendingHttpResponses[reqId] = complete
-                        let payload: [String: Any] = [
-                            "method":  req.method,
-                            "path":    req.path,
-                            "query":   req.query,
-                            "headers": req.headers,
-                            "body":    req.body
-                        ]
-                        let json = Bridge.jsonify(payload)
-                        bridge.webView?.evaluateJavaScript(
-                            "window.__sd_http_request && window.__sd_http_request(\(serverId), \(reqId), \(json));",
-                            completionHandler: nil
-                        )
-                    }
-                }
-                server.start()
-                let token = Token { server.stop() }
-                bridge.httpServerTokens[serverId] = token
-                bridge.respond(requestId: requestId, value: serverId)
-            } catch {
-                FileHandle.standardError.write(Data("stackd: httpserver bind failed on :\(port) — \(error)\n".utf8))
-                bridge.respond(requestId: requestId, value: NSNull())
-            }
-        },
-        .syncBridge("httpserver.stop", permission: "httpserver", denyValue: false) { b, body in
-            guard let id = body["id"] as? Int,
-                  let token = b.httpServerTokens.removeValue(forKey: id) else { return false }
-            token.cancel()
-            return true
-        },
-        // No permission gate on respond — sending a reply to an in-flight
-        // request the stack already accepted is always safe. Without this
-        // exemption, manifest authors would have to remember "httpserver"
-        // on the respond side too, which is friction the API doesn't need.
-        .syncBridge("httpserver.respond", permission: nil, denyValue: false) { b, body in
-            guard let reqId = body["reqId"] as? Int,
-                  let complete = b.pendingHttpResponses.removeValue(forKey: reqId) else {
-                return false
-            }
-            var response = HTTPResponse()
-            response.status  = body["status"] as? Int ?? 200
-            response.headers = body["headers"] as? [String: String] ?? [:]
-            let raw = body["body"] as? String ?? ""
-            // Stacks opt into binary by passing bodyEncoding: "base64" — typical
-            // pairing is sd.fs.read(path, { encoding: "base64" }) → forward the
-            // string straight through. Anything else (or missing) treats body as
-            // a UTF-8 string, matching the original String-only contract.
-            if (body["bodyEncoding"] as? String) == "base64",
-               let data = Data(base64Encoded: raw, options: [.ignoreUnknownCharacters]) {
-                response.bodyBytes = data
-            } else {
-                response.body = raw
-            }
-            complete(response)
-            return true
-        },
+        // HTTP server primitives (serve / stop / respond) →
+        // BridgeHTTP.swift (httpServerPrimitives()).
 
         // Bonjour primitives (publish / publish.stop / browse.start /
         // browse.stop) → BridgeBonjour.swift (bonjourPrimitives()).

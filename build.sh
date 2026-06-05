@@ -20,12 +20,18 @@ SWIFT_SOURCES=(
   Sources/Bridge.swift
   Sources/BridgeAudio.swift
   Sources/BridgeBonjour.swift
+  Sources/BridgeBroadcasts.swift
   Sources/BridgeCaffeinate.swift
   Sources/BridgeCamera.swift
   Sources/BridgeDisplay.swift
   Sources/BridgeFS.swift
+  Sources/BridgeHTTP.swift
+  Sources/BridgeHotkey.swift
+  Sources/BridgeOverlay.swift
   Sources/BridgeProc.swift
+  Sources/BridgeSQLite.swift
   Sources/BridgeSearch.swift
+  Sources/BridgeURLHandler.swift
   Sources/Channels.swift
   Sources/Permissions.swift
   Sources/IPC.swift
