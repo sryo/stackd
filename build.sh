@@ -18,11 +18,13 @@ SWIFT_SOURCES=(
   Sources/RefCountedObserver.swift
 
   Sources/Bridge.swift
+  Sources/BridgeApps.swift
   Sources/BridgeAudio.swift
   Sources/BridgeAX.swift
   Sources/BridgeBonjour.swift
   Sources/BridgeBroadcasts.swift
   Sources/BridgeCaffeinate.swift
+  Sources/BridgeCalendar.swift
   Sources/BridgeCamera.swift
   Sources/BridgeDisplay.swift
   Sources/BridgeEvents.swift
@@ -30,6 +32,7 @@ SWIFT_SOURCES=(
   Sources/BridgeHTTP.swift
   Sources/BridgeHotkey.swift
   Sources/BridgeMenubar.swift
+  Sources/BridgeNLP.swift
   Sources/BridgeOverlay.swift
   Sources/BridgeProc.swift
   Sources/BridgeSQLite.swift

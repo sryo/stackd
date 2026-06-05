@@ -798,7 +798,10 @@ final class Bridge: NSObject, WKScriptMessageHandler {
     /// search) just to keep the diff legible — there's no behavioral
     /// significance to it.
     private static let primitives: [Primitive] =
-        Bridge.audioPrimitives()
+        Bridge.appsPrimitives()
+        + Bridge.calendarPrimitives()
+        + Bridge.nlpPrimitives()
+        + Bridge.audioPrimitives()
         + Bridge.fsPrimitives()
         + Bridge.spotlightPrimitives()
         + Bridge.speechPrimitives()
@@ -909,21 +912,8 @@ final class Bridge: NSObject, WKScriptMessageHandler {
             Sound.beep(); return true
         },
 
-        // NaturalLanguage — language ID, tokenization, lemmas, sentence
-        // similarity. similarity() returns 0 if the embedding model for the
-        // detected language isn't downloaded (English ships by default).
-        .sync("nlp.language", permission: "nlp") { body in
-            NLP.language(text: body["text"] as? String ?? "") as Any? ?? NSNull()
-        },
-        .sync("nlp.tokens", permission: "nlp") { body in
-            NLP.tokens(text: body["text"] as? String ?? "", unit: body["unit"] as? String ?? "word")
-        },
-        .sync("nlp.lemmas", permission: "nlp") { body in
-            NLP.lemmas(text: body["text"] as? String ?? "")
-        },
-        .sync("nlp.similarity", permission: "nlp") { body in
-            NLP.similarity(body["a"] as? String ?? "", body["b"] as? String ?? "")
-        },
+        // NLP primitives (language / tokens / lemmas / similarity) →
+        // BridgeNLP.swift (nlpPrimitives()).
 
         // Spotlight primitives (find / subscribe / subscribe.stop) →
         // BridgeSearch.swift (spotlightPrimitives()).
@@ -973,62 +963,8 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         // Camera primitives (frame / stream.start / stream.stop) →
         // BridgeCamera.swift (cameraPrimitives()).
 
-        // Calendar — read-only EventKit query. Triggers the Calendar TCC
-        // prompt on first use. `from` / `to` are epoch seconds; `calendarIds`
-        // optionally restricts to specific calendars (default = all).
-        // Returns [] on denial, never nil.
-        .custom("calendar.events", permission: "calendar") { bridge, body, requestId in
-            let from = (body["from"] as? Double) ?? 0
-            let to   = (body["to"]   as? Double) ?? 0
-            let ids  = body["calendarIds"] as? [String]
-            Calendar.events(from: from, to: to, calendarIds: ids) { [weak bridge] result in
-                bridge?.respond(requestId: requestId, value: result as Any? ?? [[String: Any]]())
-            }
-        },
-        .custom("calendar.list", permission: "calendar") { bridge, _, requestId in
-            Calendar.calendars { [weak bridge] result in
-                bridge?.respond(requestId: requestId, value: result as Any? ?? [[String: Any]]())
-            }
-        },
-        // Reminders — first call triggers the Reminders TCC prompt (separate
-        // bucket from Calendar's). `list` filters to specific reminder-list
-        // identifiers (EKCalendar.calendarIdentifier from sd.calendar.list
-        // returns event calendars only — reminder lists need their own
-        // future surface; for now pass nil to search all). `completed`:
-        // nil → both, false → only incomplete, true → only completed.
-        // Returns [] on denial, never nil.
-        .custom("calendar.reminders", permission: "calendar") { bridge, body, requestId in
-            let listIds   = body["list"]      as? [String]
-            let completed = body["completed"] as? Bool
-            Calendar.reminders(listIds: listIds, completed: completed) { [weak bridge] result in
-                bridge?.respond(requestId: requestId, value: result as Any? ?? [[String: Any]]())
-            }
-        },
-        // Create an event in `calendarId` (nil → default calendar for new
-        // events). Returns the new event's identifier on success, null on
-        // failure (denied access, missing calendar, save error). No new TCC
-        // prompt — the Calendar full-access tier already granted via events()
-        // covers writes too.
-        .custom("calendar.createEvent", permission: "calendar") { bridge, body, requestId in
-            let calId    = body["calendarId"] as? String
-            let title    = body["title"]      as? String ?? ""
-            let start    = (body["start"]     as? Double) ?? 0
-            let end      = (body["end"]       as? Double) ?? 0
-            let location = body["location"]   as? String
-            let notes    = body["notes"]      as? String
-            let allDay   = (body["allDay"]    as? Bool) ?? false
-            Calendar.createEvent(
-                calendarId: calId,
-                title:      title,
-                start:      start,
-                end:        end,
-                location:   location,
-                notes:      notes,
-                allDay:     allDay
-            ) { [weak bridge] id in
-                bridge?.respond(requestId: requestId, value: id as Any? ?? NSNull())
-            }
-        },
+        // Calendar primitives (events / list / reminders / createEvent) →
+        // BridgeCalendar.swift (calendarPrimitives()).
 
         // Privacy — "what's actively recording right now?" one-shot read.
         // Cross-references AVCaptureDevice.isInUseByAnotherApplication
@@ -1156,63 +1092,10 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         },
         .sync("cursor.position", permission: "cursor") { _ in Cursor.position() },
 
-        // Apps — Bool side-effect ops, deny → false.
-        .sync("apps.launch", permission: "apps", denyValue: false) { body in Apps.launch(bundleId: body["bundleId"] as? String ?? "") },
-        .sync("apps.focus",  permission: "apps", denyValue: false) { body in Apps.focus( bundleId: body["bundleId"] as? String ?? "") },
-        .sync("apps.kill",   permission: "apps", denyValue: false) { body in Apps.kill(  bundleId: body["bundleId"] as? String ?? "", force: body["force"] as? Bool ?? false) },
-        .sync("apps.hide",   permission: "apps", denyValue: false) { body in Apps.hide(  bundleId: body["bundleId"] as? String ?? "") },
-
-        // Curated AX readers on a pid (mirrors hs.application's menu /
-        // findMenuItem / selectMenuItem / visibleWindows / hide / unhide).
-        // All hop to main via `.ax` because they walk AXUIElement trees —
-        // same constraint that put windows.byId.cornerHints behind `.ax`.
-        // hide / unhide are pid-specific (the bundleId variant lives above
-        // as apps.hide); the JS surface routes `sd.apps.hide(pid)` → hideByPid.
-        .ax("apps.menu", permission: "apps") { _, body in
-            Apps.menu(pid: pid_t((body["pid"] as? Int) ?? 0))
-        },
-        .ax("apps.findMenuItem", permission: "apps") { _, body in
-            Apps.findMenuItem(
-                pid: pid_t((body["pid"] as? Int) ?? 0),
-                path: (body["path"] as? [String]) ?? []
-            )
-        },
-        .ax("apps.selectMenuItem", permission: "apps", denyValue: false) { _, body in
-            Apps.selectMenuItem(
-                pid: pid_t((body["pid"] as? Int) ?? 0),
-                path: (body["path"] as? [String]) ?? []
-            )
-        },
-        .ax("apps.visibleWindows", permission: "apps", denyValue: [[String: Any]]()) { _, body in
-            Apps.visibleWindows(pid: pid_t((body["pid"] as? Int) ?? 0))
-        },
-        .ax("apps.hideByPid", permission: "apps", denyValue: false) { _, body in
-            Apps.hide(pid: pid_t((body["pid"] as? Int) ?? 0))
-        },
-        .ax("apps.unhideByPid", permission: "apps", denyValue: false) { _, body in
-            Apps.unhide(pid: pid_t((body["pid"] as? Int) ?? 0))
-        },
-        // Per-pid window-set readers. Return CGWindowID(s); JS chains into
-        // sd.windows.byId.* from there. `.ax` (main-hop) because they walk
-        // the AX tree, same constraint as `visibleWindows` above.
-        .ax("apps.focusedWindow", permission: "apps") { _, body in
-            Apps.focusedWindow(pid: pid_t((body["pid"] as? Int) ?? 0)) as Any? ?? NSNull()
-        },
-        .ax("apps.mainWindow", permission: "apps") { _, body in
-            Apps.mainWindow(pid: pid_t((body["pid"] as? Int) ?? 0)) as Any? ?? NSNull()
-        },
-        .ax("apps.allWindows", permission: "apps", denyValue: [Int]()) { _, body in
-            Apps.allWindows(pid: pid_t((body["pid"] as? Int) ?? 0))
-        },
-        // Per-pid app state. Pure AppKit — `.sync` (no main-hop) because
-        // NSWorkspace.frontmostApplication / NSRunningApplication.isHidden
-        // are thread-safe AppKit reads with no AX gate.
-        .sync("apps.isFrontmost", permission: "apps", denyValue: false) { body in
-            Apps.isFrontmost(pid: pid_t((body["pid"] as? Int) ?? 0))
-        },
-        .sync("apps.isHidden", permission: "apps", denyValue: false) { body in
-            Apps.isHidden(pid: pid_t((body["pid"] as? Int) ?? 0))
-        },
+        // Apps primitives (launch / focus / kill / hide + menu / findMenuItem /
+        // selectMenuItem / visibleWindows / hideByPid / unhideByPid +
+        // focusedWindow / mainWindow / allWindows + isFrontmost / isHidden)
+        // → BridgeApps.swift (appsPrimitives()).
 
         // Curated AX surface for the system-wide focused text element.
         // Replaces the five-call sd.ax.{focused,attribute,parameterizedAttribute,
