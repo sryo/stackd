@@ -190,6 +190,21 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         return WKUserScript(source: source, injectionTime: .atDocumentEnd, forMainFrameOnly: true)
     }()
 
+    // Single source of truth for the channel → JS-path → permission table,
+    // injected as `window.__sd_channels` BEFORE api.js executes so the
+    // runtime's template engine can build its `__sdSignalPaths` map from
+    // the same Swift `Channels.all` list that drives `replayState()`.
+    //
+    // .atDocumentStart so it lands before `runtimeLoaderScript`'s dynamic
+    // import resolves the runtime module. Without the channels global,
+    // api.js falls back to an empty placeholder lookup and templates lose
+    // dependency tracking — there's a defensive console.warn in api.js if
+    // the global is missing, so a misconfigured runtime fails loud.
+    private static let channelsBootstrapScript: WKUserScript = {
+        let source = "window.__sd_channels = \(Channels.jsBootstrapJSON);"
+        return WKUserScript(source: source, injectionTime: .atDocumentStart, forMainFrameOnly: true)
+    }()
+
     /// Minimal CSS reset injected by default. `:where()` gives every selector
     /// inside zero specificity so any stack rule (specificity ≥ (0,0,1)) wins
     /// without authors having to override or know about cascade order. Authors
@@ -204,6 +219,7 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         ucc.add(self, name: "sd")
         ucc.add(self, name: "log")
         ucc.addUserScript(Bridge.consoleHookScript)
+        ucc.addUserScript(Bridge.channelsBootstrapScript)
         ucc.addUserScript(Bridge.runtimeLoaderScript)
         // Per-instance window.__sd_screen so items like spacenum + brightness
         // can target the screen they're rendered on. Injected at document
@@ -250,17 +266,23 @@ final class Bridge: NSObject, WKScriptMessageHandler {
             let inject = WKUserScript(source: source, injectionTime: .atDocumentEnd, forMainFrameOnly: true)
             ucc.addUserScript(inject)
         }
-        // CSS reset — wraps every rule in `:where()` so specificity is (0,0,0)
-        // and any stack rule wins naturally. Opposite cascade story from the
-        // padding block above on purpose: the reset is a sensible default the
-        // stack should easily override, not a daemon-owned setting like padding.
+        // CSS reset — wraps every rule in `:where()` AND inserts the <style>
+        // BEFORE the head's first child (rather than appending). Belt-and-
+        // suspenders: even at equal specificity (0,0,1), declaration order
+        // makes the stack rule win because it's parsed second. The previous
+        // `appendChild` left the reset AFTER the stack's <link>, so any
+        // (0,0,1) stack rule lost to the reset on cascade order — exactly
+        // wrong for "reset is a sensible default the stack should easily
+        // override." Opposite story from the padding block above on purpose.
         if injectReset {
             let source = """
             (function(){
               var s = document.createElement('style');
               s.setAttribute('data-sd', 'reset');
               s.textContent = \(Bridge.jsonify(Bridge.resetStyle));
-              (document.head || document.documentElement).appendChild(s);
+              var head = document.head || document.documentElement;
+              if (head.firstChild) head.insertBefore(s, head.firstChild);
+              else head.appendChild(s);
             })();
             """
             let inject = WKUserScript(source: source, injectionTime: .atDocumentEnd, forMainFrameOnly: true)
@@ -2415,55 +2437,19 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         FileHandle.standardError.write(Data("stackd: \(s)\n".utf8))
     }
 
-    // (permission, channel) tuples driving replayState. Same keys lastState
-    // is written under in startXxx — adding a new channel here is the only
-    // wiring needed for "ready" replay to find it.
-    private static let replayTable: [(permission: String, channel: String)] = [
-        ("battery",     "battery"),
-        ("mouse",       "mouse"),
-        ("app",         "frontApp"),
-        ("windows",     "focusedWindow"),
-        ("windows",     "windowsAll"),
-        ("windows",     "windowsChanged"),
-        ("appearance",  "appearance"),
-        ("input",       "inputLayout"),
-        ("net",         "netWifi"),
-        ("net",         "netLan"),
-        ("net",         "netPath"),
-        ("net",         "netThroughput"),
-        ("audio",       "audioOutput"),
-        ("audio",       "audioInput"),
-        ("display",     "displays"),
-        ("display",     "displaysChanged"),
-        ("media",       "media"),
-        ("calendar",    "calendarChanged"),
-        ("menubar",     "menubarItems"),
-        ("menubar",     "menubarChanged"),
-        ("pasteboard",  "pasteboard"),
-        ("apps",        "apps"),
-        ("spaces",      "spaces"),
-        ("caffeinate",  "caffeinate"),
-        ("sensors",     "sensors"),
-        ("location",    "location"),
-        ("usb",         "usb"),
-        ("camera",      "camera"),
-        ("host",        "hostLoad"),
-        ("touchdevice", "touchdevice"),
-        ("displayLink", "displayLink"),
-        // F15: granular per-event-type channels split out of the legacy
-        // focusedWindow / frontApp pumps. Same permissions as the union
-        // channels so stacks declaring "app" / "windows" pick them up
-        // automatically.
-        ("app",         "appActivated"),
-        ("windows",     "focusedChanged"),
-        ("windows",     "titleChanged"),
-    ]
-
+    // replayState iterates Channels.all (single source of truth shared with
+    // the JS-side __sdSignalPaths). For each replayable channel where the
+    // stack has the gating permission AND lastState[channel.name] exists,
+    // push the cached JSON so a newly-ready stack starts with current state.
+    //
+    // Iteration order matters — it's the firing order on stack ready. The
+    // registry preserves the historical replayTable order.
     private func replayState() {
-        for (permission, channel) in Bridge.replayTable {
-            guard permissions.contains(permission),
-                  let json = lastState[channel] else { continue }
-            push(channel: channel, json: json)
+        for ch in Channels.all {
+            guard ch.replayable,
+                  permissions.contains(ch.permission),
+                  let json = lastState[ch.name] else { continue }
+            push(channel: ch.name, json: json)
         }
     }
 

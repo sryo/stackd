@@ -88,6 +88,7 @@ TEST_SOURCES=(
   Tests/DisplaysChangedTests.swift
   Tests/MenubarChangedTests.swift
   Tests/ComputeDeltaTests.swift
+  Tests/ChannelsRegistryTests.swift
   Tests/main.swift
 )
 

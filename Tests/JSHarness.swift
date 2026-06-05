@@ -82,6 +82,13 @@ enum JSHarness {
         var setInterval = function(){ return 0; };
         var clearTimeout  = function(){};
         var clearInterval = function(){};
+        // Mirror the daemon-side injection of window.__sd_channels at
+        // document start. api.js's __sdSignalPaths IIFE reads this on
+        // module-load — without it, template-engine dependency tracking
+        // degrades to an empty path map and template tests fail. Shape
+        // matches `Channels.jsBootstrapJSON` exactly because both come
+        // from the same Swift source.
+        window.__sd_channels = \(Channels.jsBootstrapJSON);
         """
         ctx.evaluateScript(bootstrap)
         if let exc = ctx.exception {

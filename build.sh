@@ -18,6 +18,7 @@ SWIFT_SOURCES=(
   Sources/RefCountedObserver.swift
 
   Sources/Bridge.swift
+  Sources/Channels.swift
   Sources/IPC.swift
   Sources/CLI.swift
   Sources/StackTemplates.swift

@@ -2391,41 +2391,47 @@ sd.tpl  = sdTpl;
 // to. Path strings match what the expression author writes (e.g.
 // "windows.focused" for `{{ sd.windows.focused.title }}`). Longer paths are
 // matched first so "windows.focused" wins over "windows".
-const __sdSignalPaths = {
-  "battery":            sd.battery,
-  "mouse":              sd.mouse,
-  "appearance":         sd.appearance,
-  "app.frontmost":      sd.app.frontmost,
-  "app.activated":      sd.app.activated,
-  "windows.focused":    sd.windows.focused,
-  "windows.focusedChanged": sd.windows.focusedChanged,
-  "windows.titleChanged":   sd.windows.titleChanged,
-  "windows.all":        sd.windows.all,
-  "windows.changed":    sd.windows.changed,
-  "input.layout":       sd.input.layout,
-  "net.wifi":           sd.net.wifi,
-  "net.lan":            sd.net.lan,
-  "net.path":           sd.net.path,
-  "net.throughput":     sd.net.throughput,
-  "audio.output":       sd.audio.output,
-  "audio.input":        sd.audio.input,
-  "display.all":        sd.display.all,
-  "display.changed":    sd.display.changed,
-  "media.nowPlaying":   sd.media.nowPlaying,
-  "pasteboard.changed": sd.pasteboard.changed,
-  "apps.running":       sd.apps.running,
-  "apps.changed":       sd.apps.changed,
-  "spaces.all":         sd.spaces.all,
-  "caffeinate":         sd.caffeinate,
-  "displayLink":        sd.displayLink,
-  "host.load":          sd.host.load,
-  "sensors":            sd.sensors,
-  "touchdevice":        sd.touchdevice,
-  "location":           sd.location,
-  "usb":                sd.usb,
-  "camera":             sd.camera,
-  "calendar.observe":   sd.calendar.observe,
-};
+//
+// The list itself is owned daemon-side in `Sources/Channels.swift` and
+// injected into the page as `window.__sd_channels` at document start
+// (BEFORE this module loads). That single source of truth also drives the
+// Swift-side `Bridge.replayState()` snapshot replay — adding a new channel
+// is a one-place edit in Channels.swift; both sides pick it up. Pre-2026-06-04
+// these two tables drifted whenever a primitive author touched one and
+// forgot the other.
+//
+// Resolving each jsPath to its `sd.<x>.<y>` signal walks the dotted path at
+// module-load time. A path that doesn't resolve is dropped (logs once) —
+// usually means the channel was registered Swift-side but the JS API hasn't
+// shipped its public `sd.foo` surface yet.
+function __sdResolvePath(root, path) {
+  const parts = path.split(".");
+  let cur = root;
+  for (const p of parts) {
+    if (cur == null) return undefined;
+    cur = cur[p];
+  }
+  return cur;
+}
+
+const __sdSignalPaths = (() => {
+  const out = Object.create(null);
+  const channels = (typeof window !== "undefined" && window.__sd_channels) || [];
+  if (!channels.length) {
+    console.warn("[stackd] window.__sd_channels missing — template engine dependency tracking disabled");
+    return out;
+  }
+  for (const ch of channels) {
+    if (!ch || !ch.jsPath) continue;
+    const sig = __sdResolvePath(sd, ch.jsPath);
+    if (sig == null) {
+      console.warn("[stackd] channel registered without JS surface:", ch.jsPath);
+      continue;
+    }
+    out[ch.jsPath] = sig;
+  }
+  return out;
+})();
 
 // Sort once, longer-first, so "windows.focused" matches before "windows" —
 // otherwise the shorter prefix would always win and the longer path's signal
