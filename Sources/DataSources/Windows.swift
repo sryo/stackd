@@ -1729,7 +1729,11 @@ private enum SkyLightSpaces {
 
 enum Spaces {
     /// Per-screen spaces info, keyed by NSScreen UUID:
-    ///   { uuid: { spaces: [id, ...], active: id|null, isFullscreen: bool } }
+    ///   { uuid: { displayID: int|undefined, spaces: [id, ...],
+    ///            active: id|null, isFullscreen: bool } }
+    /// displayID is the CGDirectDisplayID for the screen — pairs with the
+    /// `display.id` field on sd.windows.focused (L2) and sd.mouse (R5.3),
+    /// so consumers route by display id directly instead of joining UUIDs.
     static func all() -> [String: Any] {
         guard let copy = SkyLightSpaces.copyManagedSpaces,
               let getType = SkyLightSpaces.spaceGetType else {
@@ -1743,6 +1747,19 @@ enum Spaces {
         // the "Displays Have Separate Spaces" preference is off. We rebuild a
         // UUID-keyed dict so the JS side is uniform regardless of that pref.
         let mainScreenUUID = NSScreen.screens.first.flatMap { screenUUID(for: $0) }
+
+        // Per-screen displayID lookup so each entry can carry the CG display
+        // id alongside the UUID key. Stacks routing by sd.windows.focused.
+        // display.id (L2 enrichment) avoid a join against sd.display.all to
+        // get the screen's identity — they index sd.spaces.all entries by
+        // matching displayID directly.
+        var displayIDByUUID: [String: Int] = [:]
+        for screen in NSScreen.screens {
+            let id = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID ?? 0
+            if let uuid = screenUUID(for: screen), id != 0 {
+                displayIDByUUID[uuid] = Int(id)
+            }
+        }
 
         var out: [String: Any] = [:]
         for disp in displays {
@@ -1765,11 +1782,13 @@ enum Spaces {
                 isFullscreen = getType(cid, a) == 4
             }
 
-            out[ident] = [
+            var entry: [String: Any] = [
                 "spaces":       ids.map { NSNumber(value: $0) },
                 "active":       active.map { NSNumber(value: $0) } as Any? ?? NSNull(),
                 "isFullscreen": isFullscreen
             ]
+            if let did = displayIDByUUID[ident] { entry["displayID"] = did }
+            out[ident] = entry
         }
         return out
     }
