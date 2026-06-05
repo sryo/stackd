@@ -22,7 +22,7 @@ It's the successor to a Hammerspoon config that grew too tall. The native parts 
 - [Writing a stack](#writing-a-stack) — templates, scripts, manifest fields
 - [System data (`sd.*`)](#system-data-sd) — what stacks can read and do
 - [CLI](#cli) · [Hot reload](#hot-reload) · [Examples](#examples)
-- [Status](#status) · [Project layout](#project-layout) · [Lineage](#lineage)
+- [Status](#status) · [Project layout](#project-layout) · [Foundations](#foundations) · [Refusals](#refusals)
 
 ## Install
 
@@ -272,6 +272,8 @@ The CLI talks to the running daemon over a Unix socket at `~/Library/Application
 
 FSEvents watches `~/stackd/stacks/`, `~/stackd/defaults.json`, and the runtime. Any save triggers a reload within ~300ms. No build step. Edit a CSS file, save, see the change.
 
+When a stack's HTML fails to load, the panel stays visible-but-empty instead of vanishing — easier to spot than a silent hide. `stackd doctor` validates every manifest in `~/stackd/stacks/`. The daemon logs to stderr; StackScope drains in reverse on unload, so a leak surfaces in teardown order.
+
 ## Examples
 
 `examples/` ships ~30 working stacks covering most of the surface above. A few starting points:
@@ -321,6 +323,10 @@ Open items: STT (`sd.speech.listen`), AirPods battery, camera stream, calendar w
   daemon.pid                  ← singleton guard
 ```
 
-## Lineage
+## Foundations
 
-`hs.canvas` and `hs.drawing` from Hammerspoon. `--item` and `--message` from SketchyBar. `stacks` from HyperCard. `bangs` from LiteStep. `signals` from Solid/Preact. `defaults.json` from SketchyBar's `--default`. The private SPI vendoring pattern (DisplayServices, MediaRemote, SkyLight, MultitouchSupport) from every macOS power-user tool that ever wanted to do something Apple didn't bless.
+The substrate is whatever macOS already ships — Accessibility, IOKit, CGEvent, FSEvents, WebKit, CoreAudio, MultitouchSupport, AVFoundation, EventKit, Vision, NaturalLanguage. When Apple has a public API, stackd uses it; when only an SPI exists (DisplayServices, MediaRemote, SkyLight, MultitouchSupport), the header is vendored explicitly so the dependency is visible in the source tree. No kernel extensions, no privileged helpers, no daemons that aren't this one.
+
+## Refusals
+
+stackd never phones home, has no analytics, no auto-updater, no central stack registry, and no opaque binary stack format — a stack is a folder you can read and edit. The daemon never becomes frontmost (`.nonactivatingPanel` only, no `NSApp.activate` calls). Permission prompts (Accessibility, Calendar, Location, Camera) are the OS's; stackd doesn't broker or proxy them.
