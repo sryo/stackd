@@ -18,6 +18,9 @@ SWIFT_SOURCES=(
   Sources/RefCountedObserver.swift
 
   Sources/Bridge.swift
+  Sources/BridgeAudio.swift
+  Sources/BridgeFS.swift
+  Sources/BridgeSearch.swift
   Sources/Channels.swift
   Sources/Permissions.swift
   Sources/IPC.swift

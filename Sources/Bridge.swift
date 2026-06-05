@@ -35,7 +35,9 @@ final class Bridge: NSObject, WKScriptMessageHandler {
     private var lastMenubarByKey: [String: [String: Any]] = [:]
     private var menubarChangedPrimed: Bool = false
     private var settings: StackSettings?
-    private var fsWatches: [Int: FSWatch] = [:]
+    // Widened from private to internal so BridgeFS.swift's fs.watch.start /
+    // fs.watch.stop closures can mint and release watch handles.
+    var fsWatches: [Int: FSWatch] = [:]
     private var handlesBangs: Set<String> = []
     private let axHandles = AX.HandleStore()
     // Outstanding sd.menubar.suppress() tokens (LIFO). sd.menubar.restore()
@@ -95,8 +97,11 @@ final class Bridge: NSObject, WKScriptMessageHandler {
     // same name from the returned handle id and subscribes via the standard
     // channel() signal machinery. Stack unload drains via scope (mirrors
     // bonjourBrowseHandles).
-    fileprivate var spotlightLiveHandles: [Int: Token] = [:]
-    fileprivate var nextSpotlightLiveId: Int = 1
+    // Widened from fileprivate to internal so BridgeSearch.swift's
+    // spotlight.subscribe / spotlight.subscribe.stop closures can mint and
+    // release LiveQuery handles.
+    var spotlightLiveHandles: [Int: Token] = [:]
+    var nextSpotlightLiveId: Int = 1
     // Long-lived sd.camera.stream() handles. Each entry owns a Camera.Stream
     // (AVCaptureSession + sample-buffer delegate) and a Token whose cancel
     // calls stream.stop() — same shape as bonjourBrowseHandles. Per-handle
@@ -112,8 +117,11 @@ final class Bridge: NSObject, WKScriptMessageHandler {
     // synthesized name "speech:listen:<id>" — JS sd.speech.listen() builds
     // the same name from the returned handle id and subscribes via the
     // standard channel() signal machinery (mirrors bonjour.browse).
-    fileprivate var speechListenHandles: [Int: Token] = [:]
-    fileprivate var nextSpeechListenId: Int = 1
+    // Widened from fileprivate to internal so BridgeSearch.swift's
+    // speech.listen.start / .stop / .cancel closures can mint and release
+    // Listener handles.
+    var speechListenHandles: [Int: Token] = [:]
+    var nextSpeechListenId: Int = 1
     // SQLite handles minted via sd.sqlite.open(). Tracked per-Bridge so the
     // scope drain on stack unload closes every connection — the underlying
     // SQLite.HandleStore is process-wide but the *ownership* is stack-scoped.
@@ -670,7 +678,13 @@ final class Bridge: NSObject, WKScriptMessageHandler {
     private static let pushLogThrottleSec: TimeInterval = 5.0
 
     /// JSON-encode a value (or "null") and fire window.__sd_response(requestId, value).
-    fileprivate func respond(requestId: Int, value: Any?) {
+    ///
+    /// Widened from fileprivate to internal so primitive groups extracted into
+    /// their own files (BridgeAudio.swift, BridgeFS.swift, BridgeSearch.swift)
+    /// can still call `bridge.respond(...)` from inside their `.custom` /
+    /// `.syncBridge` closures. The method is still module-internal — no public
+    /// API surface change.
+    func respond(requestId: Int, value: Any?) {
         guard let webView = webView else { return }
         let json = value.map { Bridge.jsonify($0) } ?? "null"
         let script = "window.__sd_response && window.__sd_response(\(requestId), \(json));"
@@ -733,7 +747,40 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         }
     }
 
-    private static let primitives: [Primitive] = [
+    /// Composed at load time from a handful of extracted group builders
+    /// (`BridgeAudio.swift`, `BridgeFS.swift`, `BridgeSearch.swift`) plus
+    /// every primitive that's still inline below. The group builders take
+    /// no arguments and capture no Bridge state — each `.custom` /
+    /// `.syncBridge` entry receives the calling Bridge through the
+    /// dispatch shim, identical to the inline shape.
+    ///
+    /// Ordering note: dispatch is a `[String: Primitive]` Dictionary built
+    /// from this list, so the array order doesn't affect runtime resolution.
+    /// Group concatenation order is alphabetical by domain (audio → fs →
+    /// search) just to keep the diff legible — there's no behavioral
+    /// significance to it.
+    private static let primitives: [Primitive] =
+        Bridge.audioPrimitives()
+        + Bridge.fsPrimitives()
+        + Bridge.spotlightPrimitives()
+        + Bridge.speechPrimitives()
+        + Bridge.inlinePrimitives()
+
+    /// Every permission string declared by any primitive — `.sync(...)`,
+    /// `.custom(...)`, `.ax(...)`, or `.syncBridge(...)` registration in
+    /// `primitives` (now composed across BridgeAudio/FS/Search + inline).
+    /// `Tests/PermissionsRegistryTests.swift` asserts this is a subset of
+    /// `Permissions.all` — adding a new primitive with a permission not in
+    /// the canonical registry fails CI before the commit lands. Same-commit
+    /// guard for the doctor-allowlist rule (see CLAUDE.md).
+    static let primitivePermissions: Set<String> =
+        Set(primitives.compactMap { $0.permission })
+
+    /// Every primitive that wasn't pulled into a `Bridge<Group>.swift`
+    /// file yet. Lives as a method (not a let) so the source order can
+    /// stay roughly historical — moving them out one group at a time
+    /// won't reshuffle the rest of the table.
+    private static func inlinePrimitives() -> [Primitive] { [
         // Bootstrap
         .custom("ready") { bridge, _, _ in bridge.replayState() },
 
@@ -771,37 +818,7 @@ final class Bridge: NSObject, WKScriptMessageHandler {
             Mouse.warp(x: (body["x"] as? Double) ?? 0, y: (body["y"] as? Double) ?? 0)
         },
 
-        // Audio — Bool side-effect ops, deny → false. Output ops touch the
-        // default output device's "virtual main" volume / mute. Input ops
-        // mirror the same shape for the default input device (CoreAudio
-        // property API only — does NOT open a stream, so the microphone TCC
-        // prompt is not triggered).
-        .sync("audio.setVolume", permission: "audio", denyValue: false) { body in
-            Audio.setVolume(Float((body["value"] as? Double) ?? 0))
-        },
-        .sync("audio.setMuted", permission: "audio", denyValue: false) { body in
-            Audio.setMuted((body["value"] as? Bool) ?? false)
-        },
-        .sync("audio.setInputVolume", permission: "audio", denyValue: false) { body in
-            Audio.setInputVolume(Float((body["value"] as? Double) ?? 0))
-        },
-        .sync("audio.setInputMuted", permission: "audio", denyValue: false) { body in
-            Audio.setInputMuted((body["value"] as? Bool) ?? false)
-        },
-        // Per-scope device enumeration. Returns [{id, name, manufacturer?,
-        // transportType?, uid?, isDefault}, ...] — id is the AudioDeviceID
-        // as Int so JS can pass it back through `setDefaultDevice`. Filtered
-        // to devices that actually have streams in the requested direction
-        // (an output-only device doesn't appear in the input list).
-        .sync("audio.devices", permission: "audio", denyValue: [[String: Any]]()) { body in
-            let scope: Audio.Scope = (body["scope"] as? String) == "input" ? .input : .output
-            return Audio.devices(scope: scope)
-        },
-        .sync("audio.setDefaultDevice", permission: "audio", denyValue: false) { body in
-            guard let id = body["id"] as? Int else { return false }
-            let scope: Audio.Scope = (body["scope"] as? String) == "input" ? .input : .output
-            return Audio.setDefaultDevice(id: AudioDeviceID(id), scope: scope)
-        },
+        // Audio primitives → BridgeAudio.swift (audioPrimitives()).
 
         // Display
         //
@@ -886,69 +903,8 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         .syncBridge("settings.delete", permission: "settings", denyValue: false) { b, body in b.settings?.delete(body["key"] as? String ?? ""); return true },
         .syncBridge("settings.all",    permission: "settings", denyValue: [String: Any]()) { b, _ in b.settings?.all() ?? [:] },
 
-        // Filesystem
-        .sync("fs.read", permission: "fs") { body in
-            // encoding:
-            //   "utf8"   (default) — UTF-8 decoded string, null on non-UTF-8 bytes
-            //   "base64" — raw bytes base64-encoded (binary-safe; PNG/plist/etc)
-            FS.read(path:     body["path"]     as? String ?? "",
-                    encoding: body["encoding"] as? String ?? "utf8")
-        },
-        .sync("fs.stat", permission: "fs") { body in FS.stat(path: body["path"] as? String ?? "") },
-        .sync("fs.list", permission: "fs") { body in
-            FS.list(dir: body["dir"] as? String ?? "", includeHidden: body["hidden"] as? Bool ?? false)
-        },
-        .sync("fs.write", permission: "fs", denyValue: false) { body in
-            FS.write(path: body["path"] as? String ?? "", contents: body["contents"] as? String ?? "")
-        },
-        .sync("fs.mkdir", permission: "fs", denyValue: false) { body in
-            FS.mkdir(path: body["path"] as? String ?? "")
-        },
-        .sync("fs.delete", permission: "fs", denyValue: false) { body in
-            FS.delete(path: body["path"] as? String ?? "")
-        },
-        .sync("fs.move", permission: "fs", denyValue: false) { body in
-            FS.move(from: body["from"] as? String ?? "", to: body["to"] as? String ?? "")
-        },
-        .custom("fs.watch.start", permission: "fs", denyValue: false) { bridge, body, requestId in
-            let path = body["path"] as? String ?? ""
-            let watchId = body["watchId"] as? Int ?? -1
-            let watch = FSWatch(paths: [path]) { [weak bridge] events in
-                bridge?.dispatchFsEvents(watchId: watchId, events: events)
-            }
-            guard let w = watch else { bridge.respond(requestId: requestId, value: false); return }
-            bridge.fsWatches[watchId] = w
-            bridge.respond(requestId: requestId, value: true)
-        },
-        .custom("fs.watch.stop", permission: "fs", denyValue: false) { bridge, body, requestId in
-            let watchId = body["watchId"] as? Int ?? -1
-            if let w = bridge.fsWatches.removeValue(forKey: watchId) {
-                w.stop(); bridge.respond(requestId: requestId, value: true)
-            } else {
-                bridge.respond(requestId: requestId, value: false)
-            }
-        },
-
-        // Extended attributes (com.apple.metadata:*, Finder tags, quarantine,
-        // WhereFroms). get returns the raw bytes base64-encoded — binary plist
-        // payloads survive the IPC. No auto-decoding in v1; stacks that want
-        // a readable tag list parse the binary plist themselves.
-        .sync("fs.xattr.get", permission: "fs") { body in
-            Xattr.get(path: body["path"] as? String ?? "",
-                      name: body["name"] as? String ?? "")
-        },
-        .sync("fs.xattr.set", permission: "fs", denyValue: false) { body in
-            Xattr.set(path:  body["path"]  as? String ?? "",
-                      name:  body["name"]  as? String ?? "",
-                      value: body["value"] as? String ?? "")
-        },
-        .sync("fs.xattr.list", permission: "fs") { body in
-            Xattr.list(path: body["path"] as? String ?? "") as Any? ?? NSNull()
-        },
-        .sync("fs.xattr.remove", permission: "fs", denyValue: false) { body in
-            Xattr.remove(path: body["path"] as? String ?? "",
-                         name: body["name"] as? String ?? "")
-        },
+        // FS primitives (read/stat/list/write/mkdir/delete/move +
+        // watch.start/stop + xattr.*) → BridgeFS.swift (fsPrimitives()).
 
         // Pasteboard
         .sync("pasteboard.get", permission: "pasteboard") { _ in Pasteboard.getString() },
@@ -994,68 +950,8 @@ final class Bridge: NSObject, WKScriptMessageHandler {
             NLP.similarity(body["a"] as? String ?? "", body["b"] as? String ?? "")
         },
 
-        // Spotlight — one-shot NSMetadataQuery. Predicate string is raw
-        // NSPredicate format ("kMDItemFSName LIKE[cd] '*.pdf'"); callers
-        // must provide valid syntax (malformed predicates crash the daemon
-        // — NSException isn't catchable from Swift). Scopes default to the
-        // local computer; attributes default to a useful subset.
-        .custom("spotlight.find", permission: "spotlight") { bridge, body, requestId in
-            let predicate  = body["predicate"]  as? String
-            let scopes     = body["scopes"]     as? [String]
-            let attributes = body["attributes"] as? [String]
-            let limit      = body["limit"]      as? Int
-            Spotlight.find(predicate: predicate, scopes: scopes,
-                           attributes: attributes, limit: limit) { [weak bridge] result in
-                bridge?.respond(requestId: requestId, value: result as Any? ?? NSNull())
-            }
-        },
-
-        // Spotlight — long-lived NSMetadataQuery in continuous-update mode.
-        // Each subscribe() mints a handle id; per-handle channel push uses
-        // the synthesized name "spotlight:subscribe:<id>". JS
-        // sd.spotlight.subscribe(opts) returns { id, subscribe(fn), stop() }
-        // that wires the same channel name to the standard signal
-        // machinery. First emit fires when the initial Spotlight gather
-        // finishes; subsequent emits ride NSMetadataQueryDidUpdate. Same
-        // predicate-crash caveat as spotlight.find: a malformed format
-        // string raises NSInvalidArgumentException and brings down the
-        // daemon — caller validates.
-        .custom("spotlight.subscribe", permission: "spotlight") { bridge, body, requestId in
-            let predicate  = body["predicate"]  as? String
-            let scopes     = body["scopes"]     as? [String]
-            let attributes = body["attributes"] as? [String]
-            let limit      = body["limit"]      as? Int
-            let id = bridge.nextSpotlightLiveId
-            bridge.nextSpotlightLiveId += 1
-            let channel = "spotlight:subscribe:\(id)"
-            let live = Spotlight.LiveQuery(
-                predicate: predicate,
-                scopes:    scopes,
-                attributes: attributes,
-                limit:     limit,
-                onUpdate:  { [weak bridge] entries in
-                    guard let bridge = bridge else { return }
-                    let json = Bridge.jsonify(entries)
-                    bridge.push(channel: channel, json: json)
-                }
-            )
-            guard let live = live else {
-                // Empty / nil predicate — LiveQuery init? returns nil so
-                // we don't mint a handle. Mirrors the find() empty-predicate
-                // shortcut (returns []) but for subscribe there's nothing
-                // to subscribe to, so the handle id is null and the JS
-                // wrapper's start promise resolves to null.
-                bridge.respond(requestId: requestId, value: NSNull()); return
-            }
-            bridge.spotlightLiveHandles[id] = Token { live.stop() }
-            bridge.respond(requestId: requestId, value: id)
-        },
-        .syncBridge("spotlight.subscribe.stop", permission: "spotlight", denyValue: false) { b, body in
-            guard let id = body["id"] as? Int,
-                  let t  = b.spotlightLiveHandles.removeValue(forKey: id) else { return false }
-            t.cancel()
-            return true
-        },
+        // Spotlight primitives (find / subscribe / subscribe.stop) →
+        // BridgeSearch.swift (spotlightPrimitives()).
 
         // Update — pending macOS software updates via `softwareupdate -l`.
         // No TCC; the list verb runs without escalation. The subprocess is
@@ -1095,95 +991,9 @@ final class Bridge: NSObject, WKScriptMessageHandler {
             }
         },
 
-        // Speech — text-to-speech via AVSpeechSynthesizer (no TCC, no
-        // microphone — the engine runs entirely on the local audio device)
-        // and speech-to-text via SFSpeechRecognizer + AVAudioEngine. STT
-        // triggers TWO TCC prompts on first listen():
-        //   - Microphone           (NSMicrophoneUsageDescription)
-        //   - Speech Recognition   (NSSpeechRecognitionUsageDescription)
-        // Per-handle channel push for listen() uses the synthesized name
-        // "speech:listen:<id>" (mirrors bonjour.browse).
-        .sync("speech.speak", permission: "speech", denyValue: false) { body in
-            Speech.speak(
-                text:   body["text"]   as? String ?? "",
-                voice:  body["voice"]  as? String,
-                rate:   (body["rate"]   as? Double).map { Float($0) },
-                pitch:  (body["pitch"]  as? Double).map { Float($0) },
-                volume: (body["volume"] as? Double).map { Float($0) }
-            )
-        },
-        .sync("speech.stop", permission: "speech", denyValue: false) { body in
-            Speech.stop(boundary: body["boundary"] as? String ?? "immediate")
-        },
-        .sync("speech.voices", permission: "speech", denyValue: [[String: Any]]()) { _ in
-            Speech.voices()
-        },
-        // Supported recognizer locales (BCP-47 strings). One-shot read; the
-        // set is static per OS install. No TCC — just an API query.
-        .sync("speech.locales", permission: "speech", denyValue: [String]()) { _ in
-            Speech.availableLocales()
-        },
-        // Start a continuous recognizer. Mints an id synchronously; the
-        // recognizer + audio engine come up asynchronously inside the
-        // Listener (TCC requests are async). Each partial result and the
-        // final result are pushed through "speech:listen:<id>".
-        .custom("speech.listen.start", permission: "speech") { bridge, body, requestId in
-            let locale = body["locale"] as? String
-            let requireOnDevice = (body["requireOnDevice"] as? Bool) ?? false
-            let id = bridge.nextSpeechListenId
-            bridge.nextSpeechListenId += 1
-            let channel = "speech:listen:\(id)"
-            // Capture id strongly inside the closures — the listener may
-            // outlive the immediate respond() because TCC prompts are
-            // user-paced. Errors fan out through the same channel as a
-            // single push with { isFinal: true, error } so JS callers can
-            // treat them uniformly.
-            let listener = Speech.Listener(
-                locale: locale,
-                requireOnDevice: requireOnDevice,
-                onResult: { [weak bridge] envelope in
-                    guard let bridge = bridge else { return }
-                    let json = Bridge.jsonify(envelope)
-                    bridge.push(channel: channel, json: json)
-                    // Final result → drop the handle so a follow-up stop()
-                    // is a no-op (the listener already tore itself down
-                    // inside its result callback).
-                    if (envelope["isFinal"] as? Bool) == true {
-                        bridge.speechListenHandles.removeValue(forKey: id)
-                    }
-                },
-                onError: { [weak bridge] message in
-                    guard let bridge = bridge else { return }
-                    let envelope: [String: Any] = [
-                        "text":     "",
-                        "isFinal":  true,
-                        "segments": [[String: Any]](),
-                        "error":    message
-                    ]
-                    let json = Bridge.jsonify(envelope)
-                    bridge.push(channel: channel, json: json)
-                    bridge.speechListenHandles.removeValue(forKey: id)
-                }
-            )
-            bridge.speechListenHandles[id] = Token { listener.stop() }
-            listener.start(requireOnDevice: requireOnDevice)
-            bridge.respond(requestId: requestId, value: id)
-        },
-        .syncBridge("speech.listen.stop", permission: "speech", denyValue: false) { b, body in
-            guard let id = body["id"] as? Int,
-                  let t  = b.speechListenHandles.removeValue(forKey: id) else { return false }
-            t.cancel()
-            return true
-        },
-        // Convenience — stop every active listener owned by this stack.
-        // Equivalent to calling stop() on each handle returned from
-        // listen(), but useful for a "panic stop" UI affordance or page
-        // teardown shortcut.
-        .syncBridge("speech.listen.cancel", permission: "speech", denyValue: false) { b, _ in
-            for (_, t) in b.speechListenHandles { t.cancel() }
-            b.speechListenHandles.removeAll()
-            return true
-        },
+        // Speech primitives (speak / stop / voices / locales +
+        // listen.start / .stop / .cancel) → BridgeSearch.swift
+        // (speechPrimitives()).
 
         // Camera — one-shot frame grab. Triggers the Camera TCC prompt the
         // first time. `deviceId` matches sd.camera channel ids; nil = system
@@ -2396,19 +2206,10 @@ final class Bridge: NSObject, WKScriptMessageHandler {
                 bridge?.respond(requestId: requestId, value: fired)
             }
         }
-    ]
+    ] }
 
     private static let dispatch: [String: Primitive] =
         Dictionary(uniqueKeysWithValues: primitives.map { ($0.type, $0) })
-
-    /// Every permission string declared by a `.sync(...)`, `.custom(...)`,
-    /// `.ax(...)`, or `.syncBridge(...)` registration in `primitives`.
-    /// `Tests/PermissionsRegistryTests.swift` asserts this is a subset of
-    /// `Permissions.all` — adding a new primitive with a permission not in
-    /// the canonical registry fails CI before the commit lands. Same-commit
-    /// guard for the doctor-allowlist rule (see CLAUDE.md).
-    static let primitivePermissions: Set<String> =
-        Set(primitives.compactMap { $0.permission })
 
     /// Dispatch to a JS global handler with pre-formatted JS argument
     /// strings. `handler` is the global property name (e.g. "__sd_fs_event",
@@ -2427,7 +2228,9 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         }
     }
 
-    private func dispatchFsEvents(watchId: Int, events: [(path: String, flags: FSEventStreamEventFlags)]) {
+    /// Widened from private to internal so fs.watch.start's callback (now in
+    /// BridgeFS.swift) can hand events back through this dispatch path.
+    func dispatchFsEvents(watchId: Int, events: [(path: String, flags: FSEventStreamEventFlags)]) {
         let payload = events.map { ev -> [String: Any] in
             ["path": ev.path, "kind": FSWatch.kindFor(flags: ev.flags)]
         }
@@ -3038,7 +2841,10 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         return "\"\""
     }
 
-    private func push(channel: String, json: String) {
+    /// Widened from private to internal so primitive groups extracted into
+    /// their own files can push per-handle channels (spotlight:subscribe:<id>,
+    /// speech:listen:<id>, …) without going through a re-export shim.
+    func push(channel: String, json: String) {
         guard let webView = webView else { return }
         // Trace every channel push when STACKD_RPC_DEBUG=1. Same throttle
         // shape as the RPC tracer above. Off by default — high-rate
