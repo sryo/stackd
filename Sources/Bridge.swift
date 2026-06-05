@@ -36,19 +36,27 @@ final class Bridge: NSObject, WKScriptMessageHandler {
     // itself mid-session; if it does the diff fires removed+added once).
     private var lastMenubarByKey: [String: [String: Any]] = [:]
     private var menubarChangedPrimed: Bool = false
-    private var settings: StackSettings?
+    // Widened from private to internal so BridgeStorage.swift's settings.*
+    // closures can read/write the per-stack StackSettings.
+    var settings: StackSettings?
     // Widened from private to internal so BridgeFS.swift's fs.watch.start /
     // fs.watch.stop closures can mint and release watch handles.
     var fsWatches: [Int: FSWatch] = [:]
     private var handlesBangs: Set<String> = []
-    private let axHandles = AX.HandleStore()
+    // Widened from private to internal so BridgeAX.swift's ax.* closures
+    // can read/release handles via the per-Bridge HandleStore.
+    let axHandles = AX.HandleStore()
     // Outstanding sd.menubar.suppress() tokens (LIFO). sd.menubar.restore()
     // pops one. Anything left at unload is drained by scope.
-    private var menubarSuppressions: [Token] = []
+    // Widened from private to internal so BridgeMenubar.swift's
+    // menubar.suppress / .restore closures can push/pop tokens.
+    var menubarSuppressions: [Token] = []
     // NSStatusItem handles owned by this stack, keyed by mint id. Scope adopts
     // a drain entry at start(); unload removes every item from NSStatusBar.
-    fileprivate var statusItems: [Int: StatusItemHandle] = [:]
-    fileprivate var nextStatusItemId: Int = 1
+    // Widened from fileprivate to internal so BridgeMenubar.swift's
+    // menubar.addItem / .item.* closures can mint and release handles.
+    var statusItems: [Int: StatusItemHandle] = [:]
+    var nextStatusItemId: Int = 1
     // JS-bound Carbon hotkeys: id → Token. Each Token's cancel removes the
     // Carbon registration; scope drains them on unload too. The JS side keeps
     // its own map keyed by the same id so __sd_hotkey_fire can find the callback.
@@ -805,6 +813,11 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         + Bridge.urlHandlerPrimitives()
         + Bridge.overlayPrimitives()
         + Bridge.httpServerPrimitives()
+        + Bridge.storagePrimitives()
+        + Bridge.menubarPrimitives()
+        + Bridge.axPrimitives()
+        + Bridge.eventsPrimitives()
+        + Bridge.windowsPrimitives()
         + Bridge.inlinePrimitives()
 
     /// Every permission string declared by any primitive — `.sync(...)`,
@@ -825,11 +838,8 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         // Bootstrap
         .custom("ready") { bridge, _, _ in bridge.replayState() },
 
-        // Defaults
-        .sync("defaults.read", permission: "defaults") { body in
-            Defaults.read(bundleId: body["bundleId"] as? String ?? "",
-                          key:      body["key"]      as? String ?? "")
-        },
+        // Defaults / settings / pasteboard primitives → BridgeStorage.swift
+        // (storagePrimitives()).
 
         // Host — one-shot system info (hostname / OS / locale / arch / cpu / ram).
         // The 2s CPU+idle+memory signal is the sd.host.load channel pushed
@@ -864,38 +874,18 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         // Display primitives (setBrightness / getBrightness / snapshot) →
         // BridgeDisplay.swift (displayPrimitives()).
 
-        // Menubar suppression — refcounted via per-Bridge stack of tokens.
-        .syncBridge("menubar.suppress", permission: "menubar", denyValue: false) { bridge, _ in
-            guard let token = MenuBarVisibility.suppress() else { return false }
-            bridge.menubarSuppressions.append(token)
-            return true
-        },
-        .syncBridge("menubar.restore", permission: "menubar", denyValue: false) { bridge, _ in
-            guard let t = bridge.menubarSuppressions.popLast() else { return false }
-            t.cancel(); return true
-        },
+        // Menubar primitives (suppress / restore + addItem / item.* + items)
+        // → BridgeMenubar.swift (menubarPrimitives()). Note: only the JS-bound
+        // runtime API moved — manifest-driven startMenubarItems wiring still
+        // lives in start(manifest:).
 
         // Media
         .sync("media.command", permission: "media", denyValue: false) { body in
             Media.command(body["name"] as? String ?? "")
         },
 
-        // Per-stack settings (k/v scoped to this stack's id). Write-style ops
-        // (set/delete) deny → false; get → null; all → empty dict (matches
-        // pre-refactor handler returns).
-        .syncBridge("settings.get",    permission: "settings") { b, body in b.settings?.get(body["key"] as? String ?? "") as Any? },
-        .syncBridge("settings.set",    permission: "settings", denyValue: false) { b, body in b.settings?.set(body["key"] as? String ?? "", body["value"]); return true },
-        .syncBridge("settings.delete", permission: "settings", denyValue: false) { b, body in b.settings?.delete(body["key"] as? String ?? ""); return true },
-        .syncBridge("settings.all",    permission: "settings", denyValue: [String: Any]()) { b, _ in b.settings?.all() ?? [:] },
-
         // FS primitives (read/stat/list/write/mkdir/delete/move +
         // watch.start/stop + xattr.*) → BridgeFS.swift (fsPrimitives()).
-
-        // Pasteboard
-        .sync("pasteboard.get", permission: "pasteboard") { _ in Pasteboard.getString() },
-        .sync("pasteboard.set", permission: "pasteboard", denyValue: false) { body in
-            Pasteboard.setString(body["value"] as? String ?? "")
-        },
 
         // Native banner notifications via osascript display notification.
         // Fire-and-forget — see Notify.swift for the bundle-id rationale.
@@ -1146,56 +1136,10 @@ final class Bridge: NSObject, WKScriptMessageHandler {
             }
         },
 
-        // Event synthesis — Bool side-effect ops, deny → false.
-        .sync("events.type", permission: "events", denyValue: false) { body in
-            EventsSynth.type(body["value"] as? String ?? ""); return true
-        },
-        .sync("events.key", permission: "events", denyValue: false) { body in
-            EventsSynth.key(body["spec"] as? String ?? "")
-        },
-        .sync("events.scroll", permission: "events", denyValue: false) { body in
-            EventsSynth.scroll(
-                dx: Int32(body["dx"] as? Int ?? 0),
-                dy: Int32(body["dy"] as? Int ?? 0))
-        },
-        .sync("events.click", permission: "events", denyValue: false) { body in
-            EventsSynth.click(
-                x: body["x"] as? Double ?? 0,
-                y: body["y"] as? Double ?? 0,
-                button: body["button"] as? String ?? "left")
-        },
-        // Update the runtime cursor-rect gate for a consumer eventtap declared
-        // in this stack's manifest (`callback` matches the eventtap entry's
-        // `callback`). Body shape:
-        //   { callback: "snapshotsLeftClick",
-        //     rects: [{x,y,w,h}, ...] | null }
-        // null → clear gate (consume on predicate alone — original behavior).
-        // empty [] → empty gate (consumer never matches; suppresses without
-        //   unregistering).
-        // populated → consume only when cursor falls in any rect (top-left
-        //   origin global screen coords, same space as sd.windows.byId.frame).
-        // Returns true on accept, false when the callback name isn't a
-        // consumer this stack registered (defensive — silent mis-keying
-        // would otherwise hide a typo behind a no-op).
-        .syncBridge("events.setTapRects", permission: "events", denyValue: false) { bridge, body in
-            guard let callback = body["callback"] as? String, !callback.isEmpty else { return false }
-            let key = "\(bridge.stackId):\(callback)"
-            if body["rects"] is NSNull || body["rects"] == nil {
-                EventTapRegistry.shared.setConsumerRects(key: key, rects: nil)
-                return true
-            }
-            guard let arr = body["rects"] as? [[String: Any]] else { return false }
-            let rects: [CGRect] = arr.map { d in
-                CGRect(
-                    x: (d["x"] as? Double) ?? Double((d["x"] as? Int) ?? 0),
-                    y: (d["y"] as? Double) ?? Double((d["y"] as? Int) ?? 0),
-                    width:  (d["w"] as? Double) ?? Double((d["w"] as? Int) ?? 0),
-                    height: (d["h"] as? Double) ?? Double((d["h"] as? Int) ?? 0)
-                )
-            }
-            EventTapRegistry.shared.setConsumerRects(key: key, rects: rects)
-            return true
-        },
+        // Events primitives (events.type / .key / .scroll / .click +
+        // events.setTapRects) → BridgeEvents.swift (eventsPrimitives()).
+        // Note: only the runtime API moved — manifest-driven eventtap
+        // registration still lives in start(manifest:).
 
         // Cursor — warp / read. setPosition takes top-left global coords
         // (same convention as sd.mouse / sd.events.click); pass `display`
@@ -1298,139 +1242,9 @@ final class Bridge: NSObject, WKScriptMessageHandler {
             Icons.forFile(path: body["path"] as? String ?? "", size: body["size"] as? Int ?? 64)
         },
 
-        // Windows — focused-window helpers operate on the AX focused window
-        // of frontmost app. All Bool-returning except byId.frame (returns
-        // dict or nil). These hop to main via `.ax` because the underlying
-        // AXUIElementSetAttributeValue calls deadlock or silently partial-
-        // apply when invoked from a non-main thread (same constraint that
-        // moved the .ax.* surface). Concretely: WindowScape's per-tick
-        // setFrame loop would land position but drop size on ~half the
-        // calls, leaving windows moved-but-not-resized — the "windows
-        // resize incorrectly" symptom.
-        .ax("windows.setFrame",   permission: "windows", denyValue: false) { _, body in
-            Windows.setFocusedFrame(
-                x: body["x"] as? Double ?? 0, y: body["y"] as? Double ?? 0,
-                w: body["w"] as? Double ?? 0, h: body["h"] as? Double ?? 0)
-        },
-        .ax("windows.minimize",   permission: "windows", denyValue: false) { _, body in Windows.minimizeFocused(body["value"] as? Bool ?? true) },
-        .ax("windows.fullscreen", permission: "windows", denyValue: false) { _, body in Windows.fullscreenFocused(body["value"] as? Bool ?? true) },
-        .ax("windows.raise",      permission: "windows", denyValue: false) { _, _    in Windows.raiseFocused() },
-
-        // Windows-by-id
-        .ax("windows.byId.setFrame",   permission: "windows", denyValue: false) { _, body in
-            WindowsByID.setFrame(
-                windowID: CGWindowID((body["id"] as? Int) ?? 0),
-                x: body["x"] as? Double ?? 0, y: body["y"] as? Double ?? 0,
-                w: body["w"] as? Double ?? 0, h: body["h"] as? Double ?? 0)
-        },
-        // Probed setFrame: applies the geometry then reads back what AX
-        // actually accepted. Use this when you want to detect apps that
-        // refused part of the resize (Calculator, Browser at min width,
-        // fixed-size panels) so callers can build a constraint cache.
-        // Returns { ok: Bool, actual: {x,y,w,h} | null }.
-        .ax("windows.byId.setFrameProbed", permission: "windows") { _, body in
-            WindowsByID.setFrameProbed(
-                windowID: CGWindowID((body["id"] as? Int) ?? 0),
-                x: body["x"] as? Double ?? 0, y: body["y"] as? Double ?? 0,
-                w: body["w"] as? Double ?? 0, h: body["h"] as? Double ?? 0) as [String: Any]
-        },
-        .ax("windows.byId.minimize",   permission: "windows", denyValue: false) { _, body in WindowsByID.minimize(  windowID: CGWindowID((body["id"] as? Int) ?? 0), body["value"] as? Bool ?? true) },
-        .ax("windows.byId.fullscreen", permission: "windows", denyValue: false) { _, body in WindowsByID.fullscreen(windowID: CGWindowID((body["id"] as? Int) ?? 0), body["value"] as? Bool ?? true) },
-        .ax("windows.byId.raise",      permission: "windows", denyValue: false) { _, body in WindowsByID.raise(     windowID: CGWindowID((body["id"] as? Int) ?? 0)) },
-        .ax("windows.byId.focus",      permission: "windows", denyValue: false) { _, body in WindowsByID.focus(     windowID: CGWindowID((body["id"] as? Int) ?? 0)) },
-        .ax("windows.byId.close",      permission: "windows", denyValue: false) { _, body in WindowsByID.close(     windowID: CGWindowID((body["id"] as? Int) ?? 0)) },
-        .ax("windows.byId.frame",      permission: "windows") { _, body in
-            guard let r = WindowsByID.frame(windowID: CGWindowID((body["id"] as? Int) ?? 0)) else { return nil }
-            return [
-                "x": Int(r.origin.x), "y": Int(r.origin.y),
-                "w": Int(r.size.width), "h": Int(r.size.height)
-            ] as [String: Any]
-        },
-        .ax("windows.byId.cornerHints", permission: "windows") { _, body in
-            WindowsByID.cornerHints(windowID: CGWindowID((body["id"] as? Int) ?? 0))
-        },
-        // Traffic-light button rects — one AX walk reads close + zoom +
-        // minimize button frames so stacks can intercept clicks on the
-        // native dots (windowscape routes the yellow dot to its snapshot
-        // subsystem). Returns NSNull (→ JS null) when the window is
-        // unaddressable; per-button fields are NSNull when that dot doesn't
-        // exist on the window (panels, helper windows).
-        .ax("windows.byId.buttonFrames", permission: "windows") { _, body in
-            WindowsByID.buttonFrames(windowID: CGWindowID((body["id"] as? Int) ?? 0)) as Any? ?? NSNull()
-        },
-        // Batch reader — one AX lookup, all curated readers in one payload.
-        // Replaces 4-9 sequential round-trips at attach/render time.
-        .ax("windows.byId.info",        permission: "windows") { _, body in
-            WindowsByID.info(windowID: CGWindowID((body["id"] as? Int) ?? 0)) as Any? ?? NSNull()
-        },
-        // Curated AX readers — per-window properties without round-tripping
-        // through `sd.ax.*`. Each maps 1:1 to a WindowsByID static; `.ax`
-        // because AX queries must hop to main. nil/false results pass through
-        // as JSON null / false, matching the byId.frame contract.
-        .ax("windows.byId.title",        permission: "windows") { _, body in
-            WindowsByID.title(windowID: CGWindowID((body["id"] as? Int) ?? 0)) as Any? ?? NSNull()
-        },
-        .ax("windows.byId.role",         permission: "windows") { _, body in
-            WindowsByID.role(windowID: CGWindowID((body["id"] as? Int) ?? 0)) as Any? ?? NSNull()
-        },
-        .ax("windows.byId.subrole",      permission: "windows") { _, body in
-            WindowsByID.subrole(windowID: CGWindowID((body["id"] as? Int) ?? 0)) as Any? ?? NSNull()
-        },
-        .ax("windows.byId.isMinimized",  permission: "windows") { _, body in
-            WindowsByID.isMinimized(windowID: CGWindowID((body["id"] as? Int) ?? 0))
-        },
-        .ax("windows.byId.isFullscreen", permission: "windows") { _, body in
-            WindowsByID.isFullscreen(windowID: CGWindowID((body["id"] as? Int) ?? 0))
-        },
-        .ax("windows.byId.hasToolbar",   permission: "windows") { _, body in
-            WindowsByID.hasToolbar(windowID: CGWindowID((body["id"] as? Int) ?? 0))
-        },
-        .ax("windows.byId.isStandard",   permission: "windows") { _, body in
-            WindowsByID.isStandard(windowID: CGWindowID((body["id"] as? Int) ?? 0))
-        },
-        // Per-window tab list — walks the AXTabGroup child once. Returns
-        // [{title, selected}] when a tab group exists, [] if it has no
-        // children, NSNull (→ JSON null) when the window has no AXTabGroup.
-        .ax("windows.byId.tabs",         permission: "windows") { _, body in
-            WindowsByID.tabs(windowID: CGWindowID((body["id"] as? Int) ?? 0)) as Any? ?? NSNull()
-        },
-        .ax("windows.byId.focusTab",     permission: "windows", denyValue: false) { _, body in
-            WindowsByID.focusTab(
-                windowID: CGWindowID((body["id"] as? Int) ?? 0),
-                index: (body["index"] as? Int) ?? 0
-            )
-        },
-        // Per-window snapshot via CGSHWCaptureWindowList (AltTab's trick).
-        // Synchronous, no TCC, works for hidden / minimized / off-space
-        // windows. Distinct from sd.display.snapshot (ScreenCaptureKit).
-        // `quality` is taken as-is — the canonical 0.85 default is declared
-        // in Runtime/api.js (`sd.windows.snapshot`). If the field arrives
-        // missing here we leave it nil and the encode falls back internally.
-        .sync("windows.byId.snapshot",   permission: "windows") { body in
-            WindowsByID.snapshot(
-                windowID: CGWindowID((body["id"] as? Int) ?? 0),
-                format:   body["format"]  as? String ?? "png",
-                quality:  body["quality"] as? Double
-            )
-        },
-
-        // Atomic multi-window transaction. begin opens a fresh SLSTransaction
-        // and installs the WindowsByID.batchSink that funnels per-id setFrame
-        // calls (and future per-id windows mutations) into it; commit calls
-        // SLSTransactionCommit and clears the sink. Process-global — if a
-        // batch is already open the begin refuses rather than nest, matching
-        // the JS-side single-await model. Hops to main because both AX and
-        // the SkyLight tx symbols want the WindowServer connection thread.
-        .custom("windows.batch.begin", permission: "windows", denyValue: false) { bridge, _, requestId in
-            DispatchQueue.main.async { [weak bridge] in
-                bridge?.respond(requestId: requestId, value: WindowsByID.beginBatch())
-            }
-        },
-        .custom("windows.batch.commit", permission: "windows", denyValue: false) { bridge, _, requestId in
-            DispatchQueue.main.async { [weak bridge] in
-                bridge?.respond(requestId: requestId, value: WindowsByID.commitBatch())
-            }
-        },
+        // Windows primitives (focused .setFrame/.minimize/.fullscreen/.raise +
+        // windows.byId.* + windows.byId.snapshot + windows.batch.{begin,commit})
+        // → BridgeWindows.swift (windowsPrimitives()).
 
         // Spaces — returns array; pre-refactor returned `[]` on deny.
         .sync("spaces.windowSpaces", permission: "spaces", denyValue: [NSNumber]()) { body in
@@ -1441,29 +1255,9 @@ final class Bridge: NSObject, WKScriptMessageHandler {
             return Spaces.minimizedWindows(spaceID: id).map { NSNumber(value: $0) }
         },
 
-        // Accessibility — all .ax variants hop to main and have access to axHandles via bridge
-        .ax("ax.focused") { _, _ in AX.focusedElement() },
-        .ax("ax.application")             { b, body in AX.application(pid: pid_t((body["pid"] as? Int) ?? 0), store: b.axHandles) },
-        .ax("ax.system")                  { b, _    in AX.systemWide(store: b.axHandles) },
-        .ax("ax.systemElementAtPosition") { b, body in AX.systemElementAtPosition(x: Float((body["x"] as? Double) ?? 0), y: Float((body["y"] as? Double) ?? 0), store: b.axHandles) },
-        .ax("ax.focusedElement")          { b, _    in AX.focusedElementHandle(store: b.axHandles) },
-        .ax("ax.focusedElementSystemWide"){ b, _    in AX.focusedElementSystemWideHandle(store: b.axHandles) },
-        .ax("ax.attributeNames")          { b, body in AX.attributeNames(handle: (body["handle"] as? Int) ?? -1, store: b.axHandles) },
-        .ax("ax.attribute")               { b, body in AX.attribute(handle: (body["handle"] as? Int) ?? -1, name: body["name"] as? String ?? "", store: b.axHandles) },
-        .ax("ax.attributes")              { b, body in AX.attributes(handle: (body["handle"] as? Int) ?? -1, store: b.axHandles) },
-        .ax("ax.parameterizedAttributeNames") { b, body in AX.parameterizedAttributeNames(handle: (body["handle"] as? Int) ?? -1, store: b.axHandles) },
-        .ax("ax.parameterizedAttribute")  { b, body in AX.parameterizedAttribute(handle: (body["handle"] as? Int) ?? -1, name: body["name"] as? String ?? "", param: body["param"], store: b.axHandles) },
-        .ax("ax.actionNames")             { b, body in AX.actionNames(handle: (body["handle"] as? Int) ?? -1, store: b.axHandles) },
-        .ax("ax.isAttributeSettable")     { b, body in AX.isAttributeSettable(handle: (body["handle"] as? Int) ?? -1, name: body["name"] as? String ?? "", store: b.axHandles) },
-        .ax("ax.setAttribute", denyValue: false) { b, body in AX.setAttribute(handle: (body["handle"] as? Int) ?? -1, name: body["name"] as? String ?? "", value: body["value"], store: b.axHandles) },
-        .ax("ax.performAction", denyValue: false) { b, body in AX.performAction(handle: (body["handle"] as? Int) ?? -1, action: body["action"] as? String ?? "", store: b.axHandles) },
-        .ax("ax.children")                { b, body in AX.children(handle: (body["handle"] as? Int) ?? -1, store: b.axHandles) },
-        .ax("ax.parent")                  { b, body in AX.parent(handle: (body["handle"] as? Int) ?? -1, store: b.axHandles) },
-        .ax("ax.role")                    { b, body in AX.role(handle: (body["handle"] as? Int) ?? -1, store: b.axHandles) },
-        // release / releaseAll have no permission gate — releasing a handle is
-        // always safe regardless of the original "ax" permission state.
-        .ax("ax.release",    permission: nil) { b, body in b.axHandles.release((body["handle"] as? Int) ?? -1) },
-        .ax("ax.releaseAll", permission: nil) { b, _    in b.axHandles.releaseAll(); return true },
+        // AX primitives (focused / application / system / element handles +
+        // attributes / actions / tree walk + release / releaseAll) →
+        // BridgeAX.swift (axPrimitives()).
 
         // Invocable-window control — async (must hop to main for AppKit).
         .custom("window.invoke", denyValue: false) { bridge, _, requestId in
@@ -1553,65 +1347,8 @@ final class Bridge: NSObject, WKScriptMessageHandler {
             }
         },
 
-        // ── Menubar items (NSStatusItem) ─────────────────────────────────────
-        // addItem mints an id, creates the NSStatusItem on main, wires click /
-        // menu-pick callbacks back to JS via __sd_menubar_event. Per-stack
-        // scope removes orphans on unload. New permission: "menubar.item",
-        // distinct from "menubar" (which gates suppress/restore).
-        .custom("menubar.addItem", permission: "menubar.item") { bridge, body, requestId in
-            DispatchQueue.main.async { [weak bridge] in
-                guard let bridge = bridge else { return }
-                let id = bridge.nextStatusItemId
-                bridge.nextStatusItemId += 1
-                let spec = Bridge.parseStatusItemSpec(body)
-                let handle = Menubar.addItem(id: id, spec: spec)
-                handle.onClick = { [weak bridge] in
-                    bridge?.dispatchMenubarEvent(itemId: id, type: "click", payload: nil)
-                }
-                handle.onMenuPick = { [weak bridge] pickId in
-                    bridge?.dispatchMenubarEvent(itemId: id, type: "pick", payload: pickId)
-                }
-                bridge.statusItems[id] = handle
-                bridge.respond(requestId: requestId, value: id)
-            }
-        },
-        .syncBridge("menubar.item.setTitle", permission: "menubar.item", denyValue: false) { b, body in
-            guard let id = body["id"] as? Int, let h = b.statusItems[id] else { return false }
-            h.setTitle(body["title"] as? String)
-            return true
-        },
-        .syncBridge("menubar.item.setIcon", permission: "menubar.item", denyValue: false) { b, body in
-            guard let id = body["id"] as? Int, let h = b.statusItems[id] else { return false }
-            let iconDict = body["icon"] as? [String: Any]
-            h.setIcon(iconDict.map(Bridge.parseIconSpec))
-            return true
-        },
-        .syncBridge("menubar.item.setMenu", permission: "menubar.item", denyValue: false) { b, body in
-            guard let id = body["id"] as? Int, let h = b.statusItems[id] else { return false }
-            h.setMenu(body["items"] as? [[String: Any]])
-            return true
-        },
-        .syncBridge("menubar.item.setTooltip", permission: "menubar.item", denyValue: false) { b, body in
-            guard let id = body["id"] as? Int, let h = b.statusItems[id] else { return false }
-            h.setTooltip(body["tooltip"] as? String)
-            return true
-        },
-        .syncBridge("menubar.item.remove", permission: "menubar.item", denyValue: false) { b, body in
-            guard let id = body["id"] as? Int, let h = b.statusItems.removeValue(forKey: id) else { return false }
-            h.remove()
-            return true
-        },
-
-        // Read-only AX walk of every visible menubar status item. Used by
-        // menubar-manager stacks to enumerate what's in the bar — third-
-        // party app icons + Apple's Spotlight + clock. macOS 14+ Control
-        // Center cluster lives in a separate AXSystemUIServer process and
-        // is not enumerable from systemWide; documented as a limitation.
-        // Folded under the existing "menubar" permission (same gate as
-        // suppress/restore + the menubar.observe channel).
-        .sync("menubar.items", permission: "menubar", denyValue: [[String: Any]]()) { _ in
-            MenubarItems.items()
-        },
+        // Menubar items (NSStatusItem) + menubar.items AX walk →
+        // BridgeMenubar.swift (menubarPrimitives()).
 
         // Hotkey primitives (bind / unbind + mode.enter/exit/current) →
         // BridgeHotkey.swift (hotkeyPrimitives()). Note: only the JS-bound
@@ -1710,7 +1447,9 @@ final class Bridge: NSObject, WKScriptMessageHandler {
 
     /// Pump a menubar-item click / pick / etc. back to JS. The JS-side proxy
     /// in api.js (sd.menubar.addItem) routes this to the stack's callbacks.
-    fileprivate func dispatchMenubarEvent(itemId: Int, type: String, payload: Any?) {
+    /// Widened from fileprivate to internal so BridgeMenubar.swift's
+    /// menubar.addItem closure can pump click / pick events back to JS.
+    func dispatchMenubarEvent(itemId: Int, type: String, payload: Any?) {
         let payloadJson = payload.map { Bridge.jsonify($0) } ?? "null"
         fireGlobal(handler: "__sd_menubar_event",
                    args: ["\(itemId)", Bridge.jsString(type), payloadJson])
@@ -1881,6 +1620,14 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         // versa.
         startChannel(name: "audioInput", observer: AudioInputObserver.shared) {
             Audio.currentInput()
+        }
+        // Per-process audio enumeration (CoreAudio process objects, 14.4+).
+        // Poll-based: a 2s Timer drives AudioProcessesObserver, which
+        // hashes the snapshot for steady-state dedupe. Pairs with
+        // sd.media.nowPlaying for the rich-active-pill + bare-secondary-
+        // pill multi-client bar UI.
+        startChannel(name: "audioProcesses", observer: AudioProcessesObserver.shared) {
+            AudioProcesses.snapshot()
         }
     }
 
@@ -2340,7 +2087,9 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         DispatchQueue.main.async { webView.evaluateJavaScript(script, completionHandler: nil) }
     }
 
-    fileprivate static func parseIconSpec(_ dict: [String: Any]) -> IconSpec {
+    /// Widened from fileprivate to internal so BridgeMenubar.swift can
+    /// build IconSpec values for menubar.item.setIcon.
+    static func parseIconSpec(_ dict: [String: Any]) -> IconSpec {
         IconSpec(
             sfSymbol:  dict["sfSymbol"]  as? String,
             pngBase64: dict["pngBase64"] as? String,
@@ -2348,7 +2097,9 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         )
     }
 
-    fileprivate static func parseStatusItemSpec(_ body: [String: Any]) -> StatusItemSpec {
+    /// Widened from fileprivate to internal so BridgeMenubar.swift can
+    /// build StatusItemSpec values for menubar.addItem.
+    static func parseStatusItemSpec(_ body: [String: Any]) -> StatusItemSpec {
         var spec = StatusItemSpec()
         if let icon = body["icon"] as? [String: Any] { spec.icon = parseIconSpec(icon) }
         spec.title   = body["title"]   as? String
