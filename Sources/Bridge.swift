@@ -1622,8 +1622,9 @@ final class Bridge: NSObject, WKScriptMessageHandler {
             Audio.currentInput()
         }
         // Per-process audio enumeration (CoreAudio process objects, 14.4+).
-        // Poll-based: a 2s Timer drives AudioProcessesObserver, which
-        // hashes the snapshot for steady-state dedupe. Pairs with
+        // AudioProcessesObserver is hybrid: event-driven on the process list
+        // (add/remove), 1s poll on per-process IsRunningOutput (CoreAudio's
+        // listener for that property doesn't fire reliably). Pairs with
         // sd.media.nowPlaying for the rich-active-pill + bare-secondary-
         // pill multi-client bar UI.
         startChannel(name: "audioProcesses", observer: AudioProcessesObserver.shared) {

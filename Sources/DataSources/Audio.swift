@@ -531,6 +531,332 @@ final class AudioInputObserver: RefCountedObserver {
     }
 }
 
+// MARK: - Audio processes (per-app output enumeration)
+
+// CoreAudio's process-object API (macOS 14.4+) — enumerates every process
+// that's currently connected to an audio device, with a per-process
+// "is running output" bit. Unlike MediaRemote (which collapses to one
+// active "now playing" client AND requires a com.apple.* bundle ID), this
+// surfaces the real multi-client set: Spotify + Chrome + WhatsApp can all
+// appear simultaneously. Tradeoff: no track metadata — bundleID +
+// "making sound" is the entire payload. Pair with sd.media.nowPlaying for
+// the rich pill on the active player.
+//
+// Property scope is `kAudioObjectPropertyScopeGlobal` because process
+// objects belong to the system AudioObject, not any specific device.
+
+enum AudioProcesses {
+    /// Returns one dict per audio-process object, sans the pid=0 sentinel.
+    /// Shape: { pid: Int, bundleId: String|NSNull, name: String|NSNull,
+    ///          playingOutput: Bool }.
+    /// Bridge.startAudioProcesses polls this on a 2s tick; JS subscribes
+    /// via sd.audio.processes.
+    ///
+    /// Helper-process resolution: Chrome / Safari / Slack / Electron-based
+    /// apps run their audio from a nested `<App>.app/.../Helper.app`
+    /// subprocess, so the raw `kAudioProcessPropertyBundleID` is something
+    /// like `com.google.Chrome.helper` — useless for a bar pill. We walk
+    /// up `bundleURL` to the outermost `.app` and read its Info.plist for
+    /// the user-facing bundleId + display name. Multiple helpers belonging
+    /// to the same parent app get collapsed into one row.
+    static func snapshot() -> [[String: Any]] {
+        let processObjectIDs = enumerateProcessObjects()
+        // First pass: gather (pid, helper bid, resolved bid, resolved name,
+        // playing). Track helperBid → fallback resolution so siblings that
+        // couldn't resolve on their own (sandboxed XPCs surface as
+        // NSRunningApplication(pid:)=nil or bundleURL=nil) can borrow it.
+        struct Row {
+            let pid: Int32
+            let helperBid: String?
+            var bundleId: String?
+            var name: String?
+            var playingOutput: Bool
+        }
+        var rows: [Row] = []
+        var seenPIDs = Set<Int32>()
+        // helperBid → resolution that actually walked to a parent .app
+        // different from the helper itself. If multiple helpers share the
+        // same helperBid (Arc / Chrome / Slack spawn many per session),
+        // one resolution serves them all.
+        var helperFallback: [String: (bundleId: String, name: String?)] = [:]
+        for objID in processObjectIDs {
+            guard let pid = pid(of: objID), pid > 0, !seenPIDs.contains(pid) else { continue }
+            seenPIDs.insert(pid)
+            let helperBid = bundleID(of: objID)
+            let runApp    = NSRunningApplication(processIdentifier: pid)
+            let resolved  = resolveTopLevel(runningApp: runApp, helperBid: helperBid)
+            rows.append(Row(
+                pid: pid,
+                helperBid: helperBid,
+                bundleId: resolved.bundleId,
+                name: resolved.name,
+                playingOutput: isRunningOutput(objID)
+            ))
+            // Record a successful walk-up: helperBid differs from the
+            // resolved parent bid AND we have a non-nil parent.
+            if let hb = helperBid,
+               let rb = resolved.bundleId,
+               rb != hb,
+               helperFallback[hb] == nil {
+                helperFallback[hb] = (rb, resolved.name)
+            }
+        }
+        // Second pass: any row whose resolution was a no-op (resolved bid
+        // == helperBid AND helperBid ends in ".helper") borrows the group's
+        // resolution. The `.helper` suffix gate keeps this from accidentally
+        // collapsing two unrelated apps that happen to share a sibling.
+        for i in rows.indices {
+            let r = rows[i]
+            guard let hb = r.helperBid, hb.hasSuffix(".helper"),
+                  r.bundleId == hb,
+                  let better = helperFallback[hb] else { continue }
+            rows[i].bundleId = better.bundleId
+            rows[i].name     = better.name
+        }
+        // Second pass: dedupe by resolved bundleId. OR the playing bits
+        // across helpers (any sounding helper makes the parent "playing").
+        // Keep the first PID seen per bundleId so the bar can route a click
+        // through a stable identifier — there's no good "primary" PID for a
+        // multi-process parent app anyway.
+        var byBid: [String: Row] = [:]
+        var anonymous: [Row] = []
+        for r in rows {
+            if let bid = r.bundleId, !bid.isEmpty {
+                if var existing = byBid[bid] {
+                    existing.playingOutput = existing.playingOutput || r.playingOutput
+                    byBid[bid] = existing
+                } else {
+                    byBid[bid] = r
+                }
+            } else {
+                anonymous.append(r)
+            }
+        }
+        // Materialize the output dicts. NSNull for missing bundleId/name so
+        // the JSON shape is stable across rows.
+        var out: [[String: Any]] = []
+        for (_, r) in byBid {
+            out.append([
+                "pid":           Int(r.pid),
+                "bundleId":      r.bundleId as Any? ?? NSNull(),
+                "name":          r.name     as Any? ?? NSNull(),
+                "playingOutput": r.playingOutput
+            ])
+        }
+        for r in anonymous {
+            out.append([
+                "pid":           Int(r.pid),
+                "bundleId":      NSNull(),
+                "name":          r.name as Any? ?? NSNull(),
+                "playingOutput": r.playingOutput
+            ])
+        }
+        // Stable order by bundleId so the bar's pill layout doesn't shuffle
+        // between polls. NSNull-bundleId rows sort to the end.
+        out.sort {
+            let a = ($0["bundleId"] as? String) ?? "~~~"
+            let b = ($1["bundleId"] as? String) ?? "~~~"
+            return a < b
+        }
+        return out
+    }
+
+    /// Walk `runningApp.bundleURL` up to the outermost `.app` and read its
+    /// Info.plist for the user-facing bundleId + display name. Returns the
+    /// helper's values when the app has no bundleURL or no parent .app is
+    /// found in the path.
+    private static func resolveTopLevel(runningApp: NSRunningApplication?, helperBid: String?)
+        -> (bundleId: String?, name: String?)
+    {
+        guard let app = runningApp else { return (helperBid, nil) }
+        guard let url = app.bundleURL, let topURL = walkUpToTopApp(url: url) else {
+            return (helperBid, app.localizedName)
+        }
+        let bundle = Bundle(url: topURL)
+        let bid = bundle?.bundleIdentifier ?? helperBid
+        let name = (bundle?.localizedInfoDictionary?["CFBundleDisplayName"] as? String)
+            ?? (bundle?.infoDictionary?["CFBundleDisplayName"]              as? String)
+            ?? (bundle?.infoDictionary?["CFBundleName"]                     as? String)
+            ?? topURL.deletingPathExtension().lastPathComponent
+        return (bid, name)
+    }
+
+    /// Find the OUTERMOST `.app` ancestor of `url`. For a Chrome Helper at
+    /// `/Applications/Google Chrome.app/Contents/Frameworks/.../Helpers/
+    /// Google Chrome Helper.app`, this returns `/Applications/Google Chrome.app`.
+    /// For a top-level app (e.g. `/Applications/Spotify.app`), returns the
+    /// URL unchanged.
+    private static func walkUpToTopApp(url: URL) -> URL? {
+        var current = url
+        var lastApp: URL? = (url.pathExtension == "app") ? url : nil
+        while current.path != "/" && current.path != "." {
+            current = current.deletingLastPathComponent()
+            if current.pathExtension == "app" {
+                lastApp = current
+            }
+        }
+        return lastApp
+    }
+
+    /// Just the AudioObjectIDs — `AudioProcessesObserver` uses this to
+    /// know which per-process IsRunningOutput listeners to bind/unbind.
+    /// Doesn't filter pid==0 or dedupe; the observer cares about every
+    /// object that can fire a listener.
+    static func enumerateForListening() -> [AudioObjectID] {
+        return enumerateProcessObjects()
+    }
+
+    // MARK: - CoreAudio plumbing (private)
+
+    private static func enumerateProcessObjects() -> [AudioObjectID] {
+        var addr = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyProcessObjectList,
+            mScope:    kAudioObjectPropertyScopeGlobal,
+            mElement:  kAudioObjectPropertyElementMain
+        )
+        var dataSize: UInt32 = 0
+        guard AudioObjectGetPropertyDataSize(
+                AudioObjectID(kAudioObjectSystemObject), &addr, 0, nil, &dataSize) == noErr,
+              dataSize > 0 else { return [] }
+        let count = Int(dataSize) / MemoryLayout<AudioObjectID>.size
+        var ids = [AudioObjectID](repeating: 0, count: count)
+        guard AudioObjectGetPropertyData(
+                AudioObjectID(kAudioObjectSystemObject), &addr, 0, nil,
+                &dataSize, &ids) == noErr else { return [] }
+        return ids
+    }
+
+    private static func pid(of obj: AudioObjectID) -> Int32? {
+        var addr = AudioObjectPropertyAddress(
+            mSelector: kAudioProcessPropertyPID,
+            mScope:    kAudioObjectPropertyScopeGlobal,
+            mElement:  kAudioObjectPropertyElementMain
+        )
+        var pid: Int32 = 0
+        var size = UInt32(MemoryLayout<Int32>.size)
+        guard AudioObjectGetPropertyData(obj, &addr, 0, nil, &size, &pid) == noErr else { return nil }
+        return pid
+    }
+
+    private static func bundleID(of obj: AudioObjectID) -> String? {
+        var addr = AudioObjectPropertyAddress(
+            mSelector: kAudioProcessPropertyBundleID,
+            mScope:    kAudioObjectPropertyScopeGlobal,
+            mElement:  kAudioObjectPropertyElementMain
+        )
+        var cf: CFString = "" as CFString
+        var size = UInt32(MemoryLayout<CFString?>.size)
+        let err = withUnsafeMutablePointer(to: &cf) { ptr -> OSStatus in
+            ptr.withMemoryRebound(to: UInt8.self, capacity: Int(size)) { _ in
+                AudioObjectGetPropertyData(obj, &addr, 0, nil, &size, ptr)
+            }
+        }
+        guard err == noErr else { return nil }
+        let s = cf as String
+        return s.isEmpty ? nil : s
+    }
+
+    private static func isRunningOutput(_ obj: AudioObjectID) -> Bool {
+        var addr = AudioObjectPropertyAddress(
+            mSelector: kAudioProcessPropertyIsRunningOutput,
+            mScope:    kAudioObjectPropertyScopeGlobal,
+            mElement:  kAudioObjectPropertyElementMain
+        )
+        var running: UInt32 = 0
+        var size = UInt32(MemoryLayout<UInt32>.size)
+        guard AudioObjectGetPropertyData(obj, &addr, 0, nil, &size, &running) == noErr else { return false }
+        return running != 0
+    }
+}
+
+/// Hybrid observer for the audio-process list.
+///
+/// **What's event-driven**: `kAudioHardwarePropertyProcessObjectList` on the
+/// system AudioObject — fires when a process appears in or disappears from
+/// the list. That's how an app shutting down its audio session (or quitting)
+/// removes its pill within one push of the change.
+///
+/// **What's polled (1s)**: per-process `kAudioProcessPropertyIsRunningOutput`.
+/// We tried `AudioObjectAddPropertyListenerBlock` on each process — CoreAudio
+/// accepts the registration silently but never fires the block. The property
+/// is documented as queryable; observability isn't guaranteed in practice.
+/// A 1s poll is the only honest way to catch a process whose `isRunningOutput`
+/// flipped without the list itself changing.
+///
+/// **What we cannot speed up**: a browser (Arc / Chrome / Safari) keeps its
+/// output stream open for several seconds after the user pauses — the
+/// property reads `true` until the browser-side audio-session timer
+/// expires. No daemon-side trick can shorten that. The pill disappears the
+/// moment the browser actually releases the stream. The 1s poll is just the
+/// max lag we contribute on top of that.
+final class AudioProcessesObserver: RefCountedObserver {
+    static let shared = AudioProcessesObserver()
+    private override init() { super.init() }
+
+    private let listenerQueue = DispatchQueue.global(qos: .utility)
+    private let lock = NSLock()
+    private var listBlock: AudioObjectPropertyListenerBlock?
+    private var pollTimer: Timer?
+
+    override func install() -> Token? {
+        // List listener. Fires on add/remove of process objects.
+        var listAddr = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyProcessObjectList,
+            mScope:    kAudioObjectPropertyScopeGlobal,
+            mElement:  kAudioObjectPropertyElementMain
+        )
+        let list: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+            self?.pollAndFire()
+        }
+        lock.lock()
+        listBlock = list
+        AudioObjectAddPropertyListenerBlock(
+            AudioObjectID(kAudioObjectSystemObject), &listAddr,
+            listenerQueue, list
+        )
+        lock.unlock()
+
+        // 1s poll for the IsRunningOutput flip that the list listener can't
+        // see. `fireIfChanged` (per-stack dedupe in Bridge.startChannel)
+        // suppresses the push when the snapshot hasn't actually changed —
+        // steady-state cost is one CoreAudio property query loop.
+        let t = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+            self?.pollAndFire()
+        }
+        RunLoop.main.add(t, forMode: .common)
+        pollTimer = t
+
+        return Token { [weak self] in
+            guard let self = self else { return }
+            var listAddr = AudioObjectPropertyAddress(
+                mSelector: kAudioHardwarePropertyProcessObjectList,
+                mScope:    kAudioObjectPropertyScopeGlobal,
+                mElement:  kAudioObjectPropertyElementMain
+            )
+            self.lock.lock()
+            if let lb = self.listBlock {
+                AudioObjectRemovePropertyListenerBlock(
+                    AudioObjectID(kAudioObjectSystemObject), &listAddr,
+                    self.listenerQueue, lb
+                )
+                self.listBlock = nil
+            }
+            self.lock.unlock()
+            self.pollTimer?.invalidate()
+            self.pollTimer = nil
+        }
+    }
+
+    private func pollAndFire() {
+        let snap = AudioProcesses.snapshot()
+        if let data = try? JSONSerialization.data(withJSONObject: snap, options: [.sortedKeys]) {
+            fireIfChanged("audioProcesses", hash: data.hashValue)
+        } else {
+            fire()
+        }
+    }
+}
+
 // MARK: - Media (now playing)
 
 // MRMediaRemote.framework private SPI. Covers Spotify / Apple Music /

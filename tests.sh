@@ -41,6 +41,7 @@ TEST_SOURCES=(
   Tests/DisplayDDCTests.swift
   Tests/AppsTests.swift
   Tests/AudioTests.swift
+  Tests/AudioProcessesTests.swift
   Tests/AXTests.swift
   Tests/DevicesTests.swift
   Tests/DisplayTests.swift
@@ -98,9 +99,33 @@ C_SOURCES=(
   Sources/C/SafePredicate.m
 )
 
+# Pre-compile C / ObjC sources to .o. When the combined Swift source list
+# grows past a swiftc-internal threshold (hit after Bridge was split across
+# multiple BridgeXxx.swift files in 2026-06), swiftc silently drops the
+# `-x c` / `-x objective-c` invocations for any .c/.m args, then ld bails
+# with "unknown file type". Build.sh doesn't hit the threshold so this
+# bypass is only needed for the test target. Apple-side bug.
+#
+# Recompile only when the source is newer than the .o (mtime gate). Avoids
+# the "input file modified during the build" race swiftc raises when its
+# arg files change inside one invocation — every test run was rebuilding
+# the .o files and swiftc would catch them mid-compile otherwise.
+mkdir -p .build/test-obj
+if [[ Sources/C/TouchEvents.c -nt .build/test-obj/TouchEvents.o ]]; then
+  clang -c -Wno-zero-length-array -fobjc-arc \
+    -target arm64-apple-macos13.0 \
+    -o .build/test-obj/TouchEvents.o Sources/C/TouchEvents.c
+fi
+if [[ Sources/C/SafePredicate.m -nt .build/test-obj/SafePredicate.o ]]; then
+  clang -c -Wno-zero-length-array -fobjc-arc \
+    -target arm64-apple-macos13.0 \
+    -o .build/test-obj/SafePredicate.o Sources/C/SafePredicate.m
+fi
+
 swiftc \
   -o .build/stackd-tests \
-  "${SWIFT_SOURCES[@]}" "${TEST_SOURCES[@]}" "${C_SOURCES[@]}" \
+  "${SWIFT_SOURCES[@]}" "${TEST_SOURCES[@]}" \
+  .build/test-obj/TouchEvents.o .build/test-obj/SafePredicate.o \
   -import-objc-header Sources/C/StackdBridge.h \
   -Xcc -Wno-zero-length-array \
   -framework AppKit \

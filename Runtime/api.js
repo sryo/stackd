@@ -664,6 +664,18 @@ export const sd = {
   audio: {
     output:     channel("audioOutput"),
     input:      channel("audioInput"),
+    // Per-process audio enumeration. Array of every process currently
+    // connected to an audio device:
+    //   [{ pid, bundleId, name, playingOutput }, …]
+    // playingOutput flips true while the process is producing sound and
+    // false the moment it pauses/stops — driven by CoreAudio's
+    // kAudioProcessPropertyIsRunningOutput (macOS 14.4+). bundleId/name
+    // may be null for system processes without a bundle.
+    // Lighter than sd.media.nowPlaying — no track metadata, just "who's
+    // making sound" — but covers EVERY app, not just MediaRemote-aware
+    // ones. Pair with sd.media.nowPlaying for the rich active pill +
+    // bare secondary pills per app.
+    processes:  channel("audioProcesses"),
     setVolume(v) { return request({ type: "audio.setVolume", value: v }); },
     setMuted(m)  { return request({ type: "audio.setMuted",  value: !!m }); },
     setInputVolume(v) { return request({ type: "audio.setInputVolume", value: v }); },

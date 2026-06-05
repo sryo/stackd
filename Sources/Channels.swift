@@ -91,6 +91,7 @@ enum Channels {
         Channel(name: "netThroughput",   jsPath: "net.throughput",     permission: "net"),
         Channel(name: "audioOutput",     jsPath: "audio.output",       permission: "audio"),
         Channel(name: "audioInput",      jsPath: "audio.input",        permission: "audio"),
+        Channel(name: "audioProcesses",  jsPath: "audio.processes",    permission: "audio"),
         Channel(name: "displays",        jsPath: "display.all",        permission: "display"),
         Channel(name: "displaysChanged", jsPath: "display.changed",    permission: "display"),
         Channel(name: "media",           jsPath: "media.nowPlaying",   permission: "media"),
