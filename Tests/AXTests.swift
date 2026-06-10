@@ -103,4 +103,20 @@ func registerAXTests() {
         // invariant: counts are never negative.
         try expect(AXObserverPool.liveObserverCount() >= 0, "pool count must be non-negative")
     }
+
+    test("AXAppObserver.routes — app-scope broadcasts, element-scope matches only itself") {
+        // One window's miniaturize must not fan out to every window's
+        // closure: element-scoped subscriptions fire only for their own
+        // element; app-element subscriptions receive all (their callback
+        // element is the affected child, e.g. kAXWindowCreated's window).
+        let app = AXUIElementCreateApplication(getpid())
+        let winA = AXUIElementCreateApplication(1)      // distinct stand-in elements —
+        let winB = AXUIElementCreateSystemWide()        // CFEqual-distinct from `app`
+        try expect(AXAppObserver.routes(target: app, appElement: app, affected: winA),
+                   "app-scoped subscription must receive child notifications")
+        try expect(AXAppObserver.routes(target: winA, appElement: app, affected: winA),
+                   "element-scoped subscription must receive its own element")
+        try expect(!AXAppObserver.routes(target: winB, appElement: app, affected: winA),
+                   "element-scoped subscription must NOT receive another element's event")
+    }
 }

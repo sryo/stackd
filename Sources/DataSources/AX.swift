@@ -440,8 +440,18 @@ final class AXAppObserver {
             let name = notif as String
             // Snapshot before iterating — a callback that synchronously
             // cancels its own Token mutates subs mid-loop otherwise.
+            //
+            // Route by element, not just notification name: with per-window
+            // subscriptions, name-only matching fanned ONE window's
+            // miniaturize out to EVERY window's closure (each with a
+            // different baked-in wid) — minimizing one window banged
+            // "minimized" for all of them. App-element subscriptions stay
+            // broadcast scope: their callback element is the affected CHILD
+            // (kAXWindowCreated delivers the new window, not the app).
             for entry in Array(me.subs.values) where entry.notif == name {
-                entry.cb(element, name)
+                if AXAppObserver.routes(target: entry.target, appElement: me.appElement, affected: element) {
+                    entry.cb(element, name)
+                }
             }
         }
         let err = AXObserverCreate(pid, callback, &obs)
@@ -463,6 +473,13 @@ final class AXAppObserver {
     /// observer dropping out of scope.
     func add(notification: String, callback: @escaping (String) -> Void) -> Token? {
         add(target: appElement, notification: notification) { _, name in callback(name) }
+    }
+
+    /// Pure routing predicate for the AXObserver dispatch: app-scoped
+    /// subscriptions (target == appElement) receive every notification of
+    /// their type; element-scoped subscriptions only their own element's.
+    static func routes(target: AXUIElement, appElement: AXUIElement, affected: AXUIElement) -> Bool {
+        return CFEqual(target, appElement) || CFEqual(target, affected)
     }
 
     /// As `add(notification:callback:)` but the callback also receives the
