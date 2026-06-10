@@ -122,6 +122,20 @@ swiftc -O \
   -F "$(xcrun --sdk macosx --show-sdk-path)/System/Library/PrivateFrameworks" \
   -target arm64-apple-macos13.0
 
+# Stable code signature so TCC trust (Accessibility → CGEventTap) survives
+# rebuilds. The linker's ad-hoc signature changes on every build; under
+# launchd the daemon is its own TCC identity, so an unstable signature
+# silently disables eventtaps after each rebuild (terminal-spawned daemons
+# never hit this — they inherit the terminal's trust). Prefer Developer ID
+# (multi-year validity) over Apple Development (yearly expiry); skip when no
+# identity exists (CI) — the ad-hoc signature is fine there.
+SIGN_ID=$(security find-identity -v -p codesigning 2>/dev/null | awk '/Developer ID Application/ {print $2; exit}')
+[[ -z "$SIGN_ID" ]] && SIGN_ID=$(security find-identity -v -p codesigning 2>/dev/null | awk '/Apple Development/ {print $2; exit}')
+if [[ -n "$SIGN_ID" ]]; then
+  codesign -f -s "$SIGN_ID" .build/stackd
+  echo "Signed .build/stackd ($SIGN_ID)"
+fi
+
 # Stage Runtime next to the binary so URLSchemeHandler can find it via
 # Bundle.main.executableURL. (Eventually this becomes Contents/Resources/Runtime
 # inside a .app bundle.) Symlink during dev so edits propagate without rebuild.
