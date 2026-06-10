@@ -11,13 +11,19 @@ final class Bridge: NSObject, WKScriptMessageHandler {
     // Per-channel JSON dedupe cache, keyed by the channel name used in
     // push(channel:json:). Every startXxx() reads + writes via this dict so
     // adding a new channel doesn't require declaring another `lastXxx` field.
-    private var lastState: [String: String] = [:]
+    // Widened from private to internal so BridgeChannels.swift's startXxx()
+    // starters can dedupe against it.
+    var lastState: [String: String] = [:]
     // Parsed snapshot used to compute the sd.apps.changed delta — keyed by
     // bundleId because pids recycle but bundleIds are stable across launches.
     // Not a string cache, so it sits next to lastState rather than inside it.
-    private var lastAppsByBundle: [String: [String: Any]] = [:]
-    // Same shape for sd.windows.changed — keyed by CGWindowID.
-    private var lastWindowsByID: [Int: [String: Any]] = [:]
+    // Widened from private to internal so BridgeChannels.swift's startApps()
+    // can compute the delta.
+    var lastAppsByBundle: [String: [String: Any]] = [:]
+    // Same shape for sd.windows.changed — keyed by CGWindowID. Widened from
+    // private to internal so BridgeChannels.swift's startWorkspace() can
+    // compute the delta.
+    var lastWindowsByID: [Int: [String: Any]] = [:]
     // First-tick suppression for windows.changed (and apps.changed had this
     // implicitly via lastAppsByBundle being empty). Set true after the first
     // windowsAll push lands; only then do we start emitting deltas, so the
@@ -26,16 +32,18 @@ final class Bridge: NSObject, WKScriptMessageHandler {
     // replayState pushes lastState[channel] verbatim into JS via
     // `__sd_push("name", <RAW>)`, and any non-JSON marker like "primed"
     // becomes an undefined-identifier ReferenceError.
-    private var windowsChangedPrimed: Bool = false
+    // Primed flags + delta caches below widened from private to internal so
+    // BridgeChannels.swift's starters can read/write them.
+    var windowsChangedPrimed: Bool = false
     // Same shape again for sd.displays.changed — keyed by displayID.
-    private var lastDisplaysByID: [Int: [String: Any]] = [:]
-    private var displaysChangedPrimed: Bool = false
+    var lastDisplaysByID: [Int: [String: Any]] = [:]
+    var displaysChangedPrimed: Bool = false
     // Same shape again for sd.menubar.changed — keyed by "<owner>|<title>"
     // since menubar items have no stable id. owner+title is the closest
     // thing to an identity (a third-party icon doesn't usually rename
     // itself mid-session; if it does the diff fires removed+added once).
-    private var lastMenubarByKey: [String: [String: Any]] = [:]
-    private var menubarChangedPrimed: Bool = false
+    var lastMenubarByKey: [String: [String: Any]] = [:]
+    var menubarChangedPrimed: Bool = false
     // Widened from private to internal so BridgeStorage.swift's settings.*
     // closures can read/write the per-stack StackSettings.
     var settings: StackSettings?
@@ -53,7 +61,9 @@ final class Bridge: NSObject, WKScriptMessageHandler {
     // sd.windows.all channel — without this, the channel only re-fires
     // on focus changes and a background-app window closing never reaches
     // the stack's state. nil for stacks that don't need it.
-    fileprivate var windowsListPump: (() -> Void)?
+    // Widened from fileprivate to internal so BridgeChannels.swift's
+    // startWorkspace() can install the pump.
+    var windowsListPump: (() -> Void)?
     // Widened from private to internal so BridgeAX.swift's ax.* closures
     // can read/release handles via the per-Bridge HandleStore.
     let axHandles = AX.HandleStore()
@@ -198,8 +208,10 @@ final class Bridge: NSObject, WKScriptMessageHandler {
     // module that owns the channel. Currently honored by sensors / hostLoad /
     // displays — the three channels with a fixed-cadence poll. Event-driven
     // channels (mouse, frontApp, audio, …) ignore the gate.
-    fileprivate var channelIntervals: [String: TimeInterval] = [:]
-    fileprivate var lastChannelPushedAt: [String: Date] = [:]
+    // Widened from fileprivate to internal so BridgeChannels.swift's
+    // startChannel() can read the gate (channel.setInterval writes stay here).
+    var channelIntervals: [String: TimeInterval] = [:]
+    var lastChannelPushedAt: [String: Date] = [:]
     /// Per-stack native-resource scope. Every observer subscription, hotkey
     /// bind, eventtap register, menubar suppression goes in here. StackHost
     /// calls drain() on unload to release them all in reverse order.
@@ -346,58 +358,6 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         }
     }
 
-    static func screenInfo(screen: NSScreen, index: Int) -> [String: Any] {
-        let id = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID ?? 0
-        let uuid: String = {
-            guard let cf = CGDisplayCreateUUIDFromDisplayID(id)?.takeRetainedValue() else { return "" }
-            return CFUUIDCreateString(nil, cf) as String? ?? ""
-        }()
-        // Notch geometry: NSScreen exposes auxiliaryTopLeftArea /
-        // auxiliaryTopRightArea on notched displays (macOS 12+). Width of
-        // the notch = rightArea.origin.x - leftArea.size.width. On
-        // external/non-notched displays both are nil; we return null so
-        // stacks can branch on it.
-        var notchPayload: Any = NSNull()
-        if #available(macOS 12.0, *) {
-            if let lArea = screen.auxiliaryTopLeftArea,
-               let rArea = screen.auxiliaryTopRightArea,
-               lArea.width > 0, rArea.origin.x > lArea.width {
-                notchPayload = [
-                    "leftWidth":  Int(lArea.width),
-                    "rightX":     Int(rArea.origin.x),
-                    "width":      Int(rArea.origin.x - lArea.width),
-                    "safeAreaTop": Int(screen.safeAreaInsets.top)
-                ] as [String: Any]
-            }
-        }
-        // Top-left, matching sd.display.all and every other xy in sd.*.
-        let cgFrame = CGDisplayBounds(id)
-        let nsFrame = screen.frame, nsVisible = screen.visibleFrame
-        let topInset    = max(0, nsFrame.maxY - nsVisible.maxY)
-        let bottomInset = max(0, nsVisible.minY - nsFrame.minY)
-        let leftInset   = max(0, nsVisible.minX - nsFrame.minX)
-        let rightInset  = max(0, nsFrame.maxX - nsVisible.maxX)
-        let cgVisible = CGRect(
-            x: cgFrame.minX + leftInset,
-            y: cgFrame.minY + topInset,
-            width:  max(0, cgFrame.width  - leftInset - rightInset),
-            height: max(0, cgFrame.height - topInset  - bottomInset)
-        )
-        return [
-            "uuid":         uuid,
-            "displayID":    Int(id),
-            "index":        index,
-            "frame":        rect(cgFrame),
-            "visibleFrame": rect(cgVisible),
-            "notch":        notchPayload
-        ]
-    }
-
-    private static func rect(_ r: CGRect) -> [String: Int] {
-        ["x": Int(r.origin.x), "y": Int(r.origin.y),
-         "w": Int(r.size.width), "h": Int(r.size.height)]
-    }
-
     fileprivate static func buildPredicate(_ raw: StackManifest.EventTap.Predicate?) -> EventTapPredicate {
         var p = EventTapPredicate()
         guard let raw = raw else { return p }
@@ -409,38 +369,6 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         p.flagsAny  = raw.flagsAny
         return p
     }
-
-    /// Permission → channel-starter table walked by `start(manifest:)`.
-    /// One row per channel-vending permission ("app"/"windows" share
-    /// `startWorkspace` and are handled separately). The same-commit guard
-    /// is ChannelStartersTests: every replayable channel in `Channels.all`
-    /// must have its permission here (or be workspace-served) — a new
-    /// `Channel(...)` without a starter used to compile fine and silently
-    /// never replay.
-    static let channelStarters: [(permission: String, start: (Bridge) -> Void)] = [
-        ("battery",     { $0.startBattery() }),
-        ("mouse",       { $0.startMouse() }),
-        ("appearance",  { $0.startAppearance() }),
-        ("input",       { $0.startInput() }),
-        ("net",         { $0.startNetwork(); $0.startNetworkThroughput() }),
-        ("audio",       { $0.startAudio() }),
-        ("display",     { $0.startDisplay() }),
-        ("media",       { $0.startMedia() }),
-        ("calendar",    { $0.startCalendar() }),
-        ("privacy",     { $0.startPrivacy() }),
-        ("pasteboard",  { $0.startPasteboard() }),
-        ("apps",        { $0.startApps() }),
-        ("spaces",      { $0.startSpaces() }),
-        ("caffeinate",  { $0.startCaffeinate() }),
-        ("sensors",     { $0.startSensors() }),
-        ("location",    { $0.startLocation() }),
-        ("usb",         { $0.startUSB() }),
-        ("camera",      { $0.startCamera() }),
-        ("host",        { $0.startHost() }),
-        ("touchdevice", { $0.startTouchDevice() }),
-        ("displayLink", { $0.startDisplayLink() }),
-        ("menubar",     { $0.startMenubarItems() }),
-    ]
 
     func start(manifest: StackManifest) {
         self.stackId = manifest.id
@@ -855,6 +783,7 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         + Bridge.axPrimitives()
         + Bridge.eventsPrimitives()
         + Bridge.windowsPrimitives()
+        + Bridge.windowPrimitives()
         + Bridge.inlinePrimitives()
 
     /// Every permission string declared by any primitive — `.sync(...)`,
@@ -874,9 +803,6 @@ final class Bridge: NSObject, WKScriptMessageHandler {
     private static func inlinePrimitives() -> [Primitive] { [
         // Bootstrap
         .custom("ready") { bridge, _, _ in bridge.replayState() },
-
-        // Defaults / settings / pasteboard primitives → BridgeStorage.swift
-        // (storagePrimitives()).
 
         // Host — one-shot system info (hostname / OS / locale / arch / cpu / ram).
         // The 2s CPU+idle+memory signal is the sd.host.load channel pushed
@@ -906,23 +832,10 @@ final class Bridge: NSObject, WKScriptMessageHandler {
             Mouse.warp(x: (body["x"] as? Double) ?? 0, y: (body["y"] as? Double) ?? 0)
         },
 
-        // Audio primitives → BridgeAudio.swift (audioPrimitives()).
-
-        // Display primitives (setBrightness / getBrightness / snapshot) →
-        // BridgeDisplay.swift (displayPrimitives()).
-
-        // Menubar primitives (suppress / restore + addItem / item.* + items)
-        // → BridgeMenubar.swift (menubarPrimitives()). Note: only the JS-bound
-        // runtime API moved — manifest-driven startMenubarItems wiring still
-        // lives in start(manifest:).
-
         // Media
         .sync("media.command", permission: "media", denyValue: false) { body in
             Media.command(body["name"] as? String ?? "")
         },
-
-        // FS primitives (read/stat/list/write/mkdir/delete/move +
-        // watch.start/stop + xattr.*) → BridgeFS.swift (fsPrimitives()).
 
         // Native banner notifications via osascript display notification.
         // Fire-and-forget — see Notify.swift for the bundle-id rationale.
@@ -945,12 +858,6 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         .sync("sound.beep", permission: "sound", denyValue: false) { _ in
             Sound.beep(); return true
         },
-
-        // NLP primitives (language / tokens / lemmas / similarity) →
-        // BridgeNLP.swift (nlpPrimitives()).
-
-        // Spotlight primitives (find / subscribe / subscribe.stop) →
-        // BridgeSearch.swift (spotlightPrimitives()).
 
         // Update — pending macOS software updates via `softwareupdate -l`.
         // No TCC; the list verb runs without escalation. The subprocess is
@@ -989,16 +896,6 @@ final class Bridge: NSObject, WKScriptMessageHandler {
                 bridge?.respond(requestId: requestId, value: result as Any? ?? NSNull())
             }
         },
-
-        // Speech primitives (speak / stop / voices / locales +
-        // listen.start / .stop / .cancel) → BridgeSearch.swift
-        // (speechPrimitives()).
-
-        // Camera primitives (frame / stream.start / stream.stop) →
-        // BridgeCamera.swift (cameraPrimitives()).
-
-        // Calendar primitives (events / list / reminders / createEvent) →
-        // BridgeCalendar.swift (calendarPrimitives()).
 
         // Privacy — "what's actively recording right now?" one-shot read.
         // Cross-references AVCaptureDevice.isInUseByAnotherApplication
@@ -1073,12 +970,6 @@ final class Bridge: NSObject, WKScriptMessageHandler {
             }
         },
 
-        // SQLite primitives (open / exec / query / close) →
-        // BridgeSQLite.swift (sqlitePrimitives()).
-
-        // Proc primitives (exec / stream.start / stream.cancel) →
-        // BridgeProc.swift (procPrimitives()).
-
         // Shortcuts CLI invocation — async like proc.exec. Gated by the
         // "shortcuts" permission so a stack must opt in explicitly (a shortcut
         // can do almost anything: AppleScript, file I/O, network requests,
@@ -1106,11 +997,6 @@ final class Bridge: NSObject, WKScriptMessageHandler {
             }
         },
 
-        // Events primitives (events.type / .key / .scroll / .click +
-        // events.setTapRects) → BridgeEvents.swift (eventsPrimitives()).
-        // Note: only the runtime API moved — manifest-driven eventtap
-        // registration still lives in start(manifest:).
-
         // Cursor — warp / read. setPosition takes top-left global coords
         // (same convention as sd.mouse / sd.events.click); pass `display`
         // to interpret coords as display-local. Gated on a separate "cursor"
@@ -1125,11 +1011,6 @@ final class Bridge: NSObject, WKScriptMessageHandler {
                 display: displayID)
         },
         .sync("cursor.position", permission: "cursor") { _ in Cursor.position() },
-
-        // Apps primitives (launch / focus / kill / hide + menu / findMenuItem /
-        // selectMenuItem / visibleWindows / hideByPid / unhideByPid +
-        // focusedWindow / mainWindow / allWindows + isFrontmost / isHidden)
-        // → BridgeApps.swift (appsPrimitives()).
 
         // Curated AX surface for the system-wide focused text element.
         // Replaces the five-call sd.ax.{focused,attribute,parameterizedAttribute,
@@ -1159,10 +1040,6 @@ final class Bridge: NSObject, WKScriptMessageHandler {
             Icons.forFile(path: body["path"] as? String ?? "", size: body["size"] as? Int ?? 64)
         },
 
-        // Windows primitives (focused .setFrame/.minimize/.fullscreen/.raise +
-        // windows.byId.* + windows.byId.snapshot + windows.batch.{begin,commit})
-        // → BridgeWindows.swift (windowsPrimitives()).
-
         // Spaces — returns array; pre-refactor returned `[]` on deny.
         .sync("spaces.windowSpaces", permission: "spaces", denyValue: [NSNumber]()) { body in
             Spaces.windowSpaces(windowID: UInt32((body["id"] as? Int) ?? 0)).map { NSNumber(value: $0) }
@@ -1172,90 +1049,6 @@ final class Bridge: NSObject, WKScriptMessageHandler {
             return Spaces.minimizedWindows(spaceID: id).map { NSNumber(value: $0) }
         },
 
-        // AX primitives (focused / application / system / element handles +
-        // attributes / actions / tree walk + release / releaseAll) →
-        // BridgeAX.swift (axPrimitives()).
-
-        // Invocable-window control — async (must hop to main for AppKit).
-        .custom("window.invoke", denyValue: false) { bridge, _, requestId in
-            DispatchQueue.main.async { [weak bridge] in
-                if let win = bridge?.webView?.window as? StackWindow, win.invocable {
-                    win.invoke()
-                    bridge?.respond(requestId: requestId, value: true)
-                } else {
-                    bridge?.respond(requestId: requestId, value: false)
-                }
-            }
-        },
-        .custom("window.dismiss", denyValue: false) { bridge, _, requestId in
-            DispatchQueue.main.async { [weak bridge] in
-                if let win = bridge?.webView?.window as? StackWindow, win.invocable {
-                    win.dismiss()
-                    bridge?.respond(requestId: requestId, value: true)
-                } else {
-                    bridge?.respond(requestId: requestId, value: false)
-                }
-            }
-        },
-        // JS-controlled window alpha. Not gated to invocable — any stack can
-        // fade its panel (SideSwipe's volume/brightness disc, transient toasts,
-        // anything that wants the whole window to fade rather than just the
-        // WebView contents — CSS opacity on body doesn't reach the
-        // NSGlassEffectView's glass layer).
-        //
-        // First call disables the FirstPaintGate's auto-reveal — see
-        // StackWindow.setAlpha / FirstPaintGate.markOverridden.
-        .custom("window.setAlpha", denyValue: false) { bridge, body, requestId in
-            guard let alpha = StackWindow.parseSetAlpha(body) else {
-                bridge.respond(requestId: requestId, value: false)
-                return
-            }
-            DispatchQueue.main.async { [weak bridge] in
-                if let win = bridge?.webView?.window as? StackWindow {
-                    win.setAlpha(alpha)
-                    bridge?.respond(requestId: requestId, value: true)
-                } else {
-                    bridge?.respond(requestId: requestId, value: false)
-                }
-            }
-        },
-        // JS-controlled window frame. Input is in CG/AX convention (top-left
-        // origin) — matches sd.windows.focused / sd.ax.attribute. Width / height
-        // optional; omitted dimensions preserve current. Used by stacks that
-        // reposition per-invocation (Muse anchors to AX-focused element) where
-        // a single manifest anchor isn't expressive enough.
-        .custom("window.setFrame", denyValue: false) { bridge, body, requestId in
-            guard let f = StackWindow.parseSetFrame(body) else {
-                bridge.respond(requestId: requestId, value: false)
-                return
-            }
-            DispatchQueue.main.async { [weak bridge] in
-                if let win = bridge?.webView?.window as? StackWindow {
-                    win.setFrame(cgX: f.x, cgY: f.y, w: f.w, h: f.h)
-                    bridge?.respond(requestId: requestId, value: true)
-                } else {
-                    bridge?.respond(requestId: requestId, value: false)
-                }
-            }
-        },
-        // JS-controlled click-through. Bar-like stacks toggle this to route
-        // events between themselves and the system menubar underneath as the
-        // mouse moves over / off their item rects.
-        .custom("window.setClickThrough", denyValue: false) { bridge, body, requestId in
-            guard let v = StackWindow.parseSetClickThrough(body) else {
-                bridge.respond(requestId: requestId, value: false)
-                return
-            }
-            DispatchQueue.main.async { [weak bridge] in
-                if let win = bridge?.webView?.window as? StackWindow {
-                    win.setClickThrough(v)
-                    bridge?.respond(requestId: requestId, value: true)
-                } else {
-                    bridge?.respond(requestId: requestId, value: false)
-                }
-            }
-        },
-
         // Native popup menu — async (resolves on user pick / cancel).
         .custom("menu.popup", permission: "menu") { bridge, body, requestId in
             let items = body["items"] as? [[String: Any]] ?? []
@@ -1263,32 +1056,6 @@ final class Bridge: NSObject, WKScriptMessageHandler {
                 bridge?.respond(requestId: requestId, value: picked as Any? ?? NSNull())
             }
         },
-
-        // Menubar items (NSStatusItem) + menubar.items AX walk →
-        // BridgeMenubar.swift (menubarPrimitives()).
-
-        // Hotkey primitives (bind / unbind + mode.enter/exit/current) →
-        // BridgeHotkey.swift (hotkeyPrimitives()). Note: only the JS-bound
-        // runtime API moved — static manifest hotkey wiring still lives in
-        // StackHost (separate from sd.hotkey.bind).
-
-        // Broadcasts primitives (observe / unobserve) →
-        // BridgeBroadcasts.swift (broadcastsPrimitives()).
-
-        // URL-handler primitives (register / unregister) →
-        // BridgeURLHandler.swift (urlHandlerPrimitives()).
-
-        // Caffeinate primitives (assert / release) → BridgeCaffeinate.swift
-        // (caffeinatePrimitives()).
-
-        // Overlay primitives (attach / setTarget / eval / detach) →
-        // BridgeOverlay.swift (overlayPrimitives()).
-
-        // HTTP server primitives (serve / stop / respond) →
-        // BridgeHTTP.swift (httpServerPrimitives()).
-
-        // Bonjour primitives (publish / publish.stop / browse.start /
-        // browse.stop) → BridgeBonjour.swift (bonjourPrimitives()).
 
         // Tunable poll cadence. JS calls `sd.sensors.subscribe(fn, { interval })`
         // → api.js forwards this IPC → the bridge gates the per-stack fanout for
@@ -1404,544 +1171,6 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         }
     }
 
-    /// Wire a snapshot-driven channel: prime once, then refire on every
-    /// observer tick. Returning nil from `snapshot` skips the push — matches
-    /// the "no data yet" cases (host.load before its first diff, touchdevice
-    /// before the first frame, displayLink before vsync).
-    ///
-    /// Dedupe via lastState[name]: re-emitting an identical JSON blob is
-    /// pure overhead (WebKit roundtrip + signal subscribers re-running), and
-    /// most observers (Battery, Audio, Display) fire on broad notifications
-    /// where the underlying snapshot often hasn't actually changed.
-    private func startChannel(
-        name: String,
-        observer: RefCountedObserver,
-        snapshot: @escaping () -> Any?
-    ) {
-        let pushFn: () -> Void = { [weak self] in
-            guard let self = self else { return }
-            // Honor sd.channel.setInterval-set cadence: if a stack asked
-            // for a slower fanout on this channel, skip ticks that arrive
-            // earlier than the requested interval. Native polling rate is
-            // unchanged — this just gates the per-stack JSON + JS round-trip.
-            if let interval = self.channelIntervals[name],
-               let last = self.lastChannelPushedAt[name],
-               Date().timeIntervalSince(last) < interval {
-                return
-            }
-            guard let value = snapshot() else { return }
-            let json = Bridge.jsonify(value)
-            guard json != self.lastState[name] else { return }
-            self.lastState[name] = json
-            self.lastChannelPushedAt[name] = Date()
-            self.push(channel: name, json: json)
-        }
-        pushFn()
-        scope.adopt(observer.subscribe(pushFn))
-    }
-
-    private func startBattery() {
-        startChannel(name: "battery", observer: BatteryObserver.shared) {
-            // Additive: existing `percent` / `charging` keys keep their shape
-            // and position; the deep IOKit readings (IOPS dict + AppleSmart-
-            // Battery IORegistry) follow as optional fields. Each nil-able
-            // value goes through `?? NSNull()` so the JSON serializer emits
-            // `null` rather than dropping the key — stack authors see the
-            // same field shape on desktops (no battery) and on MacBooks
-            // alike.
-            [
-                "percent": Battery.percent(),
-                "charging": Battery.isCharging(),
-                "cycles": Battery.cycles() as Any? ?? NSNull(),
-                "health": Battery.health() as Any? ?? NSNull(),
-                "designCapacity": Battery.designCapacity() as Any? ?? NSNull(),
-                "maxCapacity": Battery.maxCapacity() as Any? ?? NSNull(),
-                "currentCapacity": Battery.currentCapacity() as Any? ?? NSNull(),
-                "amperage": Battery.amperage() as Any? ?? NSNull(),
-                "voltage": Battery.voltage() as Any? ?? NSNull(),
-                "timeRemaining": Battery.timeRemaining() as Any? ?? NSNull(),
-                "isFinishingCharge": Battery.isFinishingCharge() as Any? ?? NSNull(),
-            ]
-        }
-    }
-
-    private func startMouse() {
-        // Truncate to Int for the dedupe — sub-pixel jitter would otherwise
-        // push every tick. Matches the original ad-hoc interpolation.
-        // Enrich with the containing display so stacks don't reimplement the
-        // O(displays) forPoint loop on every tick. Display.forPoint is cheap
-        // (NSScreen.screens iteration, no DDC); on a typical 1-2 display
-        // setup this is sub-microsecond.
-        startChannel(name: "mouse", observer: MouseObserver.shared) {
-            let p = Mouse.location()
-            var payload: [String: Any] = ["x": Int(p.x), "y": Int(p.y)]
-            if let d = Display.forPoint(p) { payload["display"] = d }
-            return payload
-        }
-    }
-
-    private func startAppearance() {
-        startChannel(name: "appearance", observer: AppearanceObserver.shared) {
-            Appearance.current()
-        }
-    }
-
-    private func startInput() {
-        startChannel(name: "inputLayout", observer: InputObserver.shared) {
-            Input.currentLayout()
-        }
-    }
-
-    // Multi-channel: one observer (NetworkObserver) feeds three sd.net.*
-    // channels. Each branch independently dedupes against lastState so a wifi
-    // SSID change doesn't refire lan / path. Keeps its bespoke shape rather
-    // than splitting into three observers — the underlying NWPathMonitor is
-    // shared.
-    private func startNetwork() {
-        let pushFn: () -> Void = { [weak self] in
-            guard let self = self else { return }
-            let lanJson = Bridge.jsonify(NetLAN.current())
-            if lanJson != self.lastState["netLan"] {
-                self.lastState["netLan"] = lanJson
-                self.push(channel: "netLan", json: lanJson)
-            }
-            let wifiJson = Bridge.jsonify(NetWiFi.current())
-            if wifiJson != self.lastState["netWifi"] {
-                self.lastState["netWifi"] = wifiJson
-                self.push(channel: "netWifi", json: wifiJson)
-            }
-            // sd.net.path — derived from the same NWPathMonitor (no parallel
-            // monitor). NetworkObserver caches the latest NWPath; the priming
-            // fire() before any path callback can land sees nil, so skip the
-            // push until the first real update arrives. That matches
-            // sd.host.load / sd.touchdevice's "no data yet" handling.
-            if let path = NetworkObserver.shared.latestPath {
-                let pathJson = Bridge.jsonify(NetPath.snapshot(from: path))
-                if pathJson != self.lastState["netPath"] {
-                    self.lastState["netPath"] = pathJson
-                    self.push(channel: "netPath", json: pathJson)
-                }
-            }
-        }
-        pushFn()
-        scope.adopt(NetworkObserver.shared.subscribe(pushFn))
-    }
-
-    // Aggregate throughput across non-loopback interfaces. Replaces the
-    // `netstat -ib` setInterval(1s) in bar/items/throughput.js — observer
-    // owns the diff math + previous-sample cache so multiple stack
-    // subscribers all read the same rate per tick (the previous JS-side
-    // version recomputed per stack, drifting its baseline each call).
-    private func startNetworkThroughput() {
-        startChannel(name: "netThroughput", observer: NetworkThroughputObserver.shared) {
-            NetworkThroughputObserver.shared.current
-        }
-    }
-
-    private func startAudio() {
-        startChannel(name: "audioOutput", observer: AudioObserver.shared) {
-            Audio.current()
-        }
-        // Mirror channel for the default input device. Separate observer
-        // because each AudioObserver / AudioInputObserver owns its own
-        // listener-block refs and default-device selector — splitting keeps
-        // an input device change from re-firing the output channel and vice
-        // versa.
-        startChannel(name: "audioInput", observer: AudioInputObserver.shared) {
-            Audio.currentInput()
-        }
-        // Per-process audio enumeration (CoreAudio process objects, 14.4+).
-        // AudioProcessesObserver is hybrid: event-driven on the process list
-        // (add/remove), 1s poll on per-process IsRunningOutput (CoreAudio's
-        // listener for that property doesn't fire reliably). Pairs with
-        // sd.media.nowPlaying for the rich-active-pill + bare-secondary-
-        // pill multi-client bar UI.
-        startChannel(name: "audioProcesses", observer: AudioProcessesObserver.shared) {
-            AudioProcesses.snapshot()
-        }
-    }
-
-    private func startDisplay() {
-        // Custom push instead of startChannel so we can compute the
-        // sd.displays.changed delta inside the same dedupe branch — same
-        // shape as startApps / startWorkspace's windowsAll path.
-        let pushFn: () -> Void = { [weak self] in
-            guard let self = self else { return }
-            let snapshot = Display.all()
-            let json = Bridge.jsonify(snapshot)
-            if json == self.lastState["displays"] { return }
-            self.lastState["displays"] = json
-            self.push(channel: "displays", json: json)
-            let delta = Bridge.displaysDelta(snapshot: snapshot, previous: self.lastDisplaysByID)
-            self.lastDisplaysByID = delta.nowByID
-            if self.displaysChangedPrimed
-                && (!delta.added.isEmpty || !delta.removed.isEmpty || !delta.changed.isEmpty)
-            {
-                let payload: [String: Any] = [
-                    "added":   delta.added,
-                    "removed": delta.removed,
-                    "changed": delta.changed
-                ]
-                let deltaJson = Bridge.jsonify(payload)
-                self.lastState["displaysChanged"] = deltaJson
-                self.push(channel: "displaysChanged", json: deltaJson)
-            }
-            self.displaysChangedPrimed = true
-        }
-        pushFn()
-        scope.adopt(DisplayObserver.shared.subscribe(pushFn))
-    }
-
-    // Async snapshot: Media.nowPlaying delivers the dict on a background
-    // queue, so the dedupe/push hop has to land on main itself. Doesn't fit
-    // the synchronous startChannel helper.
-    private func startMedia() {
-        let pushFn: () -> Void = { [weak self] in
-            Media.nowPlaying { info in
-                guard let self = self else { return }
-                let json = info.map { Bridge.jsonify($0) } ?? "null"
-                DispatchQueue.main.async {
-                    if json == self.lastState["media"] { return }
-                    self.lastState["media"] = json
-                    self.push(channel: "media", json: json)
-                }
-            }
-        }
-        // Initial hydration runs off-main: Media.nowPlaying's MediaRemote-
-        // absent path AND the scripted-fallback path both block synchronously
-        // (Process.run + waitUntilExit, ~200-600ms cold) on the calling
-        // queue. startMedia runs during stack load on main — inline pushFn()
-        // would stutter every stack with `media` perm on a Spotify-active
-        // session. Hop to utility; the dedupe/push still lands on main.
-        DispatchQueue.global(qos: .utility).async { pushFn() }
-        scope.adopt(MediaObserver.shared.subscribe(pushFn))
-    }
-
-    // Store-change ping channel: EKEventStoreChanged fires when any app
-    // (Calendar.app, Reminders, an MDM sync, this daemon's own createEvent)
-    // writes to the EventKit database. Apple's docs note the notification's
-    // userInfo dict is always empty — there's no delta to ship. We push a
-    // monotonic timestamp so the channel's dedupe (lastState string compare)
-    // doesn't suppress repeat changes; JS subscribers re-fetch on every
-    // signal. Cheap fire-and-forget for stacks that want to keep an agenda
-    // view live without polling.
-    private func startCalendar() {
-        startChannel(name: "calendarChanged", observer: CalendarObserver.shared) {
-            // Payload is just a fresh timestamp so re-emission dedupe never
-            // suppresses a real store change. JS doesn't read the value —
-            // the channel is treated as a bell, not a snapshot.
-            ["ts": Date().timeIntervalSince1970]
-        }
-    }
-
-    // Privacy — polled 2s observer pushes the cross-categorical
-    // "what's recording" snapshot whenever the active set changes.
-    // startChannel's lastState dedupe handles the steady-state case
-    // (nothing recording → same payload tick after tick → no push).
-    // The snapshot itself reads AVCaptureDevice + CoreAudio property
-    // APIs; neither triggers a TCC prompt.
-    private func startPrivacy() {
-        startChannel(name: "privacy", observer: PrivacyObserver.shared) {
-            Privacy.recording()
-        }
-    }
-
-    // sd.menubar.observe — AX-walk the menubar every 2s, diff against the
-    // last push, fire on change. AX has no reliable push notification for
-    // status-item add/remove, so this is poll-and-diff via startChannel's
-    // built-in lastState dedupe. Cadence is tunable per-stack via
-    // sd.channel.setInterval. The MenubarItemsObserver keeps a per-PID
-    // owner-name cache alive across polls so the NSRunningApplication
-    // lookup (the slow part) doesn't repeat for steady-state items.
-    private func startMenubarItems() {
-        // Custom push instead of startChannel so we can compute the
-        // sd.menubar.changed delta inside the same dedupe branch —
-        // same shape as startDisplay / startApps.
-        let pushFn: () -> Void = { [weak self] in
-            guard let self = self else { return }
-            let snapshot = MenubarItemsObserver.shared.snapshot()
-            let json = Bridge.jsonify(snapshot)
-            if json == self.lastState["menubarItems"] { return }
-            self.lastState["menubarItems"] = json
-            self.push(channel: "menubarItems", json: json)
-            let delta = Bridge.menubarDelta(snapshot: snapshot, previous: self.lastMenubarByKey)
-            self.lastMenubarByKey = delta.nowByKey
-            if self.menubarChangedPrimed
-                && (!delta.added.isEmpty || !delta.removed.isEmpty || !delta.changed.isEmpty)
-            {
-                let payload: [String: Any] = [
-                    "added":   delta.added,
-                    "removed": delta.removed,
-                    "changed": delta.changed
-                ]
-                let deltaJson = Bridge.jsonify(payload)
-                self.lastState["menubarChanged"] = deltaJson
-                self.push(channel: "menubarChanged", json: deltaJson)
-            }
-            self.menubarChangedPrimed = true
-        }
-        pushFn()
-        scope.adopt(MenubarItemsObserver.shared.subscribe(pushFn))
-    }
-
-    private func startPasteboard() {
-        startChannel(name: "pasteboard", observer: PasteboardObserver.shared) {
-            // The signal payload is the current string (or null) — that's what
-            // every consumer (CloudPad URL copy, Palette clipboard verbs,
-            // Muse paste-at-caret) actually wants.
-            let s = Pasteboard.getString() ?? ""
-            return ["text": s, "changeCount": Pasteboard.changeCount]
-        }
-    }
-
-    // Custom: snapshot has a side effect (computing the apps.changed delta
-    // vs lastAppsByBundle) and emits a second channel. Doesn't fit
-    // startChannel.
-    private func startApps() {
-        let pushFn: () -> Void = { [weak self] in
-            guard let self = self else { return }
-            let snapshot = Apps.running()
-            let json = Bridge.jsonify(snapshot)
-            if json == self.lastState["apps"] { return }
-
-            // Compute delta vs last snapshot before updating cache. Consumers
-            // that only care about transitions (apptimeout, notunes) subscribe
-            // to "appsChanged" instead of iterating the full list every tick.
-            // WebKit GPU + Networking helpers share their bundleId across
-            // every WKWebView (one process per stack). Dictionary(uniqueKeysWithValues:)
-            // crashes on duplicate keys, so accept last-wins — the delta cares
-            // about transitions, not which specific PID landed.
-            var nowByBundle: [String: [String: Any]] = [:]
-            for app in snapshot {
-                if let bid = app["bundleId"] as? String { nowByBundle[bid] = app }
-            }
-            var added:   [[String: Any]] = []
-            var removed: [[String: Any]] = []
-            var changed: [[String: Any]] = []
-            for (bid, app) in nowByBundle {
-                if let prev = self.lastAppsByBundle[bid] {
-                    // Compare only the mutable fields. NSRunningApplication
-                    // surfaces active/hidden as the only things that flip
-                    // during a process's lifetime; name occasionally changes
-                    // on localization switches. Avoid jsonify() comparison
-                    // because Swift dict-key ordering is non-deterministic
-                    // and would fire "changed" on every poll for free.
-                    let a1 = (prev["active"] as? Bool) ?? false
-                    let a2 = (app["active"]  as? Bool) ?? false
-                    let h1 = (prev["hidden"] as? Bool) ?? false
-                    let h2 = (app["hidden"]  as? Bool) ?? false
-                    let n1 = (prev["name"]   as? String) ?? ""
-                    let n2 = (app["name"]    as? String) ?? ""
-                    if a1 != a2 || h1 != h2 || n1 != n2 {
-                        changed.append(app)
-                    }
-                } else {
-                    added.append(app)
-                }
-            }
-            for (bid, app) in self.lastAppsByBundle where nowByBundle[bid] == nil {
-                removed.append(app)
-            }
-            self.lastAppsByBundle = nowByBundle
-            self.lastState["apps"] = json
-            self.push(channel: "apps", json: json)
-            // Only emit a non-empty delta — first-tick "every app added" is
-            // noise (consumers already get the same data on sd.apps.running).
-            if !added.isEmpty || !removed.isEmpty || !changed.isEmpty {
-                let delta: [String: Any] = [
-                    "added":   added,
-                    "removed": removed,
-                    "changed": changed
-                ]
-                self.push(channel: "appsChanged", json: Bridge.jsonify(delta))
-            }
-        }
-        pushFn()
-        scope.adopt(AppsObserver.shared.subscribe(pushFn))
-    }
-
-    private func startSpaces() {
-        startChannel(name: "spaces", observer: SpacesObserver.shared) {
-            Spaces.all()
-        }
-    }
-
-    private func startCaffeinate() {
-        startChannel(name: "caffeinate", observer: CaffeinateObserver.shared) {
-            Caffeinate.snapshot()
-        }
-    }
-
-    private func startDisplayLink() {
-        // First-tick nil (vsync hasn't landed yet) → snapshot returns nil →
-        // startChannel skips the push.
-        startChannel(name: "displayLink", observer: DisplayLinkObserver.shared) {
-            DisplayLink.snapshot()
-        }
-    }
-
-    private func startSensors() {
-        startChannel(name: "sensors", observer: SensorsObserver.shared) {
-            Sensors.snapshot()
-        }
-    }
-
-    private func startLocation() {
-        // snapshot() is nil until authorization + first fix; emit an explicit
-        // "null" so the JS channel sees that initial state instead of staying
-        // un-fired. Wrap in [NSNull()] sentinel to flow through jsonify as
-        // "null".
-        startChannel(name: "location", observer: LocationObserver.shared) {
-            return Location.snapshot() ?? NSNull()
-        }
-    }
-
-    private func startUSB() {
-        startChannel(name: "usb", observer: USBObserver.shared) {
-            USB.snapshot()
-        }
-    }
-
-    private func startCamera() {
-        startChannel(name: "camera", observer: CameraObserver.shared) {
-            Camera.snapshot()
-        }
-    }
-
-    private func startHost() {
-        // First tick returns nil — CPU fractions need a prior sample to diff
-        // against. startChannel skips the push; the next 2s tick has the value.
-        startChannel(name: "hostLoad", observer: HostObserver.shared) {
-            Host.loadSnapshot()
-        }
-    }
-
-    private func startTouchDevice() {
-        // No-frame state (untouched trackpad before first event) → nil →
-        // startChannel skips. JS sees the channel stay at its null initial.
-        startChannel(name: "touchdevice", observer: TouchDeviceObserver.shared) {
-            TouchDevice.snapshot()
-        }
-    }
-
-    // Dual-observer: NSWorkspace activations + per-pid FrontmostWindowObserver
-    // for within-app focus/title changes. Emits up to six channels per tick:
-    //   - frontApp / focusedWindow / windowsAll (legacy union — backward compat)
-    //   - appActivated / focusedChanged / titleChanged (granular per-event-type,
-    //     per F15)
-    // Gated on includeApp / includeWindows flags. Doesn't fit startChannel's
-    // single-channel shape.
-    private func startWorkspace(includeApp: Bool, includeWindows: Bool) {
-        // Per-channel dedupe-and-push helpers. Each granular channel reuses
-        // lastState so re-firing the same payload (common when AX nudges
-        // multiple times for one focus change) doesn't traverse WebKit
-        // unnecessarily.
-        let pushAppActivated: () -> Void = { [weak self] in
-            guard let self = self, let app = App.frontmostApp() else { return }
-            let json = Bridge.jsonify(app)
-            if json == self.lastState["appActivated"] { return }
-            self.lastState["appActivated"] = json
-            self.push(channel: "appActivated", json: json)
-        }
-        let pushFocusedChanged: () -> Void = { [weak self] in
-            guard let self = self else { return }
-            let json = Windows.focused().map(Bridge.jsonify) ?? "null"
-            if json == self.lastState["focusedChanged"] { return }
-            self.lastState["focusedChanged"] = json
-            self.push(channel: "focusedChanged", json: json)
-        }
-        let pushTitleChanged: () -> Void = { [weak self] in
-            guard let self = self, let w = Windows.focused() else { return }
-            // Small payload — id, app, title, pid. Keeps the channel narrow
-            // so stacks that only care about title rename don't pay the
-            // whole focusedWindow dict on every keystroke in a renaming field.
-            let payload: [String: Any] = [
-                "id":    w["id"]    as Any? ?? NSNull(),
-                "app":   w["app"]   as Any? ?? "",
-                "title": w["title"] as Any? ?? "",
-                "pid":   w["pid"]   as Any? ?? 0
-            ]
-            let json = Bridge.jsonify(payload)
-            if json == self.lastState["titleChanged"] { return }
-            self.lastState["titleChanged"] = json
-            self.push(channel: "titleChanged", json: json)
-        }
-        // Legacy union channel: refire focusedWindow / windowsAll whenever
-        // either focusedChanged or titleChanged fires. Stacks still on
-        // sd.windows.focused see the same shape they always did.
-        let pushFn: () -> Void = { [weak self] in
-            guard let self = self else { return }
-            if includeApp, let app = App.frontmostApp() {
-                let json = Bridge.jsonify(app)
-                if json != self.lastState["frontApp"] {
-                    self.lastState["frontApp"] = json
-                    self.push(channel: "frontApp", json: json)
-                }
-            }
-            if includeWindows {
-                let json = Windows.focused().map(Bridge.jsonify) ?? "null"
-                if json != self.lastState["focusedWindow"] {
-                    self.lastState["focusedWindow"] = json
-                    self.push(channel: "focusedWindow", json: json)
-                }
-                let snapshot = Windows.all()
-                let allJson = Bridge.jsonify(snapshot)
-                if allJson != self.lastState["windowsAll"] {
-                    self.lastState["windowsAll"] = allJson
-                    self.push(channel: "windowsAll", json: allJson)
-                    // Compute the diff parallel to sd.apps.changed so
-                    // consumers (windowscape / undoclose / framemaster) can
-                    // pay diff-size instead of full-list-size. Suppress the
-                    // first-tick `added: everything` noise — that's the
-                    // same data sd.windows.all already delivered.
-                    let delta = Bridge.windowsDelta(snapshot: snapshot, previous: self.lastWindowsByID)
-                    self.lastWindowsByID = delta.nowByID
-                    if self.windowsChangedPrimed
-                        && (!delta.added.isEmpty || !delta.removed.isEmpty || !delta.changed.isEmpty)
-                    {
-                        let payload: [String: Any] = [
-                            "added":   delta.added,
-                            "removed": delta.removed,
-                            "changed": delta.changed
-                        ]
-                        let deltaJson = Bridge.jsonify(payload)
-                        self.lastState["windowsChanged"] = deltaJson
-                        self.push(channel: "windowsChanged", json: deltaJson)
-                    }
-                    self.windowsChangedPrimed = true
-                }
-            }
-        }
-        // Install granular per-event-type callbacks. FrontmostWindowObserver
-        // is multi-subscriber: append our handlers, scope-drain the tokens
-        // on stack unload. The previous design used single-slot callbacks
-        // and the LAST Bridge to set them won — every other stack's
-        // focusedChanged / titleChanged silently stopped firing.
-        if includeApp {
-            scope.adopt(FrontmostWindowObserver.shared.appendAppActivated(pushAppActivated))
-        }
-        if includeWindows {
-            scope.adopt(FrontmostWindowObserver.shared.appendFocusedChanged(pushFocusedChanged))
-            scope.adopt(FrontmostWindowObserver.shared.appendTitleChanged(pushTitleChanged))
-        }
-        // Prime each granular channel so subscribers don't wait for the first
-        // AX nudge to see a value.
-        if includeApp { pushAppActivated() }
-        if includeWindows {
-            pushFocusedChanged()
-            pushTitleChanged()
-        }
-        pushFn()
-        scope.adopt(FrontmostAppObserver.shared.subscribe(pushFn))
-        if includeWindows {
-            scope.adopt(FrontmostWindowObserver.shared.subscribe(pushFn))
-        }
-        // Expose pushFn for the AppDelegate window-lifecycle nudge — see
-        // the windowsListPump comment on the property for why this is
-        // needed (background window close has no focus-change signal).
-        self.windowsListPump = pushFn
-    }
-
     /// Refire `pushFn` (frontApp + focusedWindow + windowsAll + the
     /// matching deltas). AppDelegate calls this on every window
     /// create / destroy / title-change so stacks see `sd.windows.all`
@@ -1999,17 +1228,6 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         fireGlobal(handler: "onTap_\(callback)", args: [Bridge.jsonify(payload)])
     }
 
-    /// Escape an arbitrary string into a JS string literal. JSONSerialization
-    /// handles the corner cases (quotes, backslashes, control chars) that
-    /// naive replacement would miss.
-    fileprivate static func jsString(_ s: String) -> String {
-        if let data = try? JSONSerialization.data(withJSONObject: s, options: [.fragmentsAllowed]),
-           let out = String(data: data, encoding: .utf8) {
-            return out
-        }
-        return "\"\""
-    }
-
     /// Widened from private to internal so primitive groups extracted into
     /// their own files can push per-handle channels (spotlight:subscribe:<id>,
     /// speech:listen:<id>, …) without going through a re-export shim.
@@ -2029,157 +1247,6 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         }
         let script = "window.__sd_push && window.__sd_push(\"\(channel)\", \(json));"
         DispatchQueue.main.async { webView.evaluateJavaScript(script, completionHandler: nil) }
-    }
-
-    /// Widened from fileprivate to internal so BridgeMenubar.swift can
-    /// build IconSpec values for menubar.item.setIcon.
-    static func parseIconSpec(_ dict: [String: Any]) -> IconSpec {
-        IconSpec(
-            sfSymbol:  dict["sfSymbol"]  as? String,
-            pngBase64: dict["pngBase64"] as? String,
-            template:  dict["template"]  as? Bool ?? true
-        )
-    }
-
-    /// Widened from fileprivate to internal so BridgeMenubar.swift can
-    /// build StatusItemSpec values for menubar.addItem.
-    static func parseStatusItemSpec(_ body: [String: Any]) -> StatusItemSpec {
-        var spec = StatusItemSpec()
-        if let icon = body["icon"] as? [String: Any] { spec.icon = parseIconSpec(icon) }
-        spec.title   = body["title"]   as? String
-        spec.menu    = body["menu"]    as? [[String: Any]]
-        spec.tooltip = body["tooltip"] as? String
-        return spec
-    }
-
-    /// Generic added/removed/changed walk shared by `windowsDelta`,
-    /// `displaysDelta`, `menubarDelta`. Each caller plugs in its own
-    /// identity (how to key a row) and equality (which fields gate
-    /// `changed`); the loop below is identical. Returns the new
-    /// key-indexed cache so callers don't re-walk the snapshot.
-    ///
-    /// Rows whose `identity` returns nil are dropped — matches what the
-    /// per-channel adapters used to do (missing `id` / `displayID`).
-    static func computeDelta<K: Hashable>(
-        snapshot: [[String: Any]],
-        previous: [K: [String: Any]],
-        identity: (_ item: [String: Any]) -> K?,
-        equal: (_ prev: [String: Any], _ now: [String: Any]) -> Bool
-    ) -> (added: [[String: Any]], removed: [[String: Any]], changed: [[String: Any]], nowByKey: [K: [String: Any]]) {
-        var nowByKey: [K: [String: Any]] = [:]
-        for item in snapshot {
-            if let k = identity(item) { nowByKey[k] = item }
-        }
-        var added:   [[String: Any]] = []
-        var removed: [[String: Any]] = []
-        var changed: [[String: Any]] = []
-        for (k, item) in nowByKey {
-            if let prev = previous[k] {
-                if !equal(prev, item) { changed.append(item) }
-            } else {
-                added.append(item)
-            }
-        }
-        for (k, item) in previous where nowByKey[k] == nil {
-            removed.append(item)
-        }
-        return (added, removed, changed, nowByKey)
-    }
-
-    /// Pure delta computation between two menubar snapshots. Identity is
-    /// `"<owner>|<title>"` — menubar items have no stable id, so we key
-    /// by the closest persistent thing (owner app + item title). A rename
-    /// in place surfaces as a paired removed+added.
-    static func menubarDelta(snapshot: [[String: Any]], previous: [String: [String: Any]])
-        -> (added: [[String: Any]], removed: [[String: Any]], changed: [[String: Any]], nowByKey: [String: [String: Any]])
-    {
-        return computeDelta(
-            snapshot: snapshot,
-            previous: previous,
-            identity: { item in
-                let owner = (item["owner"] as? String) ?? ""
-                let title = (item["title"] as? String) ?? ""
-                return owner + "|" + title
-            },
-            equal: { prev, item in
-                // x + width + hidden are the only transition-y fields.
-                // owner / title are part of the key; they can't differ
-                // here by construction.
-                return (prev["x"]      as? Double) == (item["x"]      as? Double) &&
-                       (prev["width"]  as? Double) == (item["width"]  as? Double) &&
-                       (prev["hidden"] as? Bool)   == (item["hidden"] as? Bool)
-            }
-        )
-    }
-
-    /// Pure delta computation between two display snapshots. Identity is
-    /// displayID (CGDirectDisplayID); the "changed" detector compares
-    /// frame.{x,y,w,h} and brightness — the two fields that change at
-    /// macro frequency (arrangement / resolution / slider). Name, scale,
-    /// uuid, builtin are treated as immutable; if they ever do change
-    /// they'll surface as a paired removed+added.
-    static func displaysDelta(snapshot: [[String: Any]], previous: [Int: [String: Any]])
-        -> (added: [[String: Any]], removed: [[String: Any]], changed: [[String: Any]], nowByID: [Int: [String: Any]])
-    {
-        let d = computeDelta(
-            snapshot: snapshot,
-            previous: previous,
-            identity: { $0["displayID"] as? Int },
-            equal: { prev, now in
-                let b1 = (prev["brightness"] as? Float)
-                let b2 = (now["brightness"]  as? Float)
-                let f1 = (prev["frame"] as? [String: Any]) ?? [:]
-                let f2 = (now["frame"]  as? [String: Any]) ?? [:]
-                return b1 == b2 &&
-                    (f1["x"] as? Int) == (f2["x"] as? Int) &&
-                    (f1["y"] as? Int) == (f2["y"] as? Int) &&
-                    (f1["w"] as? Int) == (f2["w"] as? Int) &&
-                    (f1["h"] as? Int) == (f2["h"] as? Int)
-            }
-        )
-        return (d.added, d.removed, d.changed, d.nowByKey)
-    }
-
-    /// Pure delta computation between two window snapshots. Identity is
-    /// CGWindowID (recycled at most across reboots, monotonic within a
-    /// session). The "changed" detector compares only the mutable fields
-    /// consumers actually care about — title, frame.{x,y,w,h} — so a
-    /// jsonify round-trip can't false-fire on Swift dict key-order noise.
-    /// Returns the new id-keyed cache too so the caller doesn't rebuild it.
-    static func windowsDelta(snapshot: [[String: Any]], previous: [Int: [String: Any]])
-        -> (added: [[String: Any]], removed: [[String: Any]], changed: [[String: Any]], nowByID: [Int: [String: Any]])
-    {
-        let d = computeDelta(
-            snapshot: snapshot,
-            previous: previous,
-            identity: { $0["id"] as? Int },
-            equal: { prev, now in
-                let t1 = (prev["title"] as? String) ?? ""
-                let t2 = (now["title"]  as? String) ?? ""
-                let f1 = (prev["frame"] as? [String: Any]) ?? [:]
-                let f2 = (now["frame"]  as? [String: Any]) ?? [:]
-                return t1 == t2 &&
-                    (f1["x"] as? Int) == (f2["x"] as? Int) &&
-                    (f1["y"] as? Int) == (f2["y"] as? Int) &&
-                    (f1["w"] as? Int) == (f2["w"] as? Int) &&
-                    (f1["h"] as? Int) == (f2["h"] as? Int)
-            }
-        )
-        return (d.added, d.removed, d.changed, d.nowByKey)
-    }
-
-    static func jsonify(_ obj: Any) -> String {
-        // .fragmentsAllowed lets us serialize bare scalars (Bool/Int/String) at
-        // the top level — required for imperative API responses like
-        // setVolume → true, defaults.read → "value".
-        // .sortedKeys guarantees deterministic key order so the channel
-        // dedupe (string-compare against lastState[channel]) doesn't
-        // false-mismatch when two code paths build the same dict in
-        // different insertion orders (e.g. MediaRemote vs scripted-fallback
-        // building the media snapshot).
-        guard let data = try? JSONSerialization.data(withJSONObject: obj, options: [.fragmentsAllowed, .sortedKeys]),
-              let s = String(data: data, encoding: .utf8) else { return "null" }
-        return s
     }
 
     deinit {

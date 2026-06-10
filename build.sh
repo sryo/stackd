@@ -26,11 +26,13 @@ SWIFT_SOURCES=(
   Sources/BridgeCaffeinate.swift
   Sources/BridgeCalendar.swift
   Sources/BridgeCamera.swift
+  Sources/BridgeChannels.swift
   Sources/BridgeDisplay.swift
   Sources/BridgeEvents.swift
   Sources/BridgeFS.swift
   Sources/BridgeHTTP.swift
   Sources/BridgeHotkey.swift
+  Sources/BridgeJSON.swift
   Sources/BridgeMenubar.swift
   Sources/BridgeNLP.swift
   Sources/BridgeOverlay.swift
@@ -39,7 +41,9 @@ SWIFT_SOURCES=(
   Sources/BridgeSearch.swift
   Sources/BridgeStorage.swift
   Sources/BridgeURLHandler.swift
+  Sources/BridgeWindow.swift
   Sources/BridgeWindows.swift
+  Sources/Deltas.swift
   Sources/Channels.swift
   Sources/Permissions.swift
   Sources/IPC.swift
