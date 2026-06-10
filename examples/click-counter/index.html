@@ -1,0 +1,31 @@
+<!doctype html>
+<!-- sd-on:click demo: clickable buttons with zero plumbing. The panel is
+     click-through by default; the runtime tracks the buttons' rects and the
+     daemon flips click-through only while the pointer is over one — clicks
+     anywhere else on the panel still pass through to whatever is beneath. -->
+<html>
+<head><meta charset="utf-8">
+<style>
+  body { font: 13px -apple-system, sans-serif; color: white; margin: 0;
+         display: flex; flex-direction: column; align-items: center; gap: 8px; }
+  .count { font-size: 28px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .row { display: flex; gap: 8px; }
+  button { font: inherit; color: inherit; background: rgba(255,255,255,.15);
+           border: none; border-radius: 8px; padding: 4px 14px; cursor: pointer; }
+  button:hover { background: rgba(255,255,255,.3); }
+</style>
+</head>
+<body>
+  <div class="count" id="n">0</div>
+  <div class="row">
+    <button sd-on:click="bump(-1)">−1</button>
+    <button sd-on:click="bump(1)">+1</button>
+  </div>
+  <script type="module">
+    window.bump = (d) => {
+      const el = document.getElementById("n");
+      el.textContent = String(Number(el.textContent) + d);
+    };
+  </script>
+</body>
+</html>

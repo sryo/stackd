@@ -1,0 +1,8 @@
+{
+  "id": "click-counter",
+  "name": "Click Counter",
+  "anchor": { "edge": "top-right", "inset": [16, 96] },
+  "size":   { "w": 180, "h": 96 },
+  "material": "glass",
+  "cornerRadius": 20
+}

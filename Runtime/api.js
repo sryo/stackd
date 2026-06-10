@@ -2680,6 +2680,11 @@ function __sdProcessEachElement(el) {
   // against the current `item` / `index`. Returns the node (possibly the
   // input one in the keyed-reuse case).
   function applyTemplateOps(node, item, index) {
+    // sd-on:click handlers inside this clone read item/index from the
+    // nearest ancestor's __sdScope at click time. Re-stamped on keyed reuse
+    // so a reordered clone fires with its CURRENT item, not the one it was
+    // born with.
+    node.__sdScope = { item, index };
     for (const op of textOps) {
       const target = findByPath(node, op.path);
       if (!target || target.nodeType !== 3) continue;
@@ -2821,9 +2826,124 @@ function __sdSetupIfElement(el) {
   return { render, deps: compiled.deps };
 }
 
+// ── sd-on:click declarative click handling ─────────────────────────────────
+// `<button sd-on:click="addGlass()">+1</button>` makes the element clickable
+// with zero plumbing. Panels are click-through by default, so behind the
+// attribute the runtime (1) tracks the element's viewport rect and pushes
+// the set to the daemon via window.setInteractiveRects, where a daemon-
+// internal mouseMoved observer flips the panel's click-through as the
+// pointer enters/leaves, and (2) dispatches the click through ONE delegated
+// document listener — clones from sd-each can't carry listeners through
+// cloneNode, but data- attributes survive it, so handlers are looked up by
+// data-sd-on-click id at click time. Inside sd-each, `item` and `index` are
+// in scope (read from the clone's __sdScope, stamped by applyTemplateOps).
+//
+// Expressions share __sdCompilePlaceholder with {{ }} — same globals, same
+// (sd, item, index) signature. Errors are console.error'd, not swallowed:
+// a click the author wired IS the thing being debugged.
+//
+// Known limitation: rects refresh on DOM mutations, scroll/resize, panel
+// moves (stackd:frame), and transition/animation end — but not mid-CSS-
+// animation. A button that drifts while animating has a stale hover gate
+// until the animation settles.
+const __sdOnHandlers = new Map();
+let __sdOnNextId = 1;
+let __sdInteractiveInstalled = false;
+let __sdRectsScheduled = false;
+let __sdLastRectsPayload = null;
+
+function __sdSetupOnClickElement(el) {
+  const expr = el.getAttribute("sd-on:click");
+  el.removeAttribute("sd-on:click");
+  if (!expr || !expr.trim()) return;
+  const id = String(__sdOnNextId++);
+  __sdOnHandlers.set(id, __sdCompilePlaceholder(expr));
+  el.setAttribute("data-sd-on-click", id);
+  el.setAttribute("data-sd-interactive", "");
+  __sdEnsureInteractiveTracking();
+}
+
+function __sdDispatchOnClick(target) {
+  let el = target;
+  while (el && (!el.hasAttribute || !el.hasAttribute("data-sd-on-click"))) {
+    el = el.parentElement;
+  }
+  if (!el) return;
+  const compiled = __sdOnHandlers.get(el.getAttribute("data-sd-on-click"));
+  if (!compiled) return;
+  let scopeEl = el;
+  while (scopeEl && !scopeEl.__sdScope) scopeEl = scopeEl.parentElement;
+  const scope = scopeEl ? scopeEl.__sdScope : { item: undefined, index: undefined };
+  try {
+    compiled.fn(sd, scope.item, scope.index);
+  } catch (e) {
+    console.error("[stackd] sd-on:click failed:", String(e));
+  }
+}
+
+function __sdScheduleInteractiveRects() {
+  if (__sdRectsScheduled) return;
+  __sdRectsScheduled = true;
+  const raf = typeof requestAnimationFrame === "function"
+    ? requestAnimationFrame
+    : (fn) => setTimeout(fn, 16);
+  raf(() => {
+    __sdRectsScheduled = false;
+    if (typeof document.querySelectorAll !== "function") return;
+    const rects = [];
+    for (const el of document.querySelectorAll("[data-sd-interactive]")) {
+      const r = el.getBoundingClientRect();
+      if (r.width > 0 && r.height > 0) {
+        rects.push({ x: r.left, y: r.top, w: r.width, h: r.height });
+      }
+    }
+    // Dedupe — MutationObserver fires on every template re-render; only
+    // bother the daemon when the rect set actually changed.
+    const payload = JSON.stringify(rects);
+    if (payload === __sdLastRectsPayload) return;
+    __sdLastRectsPayload = payload;
+    request({ type: "window.setInteractiveRects", rects });
+  });
+}
+
+function __sdEnsureInteractiveTracking() {
+  if (__sdInteractiveInstalled) return;
+  __sdInteractiveInstalled = true;
+  document.addEventListener("click", (ev) => __sdDispatchOnClick(ev.target));
+  const schedule = () => __sdScheduleInteractiveRects();
+  // typeof guards: the JSC test harness has no DOM observers; tracking is
+  // a no-op there (rect pushing is exercised against the live daemon).
+  if (typeof MutationObserver === "function") {
+    new MutationObserver(schedule).observe(document.documentElement, {
+      subtree: true, childList: true, attributes: true, characterData: true
+    });
+  }
+  if (typeof ResizeObserver === "function") {
+    new ResizeObserver(schedule).observe(document.documentElement);
+  }
+  window.addEventListener("resize", schedule);
+  window.addEventListener("scroll", schedule, true);
+  window.addEventListener("stackd:frame", schedule);
+  document.addEventListener("transitionend", schedule, true);
+  document.addEventListener("animationend", schedule, true);
+  schedule();
+}
+
 function __sdCompileTemplates(root) {
   const SKIP = new Set(["SCRIPT", "STYLE"]);
   const PROBE = /\{\{[\s\S]+?\}\}/;
+
+  // sd-on:click first — BEFORE sd-each detaches its templates, so loop-body
+  // elements get their data- markers compiled in while still reachable
+  // (the markers then survive cloneNode; live listeners would not).
+  const onEls = [];
+  const onWalker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT);
+  let onEl;
+  while ((onEl = onWalker.nextNode())) {
+    if (SKIP.has(onEl.nodeName)) continue;
+    if (onEl.hasAttribute("sd-on:click")) onEls.push(onEl);
+  }
+  for (const e of onEls) __sdSetupOnClickElement(e);
 
   // sd-each first — each loop removes its template from the live DOM and
   // replaces it with a comment anchor. Doing this before the text/attr walks

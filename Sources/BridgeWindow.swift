@@ -73,6 +73,55 @@ extension Bridge {
                     }
                 }
             },
+            // sd-on:click backing. JS pushes the current set of interactive
+            // element rects (CSS viewport coords, re-pushed on DOM/layout/
+            // panel-frame changes); the daemon converts to global CG, gates a
+            // daemon-internal mouseMoved observer on them, and flips the
+            // panel's click-through as the pointer enters/leaves. The stack's
+            // JS never receives the mouse events — this is not an input
+            // permission surface, so like every window.* self-panel
+            // primitive it is permissionless.
+            .custom("window.setInteractiveRects", denyValue: false) { bridge, body, requestId in
+                guard let parsed = StackWindow.parseInteractiveRects(body) else {
+                    bridge.respond(requestId: requestId, value: false)
+                    return
+                }
+                DispatchQueue.main.async { [weak bridge] in
+                    guard let bridge = bridge,
+                          let win = bridge.webView?.window as? StackWindow else {
+                        bridge?.respond(requestId: requestId, value: false)
+                        return
+                    }
+                    guard win.createdClickThrough else {
+                        // Panel already receives clicks — nothing to gate.
+                        bridge.respond(requestId: requestId, value: true)
+                        return
+                    }
+                    let primaryMaxY = NSScreen.screens.first?.frame.maxY ?? 0
+                    let global = StackWindow.screenRects(
+                        viewport: parsed, panelFrame: win.frame, primaryMaxY: primaryMaxY)
+                    let key = "\(bridge.stackId):__sdInteractive"
+                    if !bridge.interactiveHoverInstalled {
+                        bridge.interactiveHoverInstalled = true
+                        // Empty gate first so the observer can't fire before
+                        // rects land (same requireRects boot pattern as
+                        // manifest eventtaps).
+                        EventTapRegistry.shared.setConsumerRects(key: key, rects: [])
+                        bridge.scope.adopt(EventTapRegistry.shared.register(
+                            eventType: .mouseMoved, key: key, emitLeave: true
+                        ) { [weak win] _, phase in
+                            guard let win = win, let phase = phase else { return }
+                            if phase == "enter" {
+                                DispatchQueue.main.async { win.setClickThrough(false) }
+                            } else if phase == "leave" {
+                                DispatchQueue.main.async { win.setClickThrough(true) }
+                            }
+                        })
+                    }
+                    EventTapRegistry.shared.setConsumerRects(key: key, rects: global)
+                    bridge.respond(requestId: requestId, value: true)
+                }
+            },
             // JS-controlled click-through. Bar-like stacks toggle this to route
             // events between themselves and the system menubar underneath as the
             // mouse moves over / off their item rects.

@@ -6,6 +6,11 @@ import WebKit
 final class StackWindow: NSPanel, WKNavigationDelegate {
     let webView: WKWebView
     let invocable: Bool
+    /// The manifest's clickThrough at creation. setInteractiveRects uses it
+    /// to decide whether hover-flipping is needed at all — a panel created
+    /// clickable already receives clicks, so the daemon-side mouseMoved
+    /// observer would be pure churn.
+    let createdClickThrough: Bool
 
     // didMove/didResize fire during live drags + on every setFrame re-entry;
     // dedupe against the prior frame so we only emit on real geometry changes.
@@ -52,6 +57,7 @@ final class StackWindow: NSPanel, WKNavigationDelegate {
         shape: StackShape = .rect
     ) {
         self.invocable = invocable
+        self.createdClickThrough = clickThrough
         let config = WKWebViewConfiguration()
         config.setURLSchemeHandler(schemeHandler, forURLScheme: "sd")
         let prefs = WKPreferences()
@@ -410,6 +416,38 @@ final class StackWindow: NSPanel, WKNavigationDelegate {
     /// `value` field is missing or not a Bool — bridge responds false.
     static func parseSetClickThrough(_ body: [String: Any]) -> Bool? {
         return body["value"] as? Bool
+    }
+
+    /// Parse a `window.setInteractiveRects` body: `rects` is an array of
+    /// {x, y, w, h} in CSS viewport coordinates (CSS px == AppKit points).
+    /// Strict like parseSetFrame — any malformed rect nils the whole call
+    /// and the bridge responds false. An empty array is valid: it clears
+    /// the hover gate.
+    static func parseInteractiveRects(_ body: [String: Any]) -> [CGRect]? {
+        guard let raw = body["rects"] as? [[String: Any]] else { return nil }
+        var out: [CGRect] = []
+        for r in raw {
+            guard let x = r["x"] as? Double, x.isFinite,
+                  let y = r["y"] as? Double, y.isFinite,
+                  let w = r["w"] as? Double, w.isFinite, w > 0,
+                  let h = r["h"] as? Double, h.isFinite, h > 0 else { return nil }
+            out.append(CGRect(x: x, y: y, width: w, height: h))
+        }
+        return out
+    }
+
+    /// Convert CSS-viewport rects (top-left origin inside the panel) to
+    /// global CG top-left screen coords — the convention EventTapRegistry's
+    /// rect gates compare mouse locations against. Inverse companion of
+    /// `setFrame`'s flip: the panel's top edge in CG coords is
+    /// primaryMaxY - panelFrame.maxY; CSS x/y offsets then add directly
+    /// since both grow right/down from the panel's top-left corner.
+    static func screenRects(viewport: [CGRect], panelFrame: CGRect, primaryMaxY: CGFloat) -> [CGRect] {
+        let topCG = primaryMaxY - panelFrame.maxY
+        return viewport.map {
+            CGRect(x: panelFrame.minX + $0.minX, y: topCG + $0.minY,
+                   width: $0.width, height: $0.height)
+        }
     }
 
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {

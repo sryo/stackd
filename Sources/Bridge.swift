@@ -7,6 +7,11 @@ final class Bridge: NSObject, WKScriptMessageHandler {
     // Widened from fileprivate to internal so BridgeSQLite.swift's
     // sqlite.open closure can build the default per-stack data/ path.
     var stackId: String = ""
+    // Install-once latch for the sd-on:click hover observer (BridgeWindow's
+    // window.setInteractiveRects) — first call registers the daemon-internal
+    // mouseMoved gate, later calls only update its rects. The token drains
+    // with the scope on unload like every other observer.
+    var interactiveHoverInstalled = false
     private var permissions: [String] = []
     // Per-channel JSON dedupe cache, keyed by the channel name used in
     // push(channel:json:). Every startXxx() reads + writes via this dict so
