@@ -3,46 +3,302 @@
 <head><meta charset="utf-8"></head>
 <body>
 <script type="module">
-  // Draws a 2px accent border around whichever window is focused. Re-attaches
-  // every time sd.windows.focused changes; the previous overlay is detached
-  // before the next attach so we always own at most one overlay panel.
+  // Sole owner of the focused-window border.
   //
-  // Rendering is now plain WebKit — the overlay's WebView hosts a <div> with
-  // `position: absolute; inset: 1px; border: …; border-radius: …`. The
-  // daemon pins the overlay's NSPanel to the target window's frame each
-  // vsync, so the border just inherits the panel's size — no per-frame draw
-  // callback, no JS round-trip.
+  // Single-overlay architecture: one `sd.overlay.attach` call for the whole
+  // session. On every focus change we call `setTarget(winId)` +
+  // `eval('applyStyle(thickness, radius, color)')` to retarget and restyle
+  // the existing overlay. The prior detach+attach cycle raced on the daemon
+  // main thread and produced duplicate panels — one overlay accumulating per
+  // focus change in a rapid burst — until detach finally resolved.
+  // Architectural fix > tighter serialization.
+  //
+  // Subscribes to sd.windows.focusedChanged (the granular channel — the
+  // sd.windows.focused union also refires on titleChanged, which would
+  // restyle the overlay on every Slack/Code/Chrome tab edit).
+  //
+  // Color policy lives in OTHER stacks (e.g. windowscape). They emit a
+  // user-defined bang `overlay-border.inclusion` with `{ winId, included }`;
+  // we cache the verdict per-id so when focus returns to a window we already
+  // know which palette to use. Without a hint we default to the "included"
+  // color — the first-paint flash before windowscape's bang arrives is the
+  // documented tradeoff (no boot-handshake on a fast-path overlay).
+  //
+  // Per-window corner radius via sd.windows.cornerHints — same mapping the
+  // legacy windowscape/outline.lua used on Tahoe.
   import { sd } from "sd://runtime/api.js";
 
-  let current = null;          // { id, detach } from the last attach
-  let currentWid = null;       // CGWindowID we're decorating
-
-  sd.windows.focused.subscribe(async (win) => {
-    if (!win || typeof win.id !== "number") {
-      if (current) {
-        await current.detach();
-        current = null;
-        currentWid = null;
+  // --- config (persisted via sd.settings) ---------------------------------
+  const DEFAULTS = {
+    thickness:     8,
+    colorIncluded: "rgba(26,77,230,0.8)",
+    colorExcluded: "rgba(230,153,26,0.8)"
+  };
+  let cfg = { ...DEFAULTS };
+  async function loadConfig() {
+    for (const key of Object.keys(DEFAULTS)) {
+      const saved = await sd.settings.get(key);
+      if (saved == null) {
+        await sd.settings.set(key, DEFAULTS[key]);
+      } else {
+        cfg[key] = saved;
       }
-      return;
     }
-    if (currentWid === win.id) return;
-    if (current) await current.detach();
-    currentWid = win.id;
-    // Per-window corner radius: daemon returns raw AX hints; stack maps to
-    // 26 / 16 / 0 the same way WindowScape's outline.lua does on Tahoe.
-    const hints = (await sd.windows.cornerHints?.(win.id)) ?? {};
-    const radius =
-      hints.subrole === "AXSystemDialog" || hints.role === "AXScrollArea" ? 0 :
-      hints.toolbarPresent ? 26 : 16;
-    current = await sd.overlay.attach(win.id, {
+  }
+
+  // --- state --------------------------------------------------------------
+  // State-machine invariants (2026-06-09 wrong-window/invisible debugging —
+  // each clause earned its place by breaking on a real sequence):
+  //
+  //   1. `focusedWin` is the ONLY notion of "what is focused" (latest
+  //      focusedChanged payload, null when nothing has focus). `currentWid`
+  //      means strictly "the wid the DAEMON's overlay is targeted at" and is
+  //      only assigned after attach/setTarget CONFIRM. The old code reused
+  //      currentWid for both, so after a hide (palette focus, fullscreen
+  //      gate) currentWid still named the last *shown* window — and any
+  //      style refresh (spaces push, inclusion bang) resurrected the border
+  //      around that stale window while something else had focus. That was
+  //      the "border around the WRONG window" bug.
+  //
+  //   2. All paths — including focus-lost (null) — run through one
+  //      serialized latest-wins drain. The old code hid directly from the
+  //      subscription while an applyForWin was mid-await; the in-flight
+  //      apply then finished and re-showed the border with nothing focused.
+  //
+  //   3. A daemon `false` from setTarget/eval means the handle is dead
+  //      (scope drained, daemon-side teardown). We invalidate ALL local
+  //      claims (handle, currentWid, style cache) and re-attach once within
+  //      the same drain. The old code ignored the return value, so
+  //      currentWid claimed a target the daemon never accepted and the
+  //      style-key dedupe ate every later recovery attempt.
+  //
+  //   4. `lastStyleKey` is written only AFTER a successful eval, and reset
+  //      whenever the panel is (re)attached — a fresh panel boots unstyled,
+  //      so a stale cache hit would leave it permanently transparent.
+  let focusedWin = null;       // latest focusedChanged payload; null = no focus
+  let current = null;          // single overlay handle (kept for the session)
+  let currentWid = null;       // wid the DAEMON confirmed targeting (invariant 1)
+  let lastStyleKey = null;     // style cache; written post-success only (invariant 4)
+  let applying = false;        // drain() re-entrancy latch (invariant 2)
+  let dirty = false;           // an event landed while drain() was mid-await
+  // Inclusion verdicts pushed in by other stacks (windowscape etc.). Missing
+  // entries default to `true` so an unknown window paints the included color.
+  const inclusionByWinId = new Map();
+
+  // Fullscreen detection — sd.spaces.all entries (L10) carry displayID, so
+  // we index per-screen fullscreen state by display id directly. When the
+  // focused window's display has isFullscreen=true on its current active
+  // space, the visible chrome is the fullscreen-app's own — drawing our
+  // overlay on top adds a visible rectangle around the menubar-revealed
+  // edge that looks like a regression. Hide instead. The display is read
+  // off the focusedChanged payload itself (win.display), never off a
+  // peek() of the union channel — the union push trails the granular one,
+  // so peeking raced and compared against the PREVIOUS window.
+  let fullscreenDisplayIds = new Set();
+  sd.spaces.all.subscribe((snap) => {
+    fullscreenDisplayIds = new Set();
+    if (snap && typeof snap === "object") {
+      for (const info of Object.values(snap)) {
+        if (info && info.isFullscreen === true && typeof info.displayID === "number") {
+          fullscreenDisplayIds.add(info.displayID);
+        }
+      }
+    }
+    // Re-evaluate against the CURRENT focus (entering/leaving fullscreen
+    // flips the hide gate). Invalidate the style cache so a hidden→shown
+    // transition isn't deduped away.
+    if (focusedWin != null) { lastStyleKey = null; scheduleApply(); }
+  });
+  function isWindowInFullscreenSpace(win) {
+    if (!win || !win.display || typeof win.display.id !== "number") return false;
+    return fullscreenDisplayIds.has(win.display.id);
+  }
+
+  function colorForWin(winId) {
+    const included = inclusionByWinId.has(winId) ? inclusionByWinId.get(winId) : true;
+    return included ? cfg.colorIncluded : cfg.colorExcluded;
+  }
+
+  function radiusFromHints(h) {
+    if (!h) return 16;
+    if (h.subrole === "AXSystemDialog" || h.role === "AXScrollArea") return 0;
+    return h.toolbarPresent ? 26 : 16;
+  }
+
+  // Boot spec: a single border <div> plus a `window.applyStyle` function the
+  // host stack invokes via sd.overlay.eval. Each retarget pushes new
+  // thickness / radius / color; an empty style (thickness 0, transparent)
+  // hides the border for non-standard windows without tearing the panel
+  // down.
+  function bootSpec() {
+    return {
       css: `
         html, body { margin: 0; padding: 0; background: transparent; overflow: hidden; }
-        .border { position: absolute; inset: 1px; border: 2px solid #7c8cff;
-                  border-radius: ${radius}px; pointer-events: none; }
+        /* inset: 0 + box-sizing: border-box draws the border at the panel
+           edge — no inner padding before the border starts. */
+        #ws-border {
+          position: absolute;
+          inset: 0;
+          border: 0 solid transparent;
+          pointer-events: none;
+          transition: border-color 0.15s ease-out;
+          box-sizing: border-box;
+        }
       `,
-      html: `<div class="border"></div>`
+      html: `<div id="ws-border"></div>`,
+      js: `
+        window.applyStyle = function(thickness, radius, color) {
+          var el = document.getElementById('ws-border');
+          if (!el) return;
+          el.style.border = thickness + 'px solid ' + color;
+          el.style.borderRadius = radius + 'px';
+        };
+      `
+    };
+  }
+
+  // The daemon-side handle died (false return from setTarget/eval — scope
+  // drained or daemon restarted under us). Drop every local claim so the
+  // next applyOnce re-attaches from scratch. Resetting lastStyleKey here is
+  // load-bearing: the replacement panel boots unstyled, and a stale cache
+  // hit would dedupe away its first restyle (invariant 4).
+  function invalidateOverlay() {
+    current = null;
+    currentWid = null;
+    lastStyleKey = null;
+  }
+
+  // Style the panel transparent without tearing it down. Returns true when
+  // settled (including "nothing to hide"); a dead handle just invalidates —
+  // no panel means nothing visible, which is the hidden state anyway.
+  async function hideOnce() {
+    if (!current) return true;
+    if (lastStyleKey === "hidden") return true;
+    const ok = await current.eval("applyStyle(0,0,'transparent')").catch(() => false);
+    if (ok === false) { invalidateOverlay(); return true; }
+    lastStyleKey = "hidden";
+    return true;
+  }
+
+  // One settle attempt for the given focus snapshot. Returns false ONLY when
+  // the daemon handle died mid-apply (drain() then retries once, which
+  // re-attaches). All awaited reads target win.id, never global state — the
+  // drain loop re-runs with fresh focusedWin if focus moved mid-await.
+  async function applyOnce(win) {
+    if (!win || typeof win.id !== "number") return hideOnce();
+    const winId = win.id;
+
+    // Non-standard windows (palettes, ephemeral AX junk): hide the border
+    // but keep the overlay attached. Re-target to the next real window on
+    // focus change without paying for a fresh attach.
+    let standard = true;
+    try { standard = await sd.windows.isStandard(winId); } catch (_) { standard = true; }
+    if (!standard) return hideOnce();
+
+    // Fullscreen-space gate: when the focused window lives on a display
+    // whose active space is fullscreen, the fullscreen app owns the chrome.
+    if (isWindowInFullscreenSpace(win)) return hideOnce();
+
+    const color = colorForWin(winId);
+    const hints = await sd.windows.cornerHints(winId).catch(() => null);
+    const radius = radiusFromHints(hints);
+    const thickness = cfg.thickness;
+
+    if (!current) {
+      // Lazy first attach (and dead-handle re-attach). The boot spec
+      // installs window.applyStyle inside the overlay's WebView; every
+      // subsequent retarget calls it via eval().
+      const handle = await sd.overlay.attach(winId, bootSpec());
+      if (!handle) return true; // daemon refused; next focus event retries
+      current = handle;
+      currentWid = winId;
+      lastStyleKey = null; // fresh panel boots unstyled (invariant 4)
+    } else if (currentWid !== winId) {
+      const ok = await current.setTarget(winId).catch(() => false);
+      if (ok === false) { invalidateOverlay(); return false; } // invariant 3
+      currentWid = winId;
+    }
+
+    const styleKey = `${thickness}|${radius}|${color}`;
+    if (styleKey !== lastStyleKey) {
+      const js = `applyStyle(${thickness},${radius},${JSON.stringify(color)})`;
+      const ok = await current.eval(js).catch(() => false);
+      if (ok === false) { invalidateOverlay(); return false; } // invariant 3
+      lastStyleKey = styleKey;
+    }
+    return true;
+  }
+
+  // Serialized latest-wins drain. Every trigger (focus change, spaces push,
+  // inclusion bang) funnels here; a trigger landing mid-await sets `dirty`
+  // and the loop re-runs against the LATEST focusedWin — a 100ms cmd-tab
+  // burst settles on the final window without replaying intermediates.
+  function scheduleApply() {
+    if (applying) { dirty = true; return; }
+    drain();
+  }
+  async function drain() {
+    applying = true;
+    try {
+      let deadRetries = 0;
+      while (true) {
+        dirty = false;
+        const settled = await applyOnce(focusedWin);
+        // One re-attach retry per drain after a dead handle; if the daemon
+        // is truly gone the retry's attach returns null and we stop rather
+        // than spin.
+        if (!settled && deadRetries < 1) { deadRetries++; continue; }
+        if (!dirty) break;
+      }
+    } finally {
+      applying = false;
+    }
+  }
+
+  // Re-style for the current focus (verdict flip, fullscreen flip).
+  function refreshStyle() {
+    lastStyleKey = null;
+    scheduleApply();
+  }
+
+  // --- bang: external inclusion verdict ----------------------------------
+  // Other stacks (windowscape) push `{ winId, included }` so we know which
+  // palette to draw. We cache for every window we hear about; if the verdict
+  // is for the currently-FOCUSED window we restyle immediately. Compared
+  // against focusedWin, not currentWid — currentWid can lag in hidden
+  // states and restyling off it painted the previous window (invariant 1).
+  sd.bang.declare("overlay-border.inclusion").on((detail) => {
+    if (!detail || typeof detail.winId !== "number") return;
+    const next = !!detail.included;
+    const prev = inclusionByWinId.has(detail.winId)
+      ? inclusionByWinId.get(detail.winId)
+      : null;
+    inclusionByWinId.set(detail.winId, next);
+    if (focusedWin && detail.winId === focusedWin.id && prev !== next) refreshStyle();
+  });
+
+  // --- main subscription -------------------------------------------------
+  (async () => {
+    // A settings hiccup must not kill the border — defaults are fine.
+    try { await loadConfig(); } catch (_) {}
+    sd.windows.focusedChanged.subscribe((win) => {
+      focusedWin = (win && typeof win.id === "number") ? win : null;
+      scheduleApply();
     });
+  })();
+
+  // Belt-and-suspenders against orphan panels on hot-reload. Bridge.swift's
+  // scope.drain runs OverlayHandle.detach() async on main, which usually
+  // beats the next stack-load's first attach — but in practice we've seen
+  // stale panels survive multiple reloads. Firing detach synchronously on
+  // pagehide (WKWebView tear-down event) guarantees the panel is gone
+  // before the new instance can attach a successor.
+  window.addEventListener("pagehide", () => {
+    if (current) {
+      try { current.detach(); } catch (_) {}
+      current = null;
+      currentWid = null;
+    }
   });
 </script>
 </body>

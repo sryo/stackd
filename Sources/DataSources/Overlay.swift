@@ -52,6 +52,18 @@ final class OverlayHandle: NSObject, WKNavigationDelegate {
     // when nothing changed — both are server round-trips JankyBorders'
     // approach also short-circuits.
     private var lastFrame: CGRect = .zero
+    // Set by forceRepin() (retarget, CGS 808 reordered-event, panel
+    // re-show after the target returned from minimize). The next tick
+    // treats the frame as dirty so setFrame + reorderAboveTarget both
+    // re-run even when the geometry is byte-identical — the z-order can
+    // be stale while the frame is not (clicking an already-focused window
+    // raises it above the panel without moving it; the frame-diff
+    // short-circuit alone would then never reorder and the border would
+    // sit invisible behind its own target).
+    private(set) var repinRequested: Bool = false
+    // Ticks since the last SLSTransactionOrderWindow. Drives the
+    // low-frequency safety reorder in tick() — see OverlayRepinPolicy.
+    private var ticksSinceReorder: Int = 0
     // The WKWebView only accepts evaluateJavaScript after didFinish lands.
     // Until then we buffer the latest target geometry; on finish we flush.
     private var navigationReady: Bool = false
@@ -69,15 +81,26 @@ final class OverlayHandle: NSObject, WKNavigationDelegate {
 
     /// Re-point this overlay at a different target window. The vsync tick
     /// driving from Bridge reads `targetWID` per frame, so the next tick
-    /// fetches new SLSGetWindowBounds and repositions. Resets `lastFrame`
-    /// so the position update is forced even if the new window's frame
-    /// matches the prior frame coincidentally (a tile-resize cluster could
-    /// land two equal-sized windows back to back).
+    /// fetches new SLSGetWindowBounds and repositions. Requests a repin
+    /// so the position + z-order update is forced even if the new window's
+    /// frame matches the prior frame coincidentally (a tile-resize cluster
+    /// could land two equal-sized windows back to back).
     func setTarget(_ newWID: CGWindowID) {
         if released { return }
         if newWID == targetWID { return }
         targetWID = newWID
-        lastFrame = .zero
+        forceRepin()
+    }
+
+    /// Mark the cached frame dirty so the next tick re-runs setFrame +
+    /// reorderAboveTarget unconditionally. Callers (all main thread):
+    /// setTarget, Overlay.notifyWindowReordered (CGS 808 for our target),
+    /// and Bridge's tick closure when the panel transitions hidden→shown
+    /// after the target returns from minimize — in all three cases the
+    /// target's geometry may be unchanged while the z-order is stale.
+    func forceRepin() {
+        if released { return }
+        repinRequested = true
     }
 
     /// Evaluate JS in the overlay's WebView. Used by stacks that drive the
@@ -111,15 +134,30 @@ final class OverlayHandle: NSObject, WKNavigationDelegate {
         // (screen height - targetFrame.maxY).
         let appKitFrame = OverlayHandle.cgsToAppKit(targetFrame)
 
-        if !rectsApproxEqual(appKitFrame, lastFrame) {
+        // A requested repin invalidates the frame cache so BOTH the
+        // setFrame and the reorder below re-run this tick.
+        if repinRequested {
+            repinRequested = false
+            lastFrame = .zero
+        }
+
+        let frameChanged = !rectsApproxEqual(appKitFrame, lastFrame)
+        if frameChanged {
             panel.setFrame(appKitFrame, display: true)
             lastFrame = appKitFrame
-            // Ensure the panel sits above the target. Tag/level setup at
-            // attach time covers most cases; SLSTransactionOrderWindow with
-            // the target's wid as reference is the explicit "above this
-            // foreign window" signal that the WindowServer honors across
-            // app boundaries.
+        }
+        // Ensure the panel sits above the target. Tag/level setup at
+        // attach time covers most cases; SLSTransactionOrderWindow with
+        // the target's wid as reference is the explicit "above this
+        // foreign window" signal that the WindowServer honors across
+        // app boundaries. Reordered on frame change, on explicit repin
+        // (folded into frameChanged above), and on a low-frequency safety
+        // cadence — see OverlayRepinPolicy for why the cadence exists.
+        ticksSinceReorder += 1
+        if OverlayRepinPolicy.shouldReorder(frameChanged: frameChanged,
+                                            ticksSinceReorder: ticksSinceReorder) {
             reorderAboveTarget()
+            ticksSinceReorder = 0
         }
 
         // Push target geometry into the WebView. Spec authors absolute-position
@@ -203,6 +241,30 @@ final class OverlayHandle: NSObject, WKNavigationDelegate {
     }
 }
 
+// MARK: - Repin policy (pure, testable)
+
+/// Decides when a tick must re-assert the panel's z-order above its target.
+///
+/// Primary signal is event-driven: frame changes (move/resize/retarget) and
+/// explicit repins (CGS 808 "window reordered" for the target wid, routed
+/// via `Overlay.notifyWindowReordered`). The tick cadence is a SAFETY
+/// CEILING, not the mechanism: 808 is registered per-connection in
+/// WindowEvents and is yabai's canonical reorder source, but per the
+/// audio-processes precedent (2026-06-05: a CoreAudio listener that
+/// registered fine and never fired) we don't trust an unverified listener
+/// alone for a user-visible invariant. One SLSTransactionOrderWindow per
+/// ~cadence is a single WindowServer transaction — imperceptible cost
+/// against "border silently behind its own target until the next move."
+enum OverlayRepinPolicy {
+    /// ~1s at 120Hz, ~2s at 60Hz. Chosen ceiling — raises that 808 misses
+    /// stay wrong for at most this long.
+    static let reorderCadenceTicks = 120
+
+    static func shouldReorder(frameChanged: Bool, ticksSinceReorder: Int) -> Bool {
+        frameChanged || ticksSinceReorder >= reorderCadenceTicks
+    }
+}
+
 // MARK: - Borderless transparent overlay panel
 
 /// Borderless transparent NSPanel that hosts the overlay's WKWebView.
@@ -218,6 +280,32 @@ private final class OverlayPanel: NSPanel {
 // MARK: - Overlay (factory)
 
 enum Overlay {
+    /// Live handles, weakly held, for the CGS-808 reorder fan-out below.
+    /// Main-thread only (attach runs on main via BridgeOverlay; 808 events
+    /// hop to main in WindowEvents.handleModify). Weak table self-cleans
+    /// when Bridge drops a handle; the `released` guard in forceRepin
+    /// covers detached-but-not-yet-deallocated handles.
+    private static let liveHandles = NSHashTable<OverlayHandle>.weakObjects()
+
+    /// Track a handle for reorder-event fan-out. Called by attach();
+    /// internal (not fileprivate) so tests can exercise
+    /// notifyWindowReordered against degenerate handles.
+    static func register(_ handle: OverlayHandle) {
+        liveHandles.add(handle)
+    }
+
+    /// CGS 808 ("window reordered") landed for `wid`. If any live overlay
+    /// targets that window, its z-order may now be stale — the classic
+    /// case is clicking the already-focused window, which raises it above
+    /// the panel without changing its frame, so the frame-diff
+    /// short-circuit in tick() would never reorder. Request a repin; the
+    /// next vsync tick re-runs setFrame + SLSTransactionOrderWindow.
+    static func notifyWindowReordered(wid: CGWindowID) {
+        for handle in liveHandles.allObjects where handle.targetWID == wid {
+            handle.forceRepin()
+        }
+    }
+
     /// Attach a new WebKit overlay pinned to `targetID`. Returns nil on
     /// allocation failure. The handle owns the NSPanel — call `detach()`
     /// to release it.
@@ -306,7 +394,9 @@ enum Overlay {
         // cross-process z-ordering.
         panel.orderFrontRegardless()
 
-        return OverlayHandle(id: id, targetWID: targetID, panel: panel, webView: webView)
+        let handle = OverlayHandle(id: id, targetWID: targetID, panel: panel, webView: webView)
+        register(handle)
+        return handle
     }
 
     /// Read the current bounds of a window we don't own. Top-left origin,

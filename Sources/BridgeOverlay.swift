@@ -86,7 +86,16 @@ extension Bridge {
                             if h.panel.isVisible { h.panel.orderOut(nil) }
                             return
                         }
-                        if !h.panel.isVisible { h.panel.orderFrontRegardless() }
+                        if !h.panel.isVisible {
+                            h.panel.orderFrontRegardless()
+                            // Coming back from the target-hidden branch: the
+                            // target may have returned at its exact old frame
+                            // (un-minimize restores geometry), so the frame
+                            // diff alone would skip the SLS reorder and the
+                            // panel could sit BELOW the freshly-restored
+                            // target. Force the full repin path this tick.
+                            h.forceRepin()
+                        }
                         h.tick(targetFrame: frame)
                     }
                     bridge.overlayTokens[id] = token

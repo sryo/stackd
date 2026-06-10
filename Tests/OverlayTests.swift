@@ -165,6 +165,119 @@ func registerOverlayTests() {
                         "expected targetWID unchanged after detach + setTarget")
     }
 
+    // MARK: - OverlayRepinPolicy — z-order re-assert decision (pure)
+
+    test("OverlayRepinPolicy reorders on frame change regardless of tick count") {
+        // Frame changed = the target moved/resized/retargeted. The reorder
+        // must ride along every time — this is the event-driven primary.
+        try expectEqual(OverlayRepinPolicy.shouldReorder(frameChanged: true, ticksSinceReorder: 0), true)
+        try expectEqual(OverlayRepinPolicy.shouldReorder(frameChanged: true, ticksSinceReorder: 1), true)
+    }
+
+    test("OverlayRepinPolicy holds off below the cadence when the frame is static") {
+        // Static frame + recent reorder → skip the WindowServer round-trip.
+        // This is the short-circuit that keeps the per-vsync tick cheap.
+        try expectEqual(
+            OverlayRepinPolicy.shouldReorder(
+                frameChanged: false,
+                ticksSinceReorder: OverlayRepinPolicy.reorderCadenceTicks - 1),
+            false)
+        try expectEqual(OverlayRepinPolicy.shouldReorder(frameChanged: false, ticksSinceReorder: 0), false)
+    }
+
+    test("OverlayRepinPolicy fires the safety reorder at the cadence ceiling") {
+        // Regression pin for the "border invisible behind its own target"
+        // bug: clicking an already-focused window raises it above the panel
+        // WITHOUT changing its frame, so the frame-diff alone never
+        // reordered again. CGS 808 → forceRepin is the event-driven fix;
+        // this cadence is the documented ceiling if 808 ever goes quiet
+        // (audio-processes precedent: registered listeners that never fire).
+        try expectEqual(
+            OverlayRepinPolicy.shouldReorder(
+                frameChanged: false,
+                ticksSinceReorder: OverlayRepinPolicy.reorderCadenceTicks),
+            true)
+        // Cadence must stay low-frequency-but-finite: more than a handful
+        // of frames (not a per-tick hammer), bounded so staleness self-heals.
+        try expect(OverlayRepinPolicy.reorderCadenceTicks > 10,
+                   "cadence this low would reorder nearly every tick")
+        try expect(OverlayRepinPolicy.reorderCadenceTicks <= 600,
+                   "cadence this high leaves a wrong z-order visible for 5s+ at 120Hz")
+    }
+
+    // MARK: - OverlayHandle.forceRepin — explicit z-order invalidation
+
+    test("OverlayHandle.forceRepin marks the handle and setTarget implies it") {
+        // forceRepin is how CGS 808 (window reordered) and the panel
+        // re-show path tell the next tick "your cached frame comparison is
+        // a lie — re-run setFrame + reorder even if geometry is identical."
+        let panel   = NSPanel(contentRect: .zero, styleMask: .borderless,
+                              backing: .buffered, defer: true)
+        let webView = WKWebView(frame: .zero, configuration: WKWebViewConfiguration())
+        let h = OverlayHandle(id: 3, targetWID: 100, panel: panel, webView: webView)
+        try expectEqual(h.repinRequested, false, "fresh handle must not start dirty")
+        h.forceRepin()
+        try expectEqual(h.repinRequested, true)
+        // Retarget must also force the repin — two equal-sized tiled
+        // windows back to back would otherwise skip both setFrame and
+        // reorder on the swap. Own panel: each detach closes its panel
+        // exactly once (NSWindow double-close is an ARC over-release).
+        let panel2 = NSPanel(contentRect: .zero, styleMask: .borderless,
+                             backing: .buffered, defer: true)
+        let h2 = OverlayHandle(id: 4, targetWID: 100, panel: panel2,
+                               webView: WKWebView(frame: .zero, configuration: WKWebViewConfiguration()))
+        h2.setTarget(200)
+        try expectEqual(h2.repinRequested, true, "setTarget must request a repin")
+        h.detach()
+        h2.detach()
+    }
+
+    test("OverlayHandle.forceRepin on a detached handle is a safe no-op") {
+        // Same teardown race as setTarget: a CGS 808 can land while the
+        // stack reload is draining handles. The released guard must hold.
+        let panel   = NSPanel(contentRect: .zero, styleMask: .borderless,
+                              backing: .buffered, defer: true)
+        let webView = WKWebView(frame: .zero, configuration: WKWebViewConfiguration())
+        let h = OverlayHandle(id: 5, targetWID: 100, panel: panel, webView: webView)
+        h.detach()
+        h.forceRepin()
+        try expectEqual(h.repinRequested, false,
+                        "detached handle must not accept repin requests")
+    }
+
+    // MARK: - Overlay.notifyWindowReordered — CGS 808 fan-out
+
+    test("Overlay.notifyWindowReordered repins only handles targeting that wid") {
+        // The 808 callback fires for EVERY reorder system-wide; only the
+        // overlay pinned to the reordered window has a stale z-order.
+        // Per-handle panels: detach closes the panel, and closing the same
+        // NSPanel twice is an ARC over-release.
+        let panelA = NSPanel(contentRect: .zero, styleMask: .borderless,
+                             backing: .buffered, defer: true)
+        let panelB = NSPanel(contentRect: .zero, styleMask: .borderless,
+                             backing: .buffered, defer: true)
+        let onTarget  = OverlayHandle(id: 6, targetWID: 7001, panel: panelA,
+                                      webView: WKWebView(frame: .zero, configuration: WKWebViewConfiguration()))
+        let offTarget = OverlayHandle(id: 7, targetWID: 7002, panel: panelB,
+                                      webView: WKWebView(frame: .zero, configuration: WKWebViewConfiguration()))
+        Overlay.register(onTarget)
+        Overlay.register(offTarget)
+        Overlay.notifyWindowReordered(wid: 7001)
+        try expectEqual(onTarget.repinRequested, true,
+                        "handle targeting the reordered wid must repin")
+        try expectEqual(offTarget.repinRequested, false,
+                        "unrelated handle must not pay the reorder round-trip")
+        // Cleanup so later notify tests in this process don't see these.
+        onTarget.detach()
+        offTarget.detach()
+    }
+
+    test("Overlay.notifyWindowReordered with no registered handles is safe") {
+        // Boot order: WindowEvents can deliver an 808 before any stack has
+        // attached an overlay. Must be a clean no-op.
+        Overlay.notifyWindowReordered(wid: 12345)
+    }
+
     test("bounds and isOrderedIn agree on an invalid wid (both negative)") {
         // The per-vsync subscription in Bridge.swift checks `isOrderedIn`
         // first, then `bounds`. For an invalid wid both must short-circuit
