@@ -4,6 +4,10 @@ cd "$(dirname "$0")"
 
 mkdir -p .build
 
+# Regenerate the served Runtime/api.js artifact from Runtime/src/ modules —
+# JSHarness reads Runtime/api.js at test runtime.
+scripts/build-runtime.sh
+
 # Doc snippet sync check — fails fast if any <!-- include: ... --> block in
 # README/BELIEFS/CLAUDE has drifted from its source file.
 python3 docs/sync.py --check

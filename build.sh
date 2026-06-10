@@ -4,6 +4,9 @@ cd "$(dirname "$0")"
 
 mkdir -p .build
 
+# Regenerate the served Runtime/api.js artifact from Runtime/src/ modules.
+scripts/build-runtime.sh
+
 SWIFT_SOURCES=(
   Sources/main.swift
   Sources/AppDelegate.swift
