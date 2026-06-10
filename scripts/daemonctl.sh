@@ -27,7 +27,11 @@ STATE_DIR="$HOME/Library/Application Support/stackd"
 PID_FILE="$STATE_DIR/daemon.pid"
 SOCK_FILE="$STATE_DIR/daemon.sock"
 STOP_TIMEOUT_SECS="${STACKD_STOP_TIMEOUT:-5}"
-LAUNCHD_LABEL="com.stackd.daemon"
+# Label/path match the pre-existing hand-written LaunchAgent (discovered
+# 2026-06-09) so install REWRITES it instead of fighting it under a second
+# label. That plist had unconditional KeepAlive:true — every daemonctl stop
+# was silently resurrected by launchd within seconds.
+LAUNCHD_LABEL="stackd"
 PLIST_PATH="$HOME/Library/LaunchAgents/$LAUNCHD_LABEL.plist"
 
 log()  { printf '[daemonctl] %s\n' "$*" >&2; }
@@ -77,6 +81,8 @@ print_plist() {
   <array>
     <string>$BIN</string>
   </array>
+  <key>WorkingDirectory</key><string>$REPO_ROOT</string>
+  <key>ProcessType</key><string>Interactive</string>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key>
   <dict>
@@ -95,6 +101,12 @@ cmd_install() {
   if launchd_managed; then
     log "already installed — reinstalling"
     launchctl bootout "gui/$(id -u)/$LAUNCHD_LABEL" 2>/dev/null || true
+    # bootout is async — bootstrapping before the unload settles fails
+    # with EIO (5). Poll until the service is really gone.
+    for _ in $(seq 1 10); do
+      launchd_managed || break
+      sleep 0.5
+    done
   elif [[ -n "$(current_pid)" ]]; then
     fail "a manually-launched instance is running — 'daemonctl.sh stop' first"
   fi
