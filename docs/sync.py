@@ -20,7 +20,28 @@ import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-DOCS = [REPO_ROOT / "README.md", REPO_ROOT / "BELIEFS.md", REPO_ROOT / "CLAUDE.md"]
+
+
+def _collect_docs() -> list[Path]:
+    """Doc surfaces with potential <!-- include: ... --> blocks.
+
+    The fixed list is the canonical project docs; the globs sweep Claude Code
+    project-local scaffolding so newly-added agents/commands/skills auto-
+    participate without re-editing this file.
+    """
+    fixed = [
+        REPO_ROOT / "README.md",
+        REPO_ROOT / "BELIEFS.md",
+        REPO_ROOT / "CLAUDE.md",
+        REPO_ROOT / "AGENTS.md",
+    ]
+    globbed = list((REPO_ROOT / ".claude").glob("agents/*.md")) \
+        + list((REPO_ROOT / ".claude").glob("commands/*.md")) \
+        + list((REPO_ROOT / ".claude").glob("skills/*/SKILL.md"))
+    return [p for p in (*fixed, *sorted(globbed)) if p.exists()]
+
+
+DOCS = _collect_docs()
 
 INCLUDE_RE = re.compile(
     r"<!--\s*include:\s*([^\s>]+)\s*-->\s*\n"      # marker line

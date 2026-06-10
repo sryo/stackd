@@ -1,0 +1,12 @@
+qa-windowscape run — 2026-06-09T23:03:15
+subject app: TextEdit | second app: Calculator | excluded apps: com.apple.loginwindow
+oracle: CGWindowList via JXA (no Hammerspoon)
+
+S1 open                FAIL after opening window 2 (id=31634): timeout after 12x250ms: FAIL overlap 31620(Terminal) x 31634(Editor de Texto) area=195386px2; FAIL overlap 31620(Terminal) x 31634(Editor de Texto) area=195386px2
+S2 close               SKIP needs 3 windows from S1
+S3 minimize/restore    FAIL after minimize id=31632: timeout after 12x250ms: FAIL overlap 31620(Terminal) x 31634(Editor de Texto) area=195386px2; OK n=3
+S4 resize pairwise     FAIL A=31637 B=31187: FAIL B-unchanged dx=0 dW=-1 (expected to absorb); FAIL overlap 31620(Terminal) x 31637(Editor de Texto) area=183148px2
+S5 outline             FAIL 31632:[FAIL no-panel-on-target; stackd-windows=panel#29656->none [0,0 2560x1664 layer=1050]; panel#29650->none [0,0 2560x1664 layer=1000]; panel#29658->none [0,0 2560x1664 layer=999]; panel#29659->none [0,0 2560x1664 layer=950]; panel#29657->none [0,1663 2560x1 layer=950]; panel#29655->none [1240,1544 80x80 layer=950]; panel#29653->none [0,0 2560x1664 layer=950]; panel#29652->none [0,1663 2560x1 layer=950]; panel#29649->none [2543,73 1x1 layer=950]; panel#29647->none [0,1663 2560x1 layer=950]; panel#29646->none [0,1663 2560x1 layer=950]; panel#29648->none [0,0 2560x57 layer=900]; panel#29661->win 31643 (Calculadora)] 31634:ok 31637:ok calculator:not-frontmost-after-open (frontmost=31643 Calculadora)
+S6 churn               FAIL timeout after 20x250ms: FAIL overlap 31620(Terminal) x 31187(Terminal) area=3176px2; FAIL overlap 31620(Terminal) x 31187(Terminal) area=3176px2
+
+summary: 1/6 passed, 5 failed — 2026-06-09T23:03:15

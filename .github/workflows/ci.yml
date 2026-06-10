@@ -1,0 +1,44 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    name: build + test (macOS)
+    runs-on: macos-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select Xcode
+        run: |
+          xcode-select -p
+          swift --version
+
+      - name: Build
+        run: ./build.sh
+
+      - name: Test suite
+        # tests.sh runs ./build.sh-derived sources + docs/sync.py --check at the end.
+        # If a test hangs on TCC, the workflow-level timeout (15 min) catches it.
+        # Refine later with --exclude '<regex>' if specific tests prove flaky here.
+        run: ./tests.sh
+
+      - name: Upload test binary on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: stackd-tests-binary
+          path: .build/stackd-tests
+          if-no-files-found: ignore
+          retention-days: 3
