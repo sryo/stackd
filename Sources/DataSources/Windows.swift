@@ -17,6 +17,19 @@ import Foundation
 // src/misc/extern.h. Position moves go through SLSTransactionMoveWindowWithGroup
 // (CGPoint); size has to stay on AX (no SLSTransactionSetWindowSize exists)
 // which is what actually constrains the window's frame anyway.
+// Permanent diagnostic switch for window lifecycle plumbing.
+// STACKD_WIN_DEBUG=1 turns on stderr logs at every gate in the
+// source → bang → JS fan-out chain so a "events never arrived" symptom
+// can be triaged in one daemon relaunch instead of guessing. Lives here
+// (not in AppDelegate) so the CGS callbacks — which fire off the main
+// thread before reaching DispatchQueue — can log without an extra hop.
+enum WindowDebug {
+    static let enabled: Bool = ProcessInfo.processInfo.environment["STACKD_WIN_DEBUG"] != nil
+    static func log(_ s: String) {
+        if enabled { FileHandle.standardError.write(Data("stackd: win-dbg \(s)\n".utf8)) }
+    }
+}
+
 enum WindowTransaction {
     typealias CreateFn          = @convention(c) (Int32) -> Unmanaged<CFTypeRef>?
     typealias CommitFn          = @convention(c) (CFTypeRef, Int32) -> Int32
@@ -81,9 +94,11 @@ private enum SkyLightWindowsEnum {
 //                              ID→AX cache so consecutive calls skip the
 //                              app-windows traversal.
 //
-//   WindowsLifecycleObserver — polled (1Hz) CGWindowList diff that fires
-//                              create/destroy/title-change callbacks. Lazy:
-//                              the Timer only runs while a subscriber is live.
+//   WindowsLifecycleObserver — 10s CGWindowList-diff safety backstop behind
+//                              WindowsAXObserver (the primary). Fires
+//                              create/destroy/title-change callbacks only
+//                              for events AX did not cover (missed-by-ax
+//                              drift sensor). Always-on at startup.
 //
 //   FrontmostWindowObserver  — event-driven AX notification fan-out for the
 //                              focused app's focus / title changes. Rebinds
@@ -215,7 +230,7 @@ enum Windows {
     /// stackd's own panels can opt in.
     private static let ownPid: Int = Int(ProcessInfo.processInfo.processIdentifier)
 
-    static func all(includeOwn: Bool = false) -> [[String: Any]] {
+    static func all(includeOwn: Bool = false, includeNonStandard: Bool = false) -> [[String: Any]] {
         // SLSCopyWindowsWithOptionsAndTags is the yabai-style "authoritative"
         // path but crashes inside SkyLight on macOS 26 (Tahoe) — repro: any
         // stack with `windows` permission segfaults at startWorkspace's
@@ -225,10 +240,10 @@ enum Windows {
             [.optionAll, .excludeDesktopElements],
             kCGNullWindowID
         ) else { return [] }
-        return decode(raw as! [[String: Any]], includeOwn: includeOwn)
+        return decode(raw as! [[String: Any]], includeOwn: includeOwn, includeNonStandard: includeNonStandard)
     }
 
-    private static func decode(_ list: [[String: Any]], includeOwn: Bool) -> [[String: Any]] {
+    private static func decode(_ list: [[String: Any]], includeOwn: Bool, includeNonStandard: Bool = false) -> [[String: Any]] {
         list.compactMap { info -> [String: Any]? in
             guard let num   = info[kCGWindowNumber as String]    as? Int,
                   let layer = info[kCGWindowLayer  as String]    as? Int,
@@ -247,6 +262,13 @@ enum Windows {
             // Both cached per (pid, id) with a TTL so a 50-window
             // CGWindowList push doesn't fan out 50+50 AX RPCs every time.
             let probe = WindowAddressabilityCache.probe(pid: pid_t(pid), windowID: CGWindowID(num))
+            // Skip non-standard windows (Notification Center banners,
+            // Spotlight overlays, popovers, sheets, system HUDs) by
+            // default. Matches Hammerspoon's `hs.window.allWindows()` and
+            // yabai's `window_manager_find_windows_on_storage`. Stacks
+            // that genuinely need the full set pass `includeNonStandard:
+            // true`.
+            if !includeNonStandard && !probe.isStandard { return nil }
             let originX = Int(bounds["X"] ?? 0)
             let originY = Int(bounds["Y"] ?? 0)
             // Mirror Windows.focused()'s display enrichment for every entry
@@ -404,6 +426,36 @@ enum WindowAddressabilityCache {
         lock.lock(); defer { lock.unlock() }
         cache = cache.filter { !$0.key.hasPrefix(prefix) }
         firstSeenAt = firstSeenAt.filter { !$0.key.hasPrefix(prefix) }
+    }
+
+    /// AX-confirmed verdict, bypassing the probe machinery. WindowsAXObserver
+    /// already holds the window element at create time and read its subrole —
+    /// re-deriving the same answer through `probe()` is not just wasteful but
+    /// actively harmful: under AX load the probe lands in the optimism grace,
+    /// which reports `isStandard: false`, which makes `Windows.all()` filter
+    /// the just-created window OUT of the very snapshot AppDelegate pumps in
+    /// response to the create. Seeds the same sticky-success entry a
+    /// successful probe would, so the next `Windows.all()` pass includes the
+    /// window as soon as CGWindowList lists it.
+    static func confirm(pid: pid_t, windowID: CGWindowID, isStandard: Bool, isMinimized: Bool,
+                        now: TimeInterval = Date().timeIntervalSince1970) {
+        let key = "\(pid)|\(windowID)"
+        lock.lock(); defer { lock.unlock() }
+        cache[key] = Probe(addressable: true, isStandard: isStandard, isMinimized: isMinimized, ts: now)
+    }
+
+    /// Live isMinimized update from AX miniaturize/deminiaturize events.
+    /// The sticky-success fast path in `probe()` returns the cached entry
+    /// without re-reading AX, so without this hook the isMinimized bit
+    /// freezes at whatever the first successful probe saw. No-op when the
+    /// (pid, wid) has no established-success entry — the next real probe
+    /// reads the live value anyway.
+    static func setMinimized(pid: pid_t, windowID: CGWindowID, _ value: Bool,
+                             now: TimeInterval = Date().timeIntervalSince1970) {
+        let key = "\(pid)|\(windowID)"
+        lock.lock(); defer { lock.unlock() }
+        guard let p = cache[key], p.addressable else { return }
+        cache[key] = Probe(addressable: true, isStandard: p.isStandard, isMinimized: value, ts: now)
     }
 }
 
@@ -968,22 +1020,35 @@ enum WindowsByID {
     }
 }
 
-// MARK: - WindowsLifecycleObserver: polled lifecycle events
+// MARK: - WindowsLifecycleObserver: 10s safety backstop for AX lifecycle
 
-// Polled window lifecycle: created / destroyed / titleChanged.
-// Polling-based for v0 to avoid the AXObserver-per-app complexity. 1s tick
-// is well within budget for UndoClose's use case (reopen recently closed)
-// and any "recents" tracker. Architecturally identical fan-out to the
-// AXObserver version — only the source of truth differs.
+// Low-frequency CGWindowList diff that runs alongside `WindowsAXObserver`.
 //
-// Lazy: the 1Hz Timer only runs while at least one stack has subscribed
-// (via subscribe(), typically because its manifest declares a sd.window.*
-// handler). With no subscribers the daemon pays zero CPU here.
+// Role after the AX-primary rework (Slice 2): NOT the primary source. AX
+// fires create / destroy / title within ~1s of the action. This poll is
+// the **drift sensor** per CLAUDE.md ("low-frequency safety timer
+// alongside listeners is fine — pure polling for state … could push you
+// on is a bug"). When the poll catches a create / destroy / title-change
+// that AX didn't fire for in the last 12s, we log `poll missed-by-ax …`
+// — same diagnostic shape as the CoreAudio listener-silently-fails
+// incident the audio-processes bar hit on 2026-06-05.
 //
-// AXObserver upgrade path is well-known if latency becomes an issue:
-//   - per-pid AXObserver on kAXWindowCreatedNotification + per-window
-//     observer on kAXUIElementDestroyedNotification & kAXTitleChangedNotification
-//   - add/remove on NSWorkspace.{did{Launch,Terminate}Application}Notification
+// 10s tick is the chosen ceiling: long enough that idle cost is
+// negligible (1 CGWindowList call per 10s = ~1ms work / 10000ms idle),
+// short enough that a stuck AX path shows up in a stack author's
+// debugging session inside one round of "open a window, watch logs."
+// Not lower — the lower the tick, the more we drift toward polling-as-
+// primary, which the rule explicitly forbids.
+//
+// Always-on at startup, same lifetime as the CGS notify loop and
+// WindowsAXObserver. The subscriber-count gate from the polling-primary
+// era is gone: gating it on `handles: ["sd.window.*"]` made the gate
+// itself a single point of failure (manifest parse bug → no source
+// runs), and idle cost is zero per the math above.
+//
+// Fan-out shape stays unchanged: `onCreate` / `onDestroy` /
+// `onTitleChange` are the same callbacks AppDelegate sets up, so AX and
+// the poll feed the same bang surface.
 final class WindowsLifecycleObserver {
     static let shared = WindowsLifecycleObserver()
 
@@ -1001,58 +1066,91 @@ final class WindowsLifecycleObserver {
 
     private var snapshot: [Int: Snap] = [:]
     private var timer: Timer?
-    // Subscriber-count gate. Token cancel decrements; 1→0 stops the timer.
-    // AppDelegate sets the callbacks once at startup; subscribers are added
-    // by StackHost when a stack's manifest declares `handles: ["sd.window.*"]`.
-    private var subCount: Int = 0
 
     private init() {}
 
-    /// Each subscribe() increments the live-subscriber count; the returned
-    /// Token decrements on cancel. Adopting into a Bridge.scope means stack
-    /// unload automatically releases it. The 1Hz Timer only runs while
-    /// subCount > 0.
-    func subscribe() -> Token {
-        subCount += 1
-        if subCount == 1 { start() }
-        var released = false
-        return Token { [weak self] in
-            guard let self = self, !released else { return }
-            released = true
-            self.subCount = max(0, self.subCount - 1)
-            if self.subCount == 0 { self.stop() }
-        }
-    }
-
-    private func start() {
+    /// Install the safety-backstop poll. Always-on, idempotent. AppDelegate
+    /// calls this once at startup, same lifetime as WindowsAXObserver and
+    /// WindowEvents.install — no per-stack gating, no Token to adopt.
+    func install() {
         guard timer == nil else { return }
         snapshot = current()        // seed without firing on first tick
-        let t = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+        let t = Timer.scheduledTimer(withTimeInterval: 10.0, repeats: true) { [weak self] _ in
             self?.tick()
         }
         RunLoop.main.add(t, forMode: .common)
         timer = t
     }
 
-    private func stop() {
-        timer?.invalidate()
-        timer = nil
-        snapshot.removeAll()
-    }
-
     private func tick() {
         let now = current()
-        for (id, info) in now {
-            if let old = snapshot[id] {
-                if old.title != info.title { onTitleChange?(info, old.title) }
+        let diff = WindowsLifecycleObserver.diff(prev: snapshot, next: now)
+
+        // Fire diffs that AX didn't already cover. AX writes
+        // `lastAxFire[wid] = now` on every callback; if it's fresh for a
+        // wid (within ~12s, i.e. one tick + safety margin), the poll
+        // signal is redundant and we silently drop it. If it's stale OR
+        // missing entirely, AX missed the event — fire the callback so
+        // userland sees it, AND log `poll missed-by-ax` as the drift
+        // sensor per CLAUDE.md.
+        var missedCreated = 0, missedDestroyed = 0, missedTitled = 0
+        for snap in diff.created where !axCoveredRecently(wid: CGWindowID(snap.id)) {
+            onCreate?(snap)
+            missedCreated += 1
+        }
+        for snap in diff.destroyed where !axCoveredRecently(wid: CGWindowID(snap.id)) {
+            onDestroy?(snap)
+            missedDestroyed += 1
+        }
+        for (snap, oldTitle) in diff.titleChanged where !axCoveredRecently(wid: CGWindowID(snap.id)) {
+            onTitleChange?(snap, oldTitle)
+            missedTitled += 1
+        }
+
+        let total = missedCreated + missedDestroyed + missedTitled
+        if total > 0 {
+            log("win-poll missed-by-ax: +\(missedCreated) -\(missedDestroyed) ~\(missedTitled) (10s safety backstop caught what AX did not fire)")
+        }
+        WindowDebug.log("poll tick: total seen=\(diff.created.count + diff.destroyed.count + diff.titleChanged.count) missed-by-ax=\(total)")
+
+        // Housekeeping piggybacked on the poll tick: lastAxFire only needs
+        // ~12s of history for the missed-by-ax gate; without pruning it
+        // accumulates one entry per wid ever seen for the daemon's lifetime.
+        WindowsAXObserver.shared.pruneAxFireLog(olderThan: 60)
+
+        snapshot = now
+    }
+
+    /// Pure diff for testability — given two snapshots, return the
+    /// (created, destroyed, titleChanged) tuples. Decoupled from `tick()`
+    /// so the diff math can be unit-tested without instantiating a Timer.
+    static func diff(prev: [Int: Snap], next: [Int: Snap])
+        -> (created: [Snap], destroyed: [Snap], titleChanged: [(Snap, String)])
+    {
+        var created: [Snap] = []
+        var destroyed: [Snap] = []
+        var titleChanged: [(Snap, String)] = []
+        for (id, info) in next {
+            if let old = prev[id] {
+                if old.title != info.title {
+                    titleChanged.append((info, old.title))
+                }
             } else {
-                onCreate?(info)
+                created.append(info)
             }
         }
-        for (id, info) in snapshot where now[id] == nil {
-            onDestroy?(info)
+        for (id, info) in prev where next[id] == nil {
+            destroyed.append(info)
         }
-        snapshot = now
+        return (created, destroyed, titleChanged)
+    }
+
+    /// True if WindowsAXObserver fired for this wid within ~12s (one
+    /// tick + small safety margin). 12s not 10s because AX fires a
+    /// fraction of a second before the action lands in CGWindowList —
+    /// the poll on its next tick would otherwise re-fire the same event.
+    private func axCoveredRecently(wid: CGWindowID) -> Bool {
+        WindowsAXObserver.shared.axFiredRecently(wid: wid, within: 12.0)
     }
 
     /// JSON-able detail dict for bang dispatch.
@@ -1086,6 +1184,82 @@ final class WindowsLifecycleObserver {
             )
         }
         return out
+    }
+}
+
+// MARK: - WindowsPumpRetry: bounded re-pump decision for sd.windows.all
+
+/// Pure decision core for the create/destroy → `sd.windows.all` consistency
+/// loop. AX fires within one runloop tick of the action; CGWindowList (the
+/// source `Windows.all()` reads) lags by ~50–500ms. Pushing the channel the
+/// moment AX fires therefore often ships a snapshot that does NOT yet
+/// reflect the event — a stack diffing the snapshot sees no change, and the
+/// 10s safety poll then SUPPRESSES its own re-fire because `lastAxFire` is
+/// fresh, so the event is silently absorbed (the windowscape "created but
+/// never tiled / tiled ~10s late" symptom). The fix: verify the snapshot
+/// reached the expected state and re-push on a short ladder until it does.
+/// Ladder exhaustion logs via WindowDebug — that's CG telling us something
+/// is genuinely different about this window (non-zero layer, etc.).
+enum WindowsPumpRetry {
+    /// Successive verify delays. Cumulative ≈ 900ms — covers the observed
+    /// 50–500ms CGWindowList lag with margin, without drifting toward
+    /// poll-as-primary.
+    static let delays: [TimeInterval] = [0.15, 0.3, 0.45]
+
+    enum Expectation: Equatable {
+        case present(Int)  // created → wid must appear in the snapshot
+        case absent(Int)   // destroyed → wid must be gone from the snapshot
+    }
+
+    static func satisfied(ids: Set<Int>, expectation: Expectation) -> Bool {
+        switch expectation {
+        case .present(let id): return ids.contains(id)
+        case .absent(let id):  return !ids.contains(id)
+        }
+    }
+
+    /// Delay before verify attempt `attempt` (0-based); nil once the ladder
+    /// is exhausted.
+    static func delay(attempt: Int) -> TimeInterval? {
+        guard attempt >= 0 && attempt < delays.count else { return nil }
+        return delays[attempt]
+    }
+}
+
+// MARK: - WindowLifecycleFanout: created-bang gating on CGWindowList agreement
+
+/// Defers the `sd.window.created` fan-out until `Windows.all()` actually
+/// lists the new wid (bounded by the WindowsPumpRetry ladder), then pushes
+/// the channel BEFORE firing the bang. Ordering matters: stacks hydrate
+/// their window model from the all-push and react to the bang — a bang that
+/// arrives ahead of a snapshot containing the window is a no-op diff on the
+/// stack side, and nothing re-triggers it (the late all-push only updates
+/// state). Exactly-once bang semantics are preserved: on ladder exhaustion
+/// we fire anyway (late beats never) and leave a WindowDebug breadcrumb.
+enum WindowLifecycleFanout {
+    static func fireCreated(host: StackHost?, snap: WindowsLifecycleObserver.Snap, attempt: Int = 0) {
+        let ids = Set(Windows.all().compactMap { $0["id"] as? Int })
+        if WindowsPumpRetry.satisfied(ids: ids, expectation: .present(snap.id)) {
+            dispatch(host: host, snap: snap, attempt: attempt)
+            return
+        }
+        guard let delay = WindowsPumpRetry.delay(attempt: attempt) else {
+            WindowDebug.log("created fan-out: wid=\(snap.id) (\(snap.app)) never appeared in Windows.all() after \(attempt) retries — firing anyway")
+            dispatch(host: host, snap: snap, attempt: attempt)
+            return
+        }
+        WindowDebug.log("created fan-out: wid=\(snap.id) not in Windows.all() yet — retry in \(Int(delay * 1000))ms")
+        // Strong capture of `host` is fine: the chain is bounded (<1s) and
+        // the StackHost lives for the daemon's lifetime anyway.
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+            WindowLifecycleFanout.fireCreated(host: host, snap: snap, attempt: attempt + 1)
+        }
+    }
+
+    private static func dispatch(host: StackHost?, snap: WindowsLifecycleObserver.Snap, attempt: Int) {
+        WindowDebug.log("created fan-out: wid=\(snap.id) dispatch (attempt=\(attempt))")
+        host?.pumpWindowsListForAllStacks()
+        host?.bang(name: "sd.window.created", detail: WindowsLifecycleObserver.detail(snap))
     }
 }
 
@@ -1169,6 +1343,16 @@ final class FrontmostWindowObserver: RefCountedObserver {
                  // don't miss the cross-app transition.
                  self.fireFocusedChanged()
                  self.fire()
+                 // didActivateApplication can land BEFORE the activated app's
+                 // kAXFocusedWindowAttribute settles, so the fire above may
+                 // read nil (Bridge pushes "null" → consumers hide) or the
+                 // OLD window (dedupe suppresses the push entirely). Neither
+                 // produces a later AX notification — the app's focused
+                 // window never changes *within* the app, it just becomes
+                 // readable — so the event is silently lost without these
+                 // bounded settle re-fires. Bridge's lastState dedupe makes
+                 // an already-settled re-fire a no-op push-wise.
+                 self.scheduleFocusSettleRefires()
              })
         ])
         // Install for current frontmost immediately so subscribers don't have
@@ -1184,6 +1368,22 @@ final class FrontmostWindowObserver: RefCountedObserver {
             // matching the Token contract instead of waiting on deinit.
             for t in self.currentTokens { t.cancel() }
             self.currentTokens.removeAll()
+        }
+    }
+
+    /// Bounded re-checks after an app activation, NOT a poll: two one-shot
+    /// re-fires while the activated app's AX tree settles. Stale-by-then
+    /// re-fires are harmless — they re-read current state and Bridge's
+    /// per-channel JSON dedupe drops no-op pushes. No generation counter
+    /// needed: a newer activation between schedule and fire just means the
+    /// re-fire reads the newer (correct) state.
+    private func scheduleFocusSettleRefires() {
+        for delay in [0.12, 0.40] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                guard let self = self else { return }
+                self.fireFocusedChanged()
+                self.fire()
+            }
         }
     }
 
@@ -1227,129 +1427,95 @@ final class FrontmostWindowObserver: RefCountedObserver {
 
 // Window-level CGS notifications via SkyLight private SPI.
 //
-// Extends the connection-notify infrastructure already proven in
-// Sources/DataSources/Spaces.swift (which subscribes to space-life events
-// 1327/1328/1204). We use the sibling `SLSRegisterNotifyProc` entry point
-// (not the per-connection variant) so we observe events for windows owned by
-// other applications, matching JankyBorders' approach.
+// Role after the AX-primary rework (Slice 2): CGS is the **secondary**
+// signal for things `WindowsAXObserver` can't see:
+//   - 808 — window reordered (z-order). AX has no reordered notification.
+//   - 804 — window destroyed. AX already covers this with
+//           kAXUIElementDestroyedNotification, but yabai (the de facto
+//           authority for tilers) registers 804 unconditionally including
+//           on Tahoe, so we keep it as a belt-and-suspenders second
+//           destroy source — the host.bang fan-out is a no-op when AX
+//           fired first for the same wid.
+//   - 1508 — frontmost app changed. Distinct from AX's
+//            kAXFocusedWindowChangedNotification because 1508 fires on
+//            user-driven app activation specifically (mouse click,
+//            Cmd-Tab); AX focused-changed fires on programmatic focus too.
 //
-// Coexistence with WindowsLifecycleObserver (1Hz CGWindowList poll):
-//   Both run. CGS fires earlier/faster than the poll; the poller is the
-//   conservative backstop. Stack manifests subscribe via `handles: ["sd.window.*"]`
-//   to whichever bang they care about — `sd.window.created` may fire from
-//   either source first. The polling observer's per-tick diff sees an already-
-//   existing window on the next tick and skips, so the duplicate is naturally
-//   suppressed.
+// Switch to `SLSRegisterConnectionNotifyProc` (yabai's pattern in
+// `src/yabai.c`) instead of the global `SLSRegisterNotifyProc`. yabai uses
+// the per-connection entry point for all its window/space subscriptions
+// and is the most-tested tiler on Tahoe; mirroring its choice means we
+// inherit its reliability profile.
 //
-// Event-ID source of truth & verified availability:
-//   The IDs below are taken from FelixKratz/JankyBorders (events.h) cross-
-//   referenced with koekeishiya/yabai (yabai.c registers 808/1327/1328/1204
-//   via SLSRegisterConnectionNotifyProc with the same wire format).
+// Event-ID source of truth: yabai's `src/yabai.c:322-334` enumerates the
+// IDs it registers (808 + 1327 + 1328 + 1202 + 1204 on pre-Tahoe; 808 +
+// 1327 + 1328 + 804 on Tahoe). This contradicts stackd's previous comment
+// that 804 was "no-fire on Tahoe" — yabai's Tahoe branch explicitly
+// registers 804 because that *is* the Tahoe destroy event. The previous
+// stackd intel (1325 / 1326) appears to have come from JankyBorders'
+// events.h; yabai doesn't use those IDs.
 //
-//   On macOS 26 (Tahoe) we have CONFIRMED, via the STACKD_CGS_DEBUG=1 dump
-//   loop below, that these IDs fire reliably:
+// Events explicitly DROPPED in this rewrite:
+//   1325 / 1326 — not in yabai's set; never fired reliably for the user.
+//   806 / 807 / 815 / 816 — Sequoia-only; AX now covers move / resize /
+//                           miniaturize / deminiaturize directly. The
+//                           previous 100ms TahoeSynthPoll backstop is
+//                           removed alongside.
 //
-//     1325 — window created               (verified, payload {sid, wid})
-//     1326 — window destroyed             (verified, payload {sid, wid})
-//     1508 — frontmost app changed        (verified, empty payload — surfaced
-//                                          as sd.window.focusedByMouse)
-//     1327 — space created                (already wired in Spaces.swift;
-//                                          ALSO fires on minimize on Tahoe
-//                                          because each minimize creates a
-//                                          per-window background space)
-//
-//   The remaining IDs (804/806/807/808/815/816) were live on Sequoia and
-//   earlier but DO NOT fire on Tahoe as of macOS 26.5. The Tahoe equivalent
-//   appears to ride generic mouse-event IDs 718/719 with a 248-byte payload
-//   that does NOT carry a CGWindowID at offset 0 — that's an input-tap
-//   surface, not a per-window CGS event. Registrations for the missing IDs
-//   are kept below as no-ops so they Just Work if a future macOS release
-//   re-exposes them; symptom of "missing" today is silent no-fire.
-//
-//   To rediscover IDs after a macOS bump: launch the daemon with
-//   STACKD_CGS_DEBUG=1; every event in [700, 2000) is logged to stderr with
-//   ID + first 32 bytes of payload. Trigger the action you want to map,
-//   look for an event whose hex payload starts with the affected window's
-//   CGWindowID in little-endian.
+// To rediscover IDs after a macOS bump: launch with STACKD_CGS_DEBUG=1
+// and the existing debug loop logs every event in [700, 2000).
 
 private enum SkyLightWindowEvents {
-    // SLSRegisterNotifyProc — JankyBorders/yabai use this for per-window
-    // events. Callback signature: (event, data, dataLength, context). NO
-    // connection id is passed (unlike SLSRegisterConnectionNotifyProc which
-    // we use for space events in Spaces.swift). This is the right entry
-    // point for events that should fire globally for ALL windows of ALL
-    // applications, not just our own connection.
-    typealias CGSNotifyCallback     = @convention(c) (UInt32, UnsafeMutableRawPointer?, Int, UnsafeMutableRawPointer?) -> Void
-    typealias RegisterNotifyProcFn  = @convention(c) (CGSNotifyCallback, UInt32, UnsafeMutableRawPointer?) -> Int32
+    // SLSRegisterConnectionNotifyProc(cid, callback, eventType, context).
+    // Same wire format as the SpacesObserver in this file uses
+    // (`SkyLightSpaces.RegisterNotifyProcFn`). Per-connection so it scopes
+    // to our SkyLight cid like every other reliable tiler does — yabai
+    // (`src/yabai.c:322-334`) is the reference.
+    typealias CGSConnectionCallback = @convention(c) (UInt32, UnsafeMutableRawPointer?, Int, UnsafeMutableRawPointer?, Int32) -> Void
+    typealias RegisterNotifyProcFn  = @convention(c) (Int32, CGSConnectionCallback, UInt32, UnsafeMutableRawPointer?) -> Int32
 
-    static let registerNotifyProc: RegisterNotifyProcFn? = SkyLight.sym("SLSRegisterNotifyProc")
+    static let registerNotifyProc: RegisterNotifyProcFn? = SkyLight.sym("SLSRegisterConnectionNotifyProc")
 }
 
-// CGS window event IDs. JankyBorders/events.h is the canonical reference for
-// the names; macOS 26.5 (Tahoe) availability per the STACKD_CGS_DEBUG dump.
-//   804  — window closed         (Sequoia-/no-fire on Tahoe; payload: uint32 wid)
-//   806  — window moved          (Sequoia-/no-fire on Tahoe; payload: uint32 wid)
-//   807  — window resized        (Sequoia-/no-fire on Tahoe; payload: uint32 wid)
-//   808  — window reordered      (Sequoia-/no-fire on Tahoe; payload: uint32 wid)
-//   815  — window deminimized    (Sequoia-/no-fire on Tahoe; payload: uint32 wid)
-//   816  — window minimized      (Sequoia-/no-fire on Tahoe; payload: uint32 wid)
-//   1325 — window created        (ACTIVE on Tahoe; payload: { uint64 sid; uint32 wid })
-//   1326 — window destroyed      (ACTIVE on Tahoe; payload: { uint64 sid; uint32 wid })
-//   1508 — frontmost app changed (ACTIVE on Tahoe; no payload; surfaced as
-//                                 sd.window.focusedByMouse since front-change
-//                                 is the closest stable signal for "user
-//                                 clicked to focus a different window" — the
-//                                 nominal 1300/kCGSEventWindowFocusedByMouse
-//                                 doesn't fire on current macOS)
+// CGS window event IDs we register, per yabai's canonical set:
+//   804  — window destroyed       (ACTIVE on Tahoe per yabai; payload:
+//                                  uint32 wid at offset 0)
+//   808  — window reordered       (all macOS; payload: uint32 wid)
+//   1508 — frontmost app changed  (no payload; surfaced as
+//                                  sd.window.focusedByMouse)
 private let kSDWindowClosed:        UInt32 = 804
-private let kSDWindowMoved:         UInt32 = 806
-private let kSDWindowResized:       UInt32 = 807
 private let kSDWindowReordered:     UInt32 = 808
-private let kSDWindowDeminimized:   UInt32 = 815
-private let kSDWindowMinimized:     UInt32 = 816
-private let kSDWindowCreated:       UInt32 = 1325
-private let kSDWindowDestroyed:     UInt32 = 1326
 private let kSDWindowFocusedByMouse: UInt32 = 1508
 
 // The shared callback. SkyLight invokes us off the main thread; we hop to main
 // before touching AppDelegate.shared / host so bang dispatch and WebView fan-out
 // stay on the runloop they were built on.
 //
-// Payload decode rules:
-//   - Create / Destroy (1325/1326): { uint64_t sid; uint32_t wid; }
-//   - Front-change (1508): no payload data we use
-//   - All other window events: uint32_t wid at offset 0
-//
-// dataLen is always >= the size we read; we sanity-check before dereferencing
-// because SkyLight has been known to fire callbacks with zero-length payloads
-// during edge cases (e.g. a window getting created+destroyed in the same tick).
-private let windowEventsCallback: SkyLightWindowEvents.CGSNotifyCallback = { eventType, data, dataLen, _ in
-    // Front-change has no useful payload; just fire the bang.
+// Per-connection callback signature (yabai shape): (event, data, dataLen,
+// ctx, cid). All payloads carry uint32_t wid at offset 0 for the IDs we
+// register; 1508 has no payload.
+private let windowEventsCallback: SkyLightWindowEvents.CGSConnectionCallback = { eventType, data, dataLen, _, _ in
     if eventType == kSDWindowFocusedByMouse {
+        WindowDebug.log("cgs evt=\(eventType) (focusedByMouse)")
         DispatchQueue.main.async {
             AppDelegate.shared?.host?.bang(name: "sd.window.focusedByMouse", detail: [:])
         }
         return
     }
 
-    // Create / Destroy carry a {sid, wid} struct. wid is at offset 8.
-    if eventType == kSDWindowCreated || eventType == kSDWindowDestroyed {
-        guard let data = data, dataLen >= 12 else { return }
-        let wid = data.advanced(by: 8).load(as: UInt32.self)
-        WindowEvents.handleSpawn(eventType: eventType, wid: wid)
+    guard let data = data, dataLen >= 4 else {
+        WindowDebug.log("cgs evt=\(eventType) (no payload, dataLen=\(dataLen))")
         return
     }
-
-    // All remaining window events start with a uint32_t wid.
-    guard let data = data, dataLen >= 4 else { return }
     let wid = data.load(as: UInt32.self)
+    WindowDebug.log("cgs evt=\(eventType) wid=\(wid)")
     WindowEvents.handleModify(eventType: eventType, wid: wid)
 }
 
 // Debug logger: prints every event ID + first 32 bytes of payload to stderr.
 // Active only when STACKD_CGS_DEBUG=1. Used to verify event-ID mappings after
-// a macOS version bump.
-private let debugWindowEventsCallback: SkyLightWindowEvents.CGSNotifyCallback = { event, data, dataLen, _ in
+// a macOS version bump. Connection-notify shape matches yabai's loop.
+private let debugWindowEventsCallback: SkyLightWindowEvents.CGSConnectionCallback = { event, data, dataLen, _, _ in
     var hex = ""
     if let data = data, dataLen > 0 {
         let lim = min(dataLen, 32)
@@ -1364,29 +1530,22 @@ enum WindowEvents {
     private static var cgsRegistered = false
 
     /// Install the CGS callbacks. Idempotent; safe to call from AppDelegate.
-    /// SkyLight has no removeNotifyProc, so registration lives for the lifetime
-    /// of the process — matches the SpacesObserver pattern.
+    /// SkyLight has no removeNotifyProc, so registration lives for the
+    /// lifetime of the process — matches the SpacesObserver pattern.
     static func install() {
         guard !cgsRegistered, let reg = SkyLightWindowEvents.registerNotifyProc else { return }
-        // Only register events that ACTUALLY fire on the current macOS.
-        // Per the kSDWindow* comment block, 804/806/807/808/815/816 are
-        // documented as "Sequoia-/no-fire on Tahoe" — TahoeSynthPoll covers
-        // those via CG diff. Keeping the registration calls created dead
-        // callbacks the OS still bookkeeps. Created/destroyed/focusedByMouse
-        // do fire on Tahoe, so those stay.
-        for evt in [
-            kSDWindowCreated,
-            kSDWindowDestroyed,
-            kSDWindowFocusedByMouse
-        ] {
-            _ = reg(windowEventsCallback, evt, nil)
+        let cid = SkyLight.cid
+        // yabai's canonical set (src/yabai.c:322-334), trimmed to the
+        // events stackd uses. AX covers everything else.
+        for evt in [kSDWindowClosed, kSDWindowReordered, kSDWindowFocusedByMouse] {
+            _ = reg(cid, windowEventsCallback, evt, nil)
         }
-        // Debug-watcher: STACKD_CGS_DEBUG=1 registers a logger for every event
-        // ID in [700, 2000) so we can rediscover IDs after a macOS shift.
-        // Mirrors the JankyBorders debug loop in src/events.c.
+        // STACKD_CGS_DEBUG=1 → log every event in [700, 2000) so we can
+        // rediscover IDs after a macOS shift. Mirrors JankyBorders'
+        // src/events.c debug loop.
         if ProcessInfo.processInfo.environment["STACKD_CGS_DEBUG"] != nil {
             for i in UInt32(700)..<UInt32(2000) {
-                _ = reg(debugWindowEventsCallback, i, nil)
+                _ = reg(cid, debugWindowEventsCallback, i, nil)
             }
         }
         cgsRegistered = true
@@ -1394,219 +1553,45 @@ enum WindowEvents {
 
     // MARK: - Bang fan-out
 
-    /// Per-window bangs that just need an id. Frame is recovered via
-    /// WindowsByID.frame(windowID:) for move/resize so consumers don't have to
-    /// query separately; for the others id alone is enough.
+    /// Secondary CGS signals: reordered (AX has no equivalent) + destroyed
+    /// (AX already fired this via kAXUIElementDestroyedNotification, but
+    /// 804 stays as belt-and-suspenders — host.bang's per-stack dedup is
+    /// the consumer's responsibility, and in practice AX wins the race).
     fileprivate static func handleModify(eventType: UInt32, wid: UInt32) {
         DispatchQueue.main.async {
             guard let host = AppDelegate.shared?.host else { return }
-
             switch eventType {
-            case kSDWindowMoved:
-                var d: [String: Any] = ["id": Int(wid)]
-                if let f = WindowsByID.frame(windowID: CGWindowID(wid)) {
-                    d["frame"] = frameDict(f)
-                }
-                host.bang(name: "sd.window.moved", detail: d)
-
-            case kSDWindowResized:
-                var d: [String: Any] = ["id": Int(wid)]
-                if let f = WindowsByID.frame(windowID: CGWindowID(wid)) {
-                    d["frame"] = frameDict(f)
-                }
-                host.bang(name: "sd.window.resized", detail: d)
-
             case kSDWindowReordered:
+                // Overlay z-order repair: if an overlay panel is pinned to
+                // this window, the raise may have put the target ABOVE the
+                // panel without moving it — the frame-diff short-circuit in
+                // OverlayHandle.tick would then never reorder, leaving the
+                // border invisible behind its own target. Event-driven
+                // primary for the repin; tick's cadence is the backstop.
+                Overlay.notifyWindowReordered(wid: CGWindowID(wid))
                 host.bang(name: "sd.window.reordered", detail: ["id": Int(wid)])
-
-            case kSDWindowMinimized:
-                host.bang(name: "sd.window.minimized", detail: ["id": Int(wid)])
-
-            case kSDWindowDeminimized:
-                host.bang(name: "sd.window.deminimized", detail: ["id": Int(wid)])
-
             case kSDWindowClosed:
-                // Treat 804 as a destroyed-window signal so consumers don't
-                // have to track two near-identical events. The polling
-                // WindowsLifecycleObserver will independently fire its own
-                // sd.window.destroyed on next tick — host.bang's per-stack
-                // dedup is the stack author's responsibility, but in practice
-                // the polling diff sees the window already gone and skips.
-                WindowsByID.invalidateAll()
-                host.bang(name: "sd.window.destroyed", detail: ["id": Int(wid)])
-
-            default:
-                break
-            }
-        }
-    }
-
-    /// Create/Destroy carry a window id; we look up app/pid/title via
-    /// CGWindowListCopyWindowInfo filtered by kCGWindowNumber so the detail
-    /// matches the polling observer's payload shape.
-    fileprivate static func handleSpawn(eventType: UInt32, wid: UInt32) {
-        DispatchQueue.main.async {
-            guard let host = AppDelegate.shared?.host else { return }
-
-            switch eventType {
-            case kSDWindowCreated:
-                let detail = detailForWindow(wid: wid)
-                host.bang(name: "sd.window.created", detail: detail)
-
-            case kSDWindowDestroyed:
-                // The window is already gone — CGWindowList lookup will miss.
-                // Emit just the id; consumers that need the prior title/app
-                // should cache from the create event. Mirrors yabai's
-                // SLS_WINDOW_DESTROYED handler.
-                WindowsByID.invalidateAll()
-                host.bang(name: "sd.window.destroyed", detail: ["id": Int(wid)])
-
-            default:
-                break
-            }
-        }
-    }
-
-    // MARK: - Helpers
-
-    private static func frameDict(_ f: CGRect) -> [String: Int] {
-        [
-            "x": Int(f.origin.x), "y": Int(f.origin.y),
-            "w": Int(f.size.width), "h": Int(f.size.height)
-        ]
-    }
-
-    // MARK: - TahoeSynth: synthetic moved/resized/minimized via CG poll
-    //
-    // CGS events 806 (moved), 807 (resized), 815 (deminimized), 816 (minimized)
-    // stopped firing on macOS 26 (Tahoe). Hammerspoon side-steps this by
-    // installing per-window AXObservers (kAXWindowMovedNotification etc.) — a
-    // heavy plumbing extension here. Pragmatic shim: a single 250ms diff
-    // against CGWindowListCopyWindowInfo bridges what userland code expects.
-    // Latency is acceptable for drag-to-resize / drag-to-reorder (which already
-    // batch on mouse-up) and for windowscape's minimize-bang tracking.
-    //
-    // No-op on prior macOS where the native CGS events still fire — the
-    // duplicate bangs are idempotent on the JS side (sd.window.moved consumers
-    // dedupe by frame; minimizedIds.add() / delete() are also idempotent).
-    fileprivate static var tahoePollPrev: [CGWindowID: (frame: CGRect, onscreen: Bool)] = [:]
-    fileprivate static var tahoePollTimer: Timer?
-
-    static func startTahoeSynthPoll() {
-        guard tahoePollTimer == nil else { return }
-        // Seed prev so the first tick doesn't fire bangs for every existing window.
-        tahoePollPrev = snapshotCGWindowState()
-        // 100ms tick — fast enough that windowscape's drift watcher (also
-        // 100ms-ish) sees a window resize within one frame. CGWindowList
-        // enumeration is cheap (~1ms for typical 50-window sessions); the
-        // previous 250ms left up to half a second of dead time between
-        // "user resized" and "windowscape sees it".
-        tahoePollTimer = Timer.scheduledTimer(withTimeInterval: 0.10, repeats: true) { _ in
-            tahoePollTick()
-        }
-    }
-
-    private static func snapshotCGWindowState() -> [CGWindowID: (frame: CGRect, onscreen: Bool)] {
-        guard let raw = CGWindowListCopyWindowInfo(
-            [.optionAll, .excludeDesktopElements], kCGNullWindowID
-        ) else { return [:] }
-        let list = raw as! [[String: Any]]
-        var out: [CGWindowID: (frame: CGRect, onscreen: Bool)] = [:]
-        for info in list {
-            guard let num = info[kCGWindowNumber as String] as? Int,
-                  let layer = info[kCGWindowLayer as String] as? Int, layer == 0,
-                  let bounds = info[kCGWindowBounds as String] as? [String: CGFloat]
-            else { continue }
-            let frame = CGRect(
-                x: bounds["X"] ?? 0, y: bounds["Y"] ?? 0,
-                width: bounds["Width"] ?? 0, height: bounds["Height"] ?? 0
-            )
-            let onscreen = ((info[kCGWindowIsOnscreen as String] as? Int) ?? 0) != 0
-            out[CGWindowID(num)] = (frame: frame, onscreen: onscreen)
-        }
-        return out
-    }
-
-    private static func tahoePollTick() {
-        guard let host = AppDelegate.shared?.host else { return }
-        let next = snapshotCGWindowState()
-        for (wid, cur) in next {
-            guard let p = tahoePollPrev[wid] else { continue }
-            if p.frame.origin != cur.frame.origin {
-                var d: [String: Any] = ["id": Int(wid)]
-                d["frame"] = frameDict(cur.frame)
-                host.bang(name: "sd.window.moved", detail: d)
-            }
-            if p.frame.size != cur.frame.size {
-                var d: [String: Any] = ["id": Int(wid)]
-                d["frame"] = frameDict(cur.frame)
-                host.bang(name: "sd.window.resized", detail: d)
-            }
-            if p.onscreen != cur.onscreen {
-                // Gate the minimize bang on AX-confirmed kAXMinimized=true.
-                // Without the gate, a tab-merged background window flips
-                // onscreen 1→0 every time the user switches Terminal/Safari
-                // tabs — the previous foreground tab's CGWindowID goes off-
-                // screen but the underlying window wasn't minimized in the
-                // AX sense. Hidden-tab CGWindowIDs have no AX element so
-                // WindowsByID.isMinimized returns false → bang skipped.
-                // Real Cmd+M sets kAXMinimized=true → bang fires.
-                let axMin = cur.onscreen ? false : WindowsByID.isMinimized(windowID: wid)
-                if let name = tahoeMinimizeBang(
-                    prevOnscreen: p.onscreen, curOnscreen: cur.onscreen, axMinimizedNow: axMin
-                ) {
-                    host.bang(name: name, detail: ["id": Int(wid)])
+                // Targeted invalidation only. The previous invalidateAll()
+                // nuked every pid's AX map on EVERY 804 — and 804 fires for
+                // every window destroyed system-wide (tooltips, menus,
+                // popovers), so the cache was being rebuilt near-constantly,
+                // recreating the wid↔AXUIElement oscillation bug the
+                // per-window invalidate in AppDelegate.onDestroy was built
+                // to avoid. The pid can't be recovered from CGWindowList
+                // (the window is already gone) — ask the AX observer's
+                // per-window registry; when unknown, skip: a stale cached
+                // AXUIElement is tolerated (-25204 on action) and the AX
+                // destroy path does its own targeted invalidate.
+                if let pid = WindowsAXObserver.shared.pidFor(wid: CGWindowID(wid)) {
+                    WindowsByID.invalidateCache(pid: pid, windowID: CGWindowID(wid))
                 }
+                host.bang(name: "sd.window.destroyed", detail: ["id": Int(wid)])
+            default:
+                break
             }
         }
-        tahoePollPrev = next
     }
 
-    /// Pure decision: which minimize-family bang should the Tahoe poll fire
-    /// for an `onscreen` transition? Extracted so the tab-switch regression
-    /// fix is unit-testable without holding live CGS state.
-    ///
-    /// - `prev == cur`                      → nil (no transition)
-    /// - `cur=true` (off→on)                → `"sd.window.deminimized"` —
-    ///   fires unconditionally. Spurious for a background-tab-becoming-
-    ///   foreground transition, but downstream snapshot subsystems no-op
-    ///   on never-snapshotted ids so the spurious case is benign. A future
-    ///   pass can tighten this by tracking prev `axMinimized` per id.
-    /// - `cur=false` (on→off) + `axMinNow`  → `"sd.window.minimized"`
-    /// - `cur=false` (on→off) + `!axMinNow` → nil — the regression-fix path:
-    ///   tab-switching flips onscreen without minimizing, AX confirms the
-    ///   window isn't really minimized, so no bang.
-    static func tahoeMinimizeBang(prevOnscreen: Bool, curOnscreen: Bool,
-                                  axMinimizedNow: Bool) -> String? {
-        if prevOnscreen == curOnscreen { return nil }
-        if curOnscreen { return "sd.window.deminimized" }
-        return axMinimizedNow ? "sd.window.minimized" : nil
-    }
-
-    /// Build a sd.window.created detail dict via CGWindowList lookup. One CG
-    /// call per creation is fine — events fire on the order of one per app
-    /// launch / new-window, not per frame.
-    private static func detailForWindow(wid: UInt32) -> [String: Any] {
-        var out: [String: Any] = ["id": Int(wid)]
-        guard let raw = CGWindowListCopyWindowInfo(
-            [.optionIncludingWindow], CGWindowID(wid)
-        ) else { return out }
-        let list = raw as! [[String: Any]]
-        guard let info = list.first else { return out }
-
-        out["app"]   = (info[kCGWindowOwnerName as String] as? String) ?? ""
-        out["pid"]   = (info[kCGWindowOwnerPID  as String] as? Int) ?? 0
-        out["title"] = (info[kCGWindowName as String] as? String) ?? ""
-        if let bounds = info[kCGWindowBounds as String] as? [String: CGFloat] {
-            out["frame"] = [
-                "x": Int(bounds["X"] ?? 0),
-                "y": Int(bounds["Y"] ?? 0),
-                "w": Int(bounds["Width"] ?? 0),
-                "h": Int(bounds["Height"] ?? 0)
-            ]
-        }
-        return out
-    }
 }
 
 // =====================================================================
@@ -1999,5 +1984,513 @@ private let missionControlAXCallback: AXObserverCallback = { _, _, notification,
     }
     DispatchQueue.main.async {
         AppDelegate.shared?.host?.bang(name: bang, detail: [:])
+    }
+}
+
+// =====================================================================
+// MARK: - WindowsAXObserver: per-app AXObserver for window lifecycle
+// =====================================================================
+
+// Primary source for `sd.window.created` / `sd.window.destroyed` /
+// `sd.window.titleChanged` / `sd.window.moved` / `sd.window.resized` /
+// `sd.window.minimized` / `sd.window.deminimized`.
+//
+// Per-app `AXObserver` (one per pid) listens for
+// `kAXWindowCreatedNotification` on the application AXUIElement. On every
+// new window we install a per-window observer for destroy / title / move /
+// resize / miniaturize / deminiaturize — exactly the shape Hammerspoon's
+// `hs.window.filter` uses (`window_filter.lua` + `axuielement/observer.m`)
+// and yabai's `application_observe()` (`src/application.c`).
+//
+// Why this over a poll: the previous primary was a 1Hz CGWindowList diff
+// (`WindowsLifecycleObserver`, below). CLAUDE.md rule: "Polling is the last
+// resort, not the default — look for the event-driven primitive first." A
+// live `hs -c` probe of Hammerspoon on the user's macOS 25.5.0 confirms AX
+// observers deliver `windowCreated` / `windowDestroyed` reliably within ~1s
+// of the action; we want the same.
+//
+// AX-trust gate: if the daemon hasn't been granted Accessibility, every
+// `AXObserverCreate` returns `.cannotComplete` and no events fire. We log
+// a clear stderr line at install time so the diagnosis is obvious; we do
+// not auto-prompt (matches the rest of stackd's policy).
+//
+// Coexistence: still feeds the existing `WindowsLifecycleObserver.shared`
+// callbacks set up in `AppDelegate.applicationDidFinishLaunching`, so the
+// bang fan-out shape stays unchanged. The poll itself stays alive as a
+// low-frequency safety backstop (Slice 4) with a drift-sensor log when it
+// catches an event AX missed.
+final class WindowsAXObserver {
+    static let shared = WindowsAXObserver()
+
+    private var appObservers: [pid_t: AXAppObserver] = [:]
+    private var appTokens: [pid_t: [Token]] = [:]
+    // pid → wid → (window AXUIElement we observe + Tokens for the
+    // per-window AXObserverAddNotification registrations). We hold the
+    // window element so per-window AXObserverRemoveNotification can match
+    // the original target when the app terminates or the window dies.
+    private var windows: [pid_t: [CGWindowID: (element: AXUIElement, tokens: [Token])]] = [:]
+    // Last seen title per (pid, wid). AX's titleChanged callback receives
+    // the element but not the previous title; yabai/HS both cache. The
+    // `sd.window.titleChanged` bang shape includes `oldTitle`, so stack
+    // authors get the same payload from AX as from the polling fallback.
+    private var lastTitle: [pid_t: [CGWindowID: String]] = [:]
+    // Per-(pid, wid) last AX fire timestamp. The Slice 4 safety poll
+    // cross-references this so it only logs "missed by AX" when AX has
+    // genuinely been silent for the affected window.
+    private(set) var lastAxFire: [CGWindowID: TimeInterval] = [:]
+    private var workspaceTokens: [NSObjectProtocol] = []
+
+    private init() {}
+
+    /// Install per-pid observers for every currently running window-hosting
+    /// app, then hook NSWorkspace launch/terminate so we stay in sync as
+    /// apps come and go. Idempotent — second call is a no-op.
+    func install() {
+        guard appObservers.isEmpty else { return }
+
+        // AX trust must be granted for AXObserverCreate to succeed. With
+        // `kAXTrustedCheckOptionPrompt: false` we don't trigger the system
+        // prompt — that's the user's choice via System Settings.
+        let opts: [String: Any] = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: false]
+        let trusted = AXIsProcessTrustedWithOptions(opts as CFDictionary)
+        if !trusted {
+            log("ax: process not trusted for Accessibility — sd.window.* events will not fire (grant in System Settings → Privacy & Security → Accessibility)")
+            // We still wire NSWorkspace so a later trust grant + relaunch
+            // picks up new apps; per-app AX install will retry until it
+            // succeeds via the launch-notification path.
+        }
+
+        // Daemon-startup seed: existing windows aren't "newly created"
+        // from the user's perspective — they were there before we
+        // launched. State replay for windowscape et al. comes via the
+        // `sd.windows.all` channel (replayable). So we install observers
+        // without firing onCreate for already-present windows.
+        //
+        // Retried, not one-shot: AX is slammed at daemon boot (every stack
+        // probing at once) and AXObserverCreate / AXObserverAddNotification
+        // can fail transiently for apps that would succeed seconds later. A
+        // single silent failure here used to mean EVERY event for that app
+        // waited on the 10s safety poll for the daemon's lifetime.
+        // fireForExisting stays false on retries too — a retry success
+        // can't distinguish pre-daemon windows from during-retry ones, and
+        // spurious creates for ancient windows are worse than the poll
+        // catching a genuinely-new one late.
+        for app in NSWorkspace.shared.runningApplications where shouldObserve(app) {
+            installForAppRetry(app: app, delays: WindowsAXObserver.startupRetryDelays, fireForExisting: false)
+        }
+
+        let center = NSWorkspace.shared.notificationCenter
+        workspaceTokens.append(center.addObserver(
+            forName: NSWorkspace.didLaunchApplicationNotification,
+            object: nil, queue: .main
+        ) { [weak self] note in
+            guard let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
+            // AX isn't always ready the moment didLaunch fires — yabai's
+            // `application.c:93-96` retries on `kAXErrorCannotComplete`
+            // after 100ms. Mirror that with a back-off ladder before
+            // giving up. AX can also miss the kAXWindowCreatedNotification
+            // for windows the app opens during the retry window —
+            // `fireForExisting: true` rescues those by firing onCreate for
+            // AXWindows present at install time. The 10s safety poll
+            // catches whatever still slipped through and logs
+            // `missed-by-ax` so a regression here can't hide.
+            self?.installForAppRetry(app: app, delays: WindowsAXObserver.launchRetryDelays, fireForExisting: true)
+        })
+        workspaceTokens.append(center.addObserver(
+            forName: NSWorkspace.didTerminateApplicationNotification,
+            object: nil, queue: .main
+        ) { [weak self] note in
+            guard let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
+            self?.uninstallForApp(pid: app.processIdentifier, appName: app.localizedName ?? "")
+        })
+
+        WindowDebug.log("ax: installed for \(appObservers.count) running apps (trusted=\(trusted))")
+    }
+
+    /// Cross-reference helper for the safety poll. Returns true if AX has
+    /// fired for `wid` within `within` seconds — meaning the poll's diff
+    /// is a stale read and should be silenced.
+    func axFiredRecently(wid: CGWindowID, within: TimeInterval) -> Bool {
+        guard let ts = lastAxFire[wid] else { return false }
+        return (Date().timeIntervalSince1970 - ts) < within
+    }
+
+    /// Drop lastAxFire entries older than `age`. Called from the safety
+    /// poll's tick — the missed-by-ax gate only ever looks back ~12s, so
+    /// anything older is dead weight that would otherwise accumulate one
+    /// entry per wid for the daemon's lifetime.
+    func pruneAxFireLog(olderThan age: TimeInterval) {
+        let cutoff = Date().timeIntervalSince1970 - age
+        lastAxFire = lastAxFire.filter { $0.value >= cutoff }
+    }
+
+    /// Owning pid for a wid we hold per-window observers on; nil when the
+    /// wid isn't (or is no longer) tracked. Used by the CGS 804 destroy
+    /// handler for targeted AX-cache invalidation — by the time 804 fires,
+    /// the window is gone from CGWindowList so the pid can't be recovered
+    /// there.
+    func pidFor(wid: CGWindowID) -> pid_t? {
+        for (pid, map) in windows where map[wid] != nil { return pid }
+        return nil
+    }
+
+    // Install retry ladders. Launch path mirrors yabai's
+    // kAXErrorCannotComplete retry (application.c:93-96) with tail entries
+    // for slow-AX apps (Electron can take >1s to vend AXWindows). Startup
+    // path starts slower — the daemon's own boot burst is the usual cause
+    // of the first failure, and hammering AX during it makes things worse.
+    static let launchRetryDelays:  [TimeInterval] = [0.1, 0.25, 0.5, 1.0, 2.0]
+    static let startupRetryDelays: [TimeInterval] = [0.5, 1.0, 2.0]
+
+    // MARK: - App lifecycle
+
+    private func shouldObserve(_ app: NSRunningApplication) -> Bool {
+        // .prohibited = background-only (no UI, no AX windows). .regular
+        // (Dock+menubar) and .accessory (menubar-only) can still vend
+        // AXWindows, so we observe both.
+        app.activationPolicy != .prohibited && app.processIdentifier > 0
+    }
+
+    private func installForAppRetry(app: NSRunningApplication, delays: [TimeInterval], fireForExisting: Bool) {
+        guard shouldObserve(app) else { return }
+        if installForApp(app: app, fireForExisting: fireForExisting) { return }
+        guard let next = delays.first else {
+            // Out of retries. The 10s safety poll still covers this app —
+            // events arrive late instead of never — but that degradation
+            // must be LOUD (plain log, not WindowDebug): a per-app install
+            // failure is otherwise invisible until someone wonders why one
+            // app's windows always tile ~10s behind.
+            log("ax: install FAILED pid=\(app.processIdentifier) (\(app.localizedName ?? "?")) after all retries — its window events fall back to the 10s safety poll")
+            return
+        }
+        let rest = Array(delays.dropFirst())
+        DispatchQueue.main.asyncAfter(deadline: .now() + next) { [weak self] in
+            self?.installForAppRetry(app: app, delays: rest, fireForExisting: fireForExisting)
+        }
+    }
+
+    /// `fireForExisting`: when true, AXWindows already attached to the
+    /// app at install time get treated as freshly-created and fire
+    /// `onCreate` (the `didLaunchApplication` path uses this — the app
+    /// may have opened windows during the AX-install retry window that
+    /// we'd otherwise miss). When false, existing windows are seeded
+    /// silently (the daemon-startup path uses this — those windows
+    /// existed before us and replay through `sd.windows.all` instead).
+    @discardableResult
+    private func installForApp(app: NSRunningApplication, fireForExisting: Bool) -> Bool {
+        let pid = app.processIdentifier
+        let name = app.localizedName ?? ""
+        if appObservers[pid] != nil { return true }
+        guard let observer = AXAppObserver(pid: pid) else {
+            WindowDebug.log("ax: install failed pid=\(pid) (\(name)) — AXObserverCreate returned error")
+            return false
+        }
+        var tokens: [Token] = []
+
+        if let t = observer.addWithElement(
+            notification: kAXWindowCreatedNotification as String,
+            callback: { [weak self] win, _ in self?.onWindowCreated(pid: pid, app: name, window: win) }
+        ) {
+            tokens.append(t)
+        } else {
+            // Without windowCreated the app observer is pointless — report
+            // failure so the caller's retry ladder gets another shot
+            // (AXObserverAddNotification fails with cannotComplete while an
+            // app is still booting its AX server). Logged because a silent
+            // nil here is the "registration accepted but never fires" class
+            // of bug — except worse: the registration didn't even happen.
+            WindowDebug.log("ax: addNotification windowCreated FAILED pid=\(pid) (\(name))")
+            tokens.forEach { $0.cancel() }
+            return false
+        }
+        if let t = observer.addWithElement(
+            notification: kAXFocusedWindowChangedNotification as String,
+            callback: { [weak self] win, _ in self?.onFocusedWindowChanged(pid: pid, app: name, window: win) }
+        ) {
+            tokens.append(t)
+        } else {
+            // Soft failure — windowCreated still covers lifecycle; we only
+            // lose the early-install rescue path for first windows.
+            WindowDebug.log("ax: addNotification focusedWindowChanged FAILED pid=\(pid) (\(name))")
+        }
+
+        appObservers[pid] = observer
+        appTokens[pid] = tokens
+        seedExistingWindows(pid: pid, app: name, appElement: observer.appElement, firing: fireForExisting)
+
+        WindowDebug.log("ax: installed pid=\(pid) (\(name)) fireExisting=\(fireForExisting)")
+        return true
+    }
+
+    private func uninstallForApp(pid: pid_t, appName: String = "") {
+        appTokens.removeValue(forKey: pid)?.forEach { $0.cancel() }
+        // When an app terminates, AX usually does NOT fire
+        // `kAXUIElementDestroyedNotification` for its remaining windows —
+        // the process is gone, and any queued AX events go with it. yabai
+        // handles this by fanning out window-destroy from the
+        // application-terminated path (`event_loop.c` APPLICATION_
+        // TERMINATED). Mirror that here so windowscape sees a destroy
+        // within the runloop tick of NSWorkspace.didTerminateApplication
+        // instead of waiting for the 10s safety poll to notice.
+        if let perWindow = windows.removeValue(forKey: pid) {
+            let now = Date().timeIntervalSince1970
+            for (wid, entry) in perWindow {
+                entry.tokens.forEach { $0.cancel() }
+                let title = lastTitle[pid]?[wid] ?? ""
+                let snap = WindowsLifecycleObserver.Snap(
+                    id: Int(wid), pid: Int(pid), app: appName, title: title, frame: .zero
+                )
+                lastAxFire[wid] = now
+                WindowDebug.log("ax: app-terminate destroyed wid=\(wid)")
+                WindowsLifecycleObserver.shared.onDestroy?(snap)
+            }
+        }
+        lastTitle.removeValue(forKey: pid)
+        appObservers.removeValue(forKey: pid)
+        WindowDebug.log("ax: uninstalled pid=\(pid)")
+    }
+
+    private func seedExistingWindows(pid: pid_t, app: String, appElement: AXUIElement, firing: Bool) {
+        var raw: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(appElement, kAXWindowsAttribute as CFString, &raw) == .success,
+              let cf = raw, CFGetTypeID(cf) == CFArrayGetTypeID() else { return }
+        let arr = cf as! [AXUIElement]
+        for win in arr {
+            installPerWindow(pid: pid, app: app, window: win, firing: firing)
+        }
+    }
+
+    // MARK: - Per-window handlers
+
+    private func onWindowCreated(pid: pid_t, app: String, window: AXUIElement) {
+        installPerWindow(pid: pid, app: app, window: window, firing: true)
+    }
+
+    // Re-check ladder for windows whose subrole read ERRORED at create time
+    // (distinct from "read fine, not standard"). AX timeouts cluster at
+    // exactly the moment windows are created — app launch, AX burst — and
+    // kAXWindowCreated fires only once, so a dropped window here was
+    // permanently invisible to the AX path until the 10s poll rescued it.
+    static let subroleRetryDelays: [TimeInterval] = [0.25, 1.0]
+
+    private func installPerWindow(pid: pid_t, app: String, window: AXUIElement, firing: Bool,
+                                  subroleRetries: [TimeInterval] = WindowsAXObserver.subroleRetryDelays) {
+        guard let observer = appObservers[pid] else { return }
+        var w: CGWindowID = 0
+        guard let getWindow = AXShim.getWindow, getWindow(window, &w) == .success, w != 0 else { return }
+        let wid = w
+        if windows[pid]?[wid] != nil { return }
+
+        // Skip non-standard windows (Spotlight overlay, notification banners,
+        // popover/sheet helpers, system HUDs). kAXSubrole == kAXStandardWindowSubrole
+        // matches the `isStandard` filter `Windows.all()` already applies. Without
+        // this gate the AX path fires create/destroy bangs and synthesizes
+        // entries into `sd.windows.all` for windows the CGWindowList filter
+        // would normally exclude (because their kCGWindowLayer is not 0),
+        // and consumers like windowscape end up tiling them.
+        //
+        // Three-way verdict, not a bool: a subrole read that ERRORS (app
+        // still constructing the window, AX timeout under load) must not be
+        // conflated with "definitely not standard" — kAXWindowCreated won't
+        // re-fire, so a wrong drop here is permanent. Unknown → bounded
+        // retry before giving up.
+        switch axSubroleVerdict(window) {
+        case .nonStandard:
+            return
+        case .unknown:
+            if let next = subroleRetries.first {
+                let rest = Array(subroleRetries.dropFirst())
+                WindowDebug.log("ax: subrole unreadable pid=\(pid) wid=\(wid) — retry in \(Int(next * 1000))ms")
+                DispatchQueue.main.asyncAfter(deadline: .now() + next) { [weak self] in
+                    guard let self = self, self.windows[pid]?[wid] == nil else { return }
+                    self.installPerWindow(pid: pid, app: app, window: window, firing: firing, subroleRetries: rest)
+                }
+            } else {
+                WindowDebug.log("ax: subrole unreadable pid=\(pid) wid=\(wid) — dropped after retries (10s poll is the backstop)")
+            }
+            return
+        case .standard:
+            break
+        }
+
+        // Seed the addressability cache with the AX-confirmed verdict.
+        // Without this, `Windows.all()`'s probe for the brand-new wid lands
+        // in the optimism grace (isStandard: false) whenever AX is busy —
+        // filtering the window out of the exact snapshot AppDelegate pumps
+        // in response to this create.
+        let isMin = axWindowBool(window, kAXMinimizedAttribute as String) ?? false
+        WindowAddressabilityCache.confirm(pid: pid, windowID: wid, isStandard: true, isMinimized: isMin)
+
+        let title = axWindowString(window, kAXTitleAttribute as String) ?? ""
+        let frame = axWindowFrame(window) ?? .zero
+        let snap = WindowsLifecycleObserver.Snap(
+            id: Int(wid), pid: Int(pid), app: app, title: title, frame: frame
+        )
+
+        var tokens: [Token] = []
+        let addPerWindow: (String, @escaping (AXUIElement) -> Void) -> Void = { notif, cb in
+            if let t = observer.add(toElement: window, notification: notif, callback: { el, _ in cb(el) }) {
+                tokens.append(t)
+            } else {
+                // Per-CLAUDE.md "verify the listener actually fires": a nil
+                // token means AXObserverAddNotification refused — the event
+                // type for this window will NEVER fire and only the 10s
+                // poll covers it. Must be visible under STACKD_WIN_DEBUG.
+                WindowDebug.log("ax: addNotification \(notif) FAILED pid=\(pid) wid=\(wid)")
+            }
+        }
+        addPerWindow(kAXUIElementDestroyedNotification as String) { [weak self] _ in
+            self?.onWindowDestroyed(pid: pid, wid: wid, app: app)
+        }
+        addPerWindow(kAXTitleChangedNotification as String) { [weak self] el in
+            self?.onTitleChanged(pid: pid, wid: wid, app: app, window: el)
+        }
+        addPerWindow(kAXWindowMiniaturizedNotification as String) { [weak self] _ in
+            self?.onMinimized(pid: pid, wid: wid)
+        }
+        addPerWindow(kAXWindowDeminiaturizedNotification as String) { [weak self] _ in
+            self?.onDeminimized(pid: pid, wid: wid)
+        }
+        addPerWindow(kAXWindowMovedNotification as String) { [weak self] el in
+            self?.onMoved(pid: pid, wid: wid, window: el)
+        }
+        addPerWindow(kAXWindowResizedNotification as String) { [weak self] el in
+            self?.onResized(pid: pid, wid: wid, window: el)
+        }
+
+        windows[pid, default: [:]][wid] = (window, tokens)
+        lastTitle[pid, default: [:]][wid] = title
+
+        if firing {
+            lastAxFire[wid] = Date().timeIntervalSince1970
+            WindowDebug.log("ax: window created pid=\(pid) wid=\(wid) app=\(app) title='\(title)'")
+            WindowsLifecycleObserver.shared.onCreate?(snap)
+        }
+    }
+
+    private func onWindowDestroyed(pid: pid_t, wid: CGWindowID, app: String) {
+        let entry = windows[pid]?.removeValue(forKey: wid)
+        entry?.tokens.forEach { $0.cancel() }
+        let title = lastTitle[pid]?.removeValue(forKey: wid) ?? ""
+        lastAxFire[wid] = Date().timeIntervalSince1970
+        WindowDebug.log("ax: window destroyed pid=\(pid) wid=\(wid)")
+        let snap = WindowsLifecycleObserver.Snap(
+            id: Int(wid), pid: Int(pid), app: app, title: title, frame: .zero
+        )
+        WindowsLifecycleObserver.shared.onDestroy?(snap)
+    }
+
+    private func onTitleChanged(pid: pid_t, wid: CGWindowID, app: String, window: AXUIElement) {
+        let newTitle = axWindowString(window, kAXTitleAttribute as String) ?? ""
+        let oldTitle = lastTitle[pid]?[wid] ?? ""
+        if newTitle == oldTitle { return }
+        lastTitle[pid, default: [:]][wid] = newTitle
+        let frame = axWindowFrame(window) ?? .zero
+        let snap = WindowsLifecycleObserver.Snap(
+            id: Int(wid), pid: Int(pid), app: app, title: newTitle, frame: frame
+        )
+        lastAxFire[wid] = Date().timeIntervalSince1970
+        WindowDebug.log("ax: window title changed pid=\(pid) wid=\(wid) → '\(newTitle)'")
+        WindowsLifecycleObserver.shared.onTitleChange?(snap, oldTitle)
+    }
+
+    private func onMinimized(pid: pid_t, wid: CGWindowID) {
+        lastAxFire[wid] = Date().timeIntervalSince1970
+        // Keep the cached isMinimized live BEFORE pumping — the probe's
+        // sticky-success fast path never re-reads AX, so without this the
+        // pumped sd.windows.all still carries the pre-minimize value.
+        WindowAddressabilityCache.setMinimized(pid: pid, windowID: wid, true)
+        WindowDebug.log("ax: window minimized pid=\(pid) wid=\(wid)")
+        AppDelegate.shared?.host?.bang(name: "sd.window.minimized", detail: ["id": Int(wid)])
+        AppDelegate.shared?.host?.pumpWindowsListForAllStacks()
+    }
+
+    private func onDeminimized(pid: pid_t, wid: CGWindowID) {
+        lastAxFire[wid] = Date().timeIntervalSince1970
+        WindowAddressabilityCache.setMinimized(pid: pid, windowID: wid, false)
+        WindowDebug.log("ax: window deminimized pid=\(pid) wid=\(wid)")
+        AppDelegate.shared?.host?.bang(name: "sd.window.deminimized", detail: ["id": Int(wid)])
+        AppDelegate.shared?.host?.pumpWindowsListForAllStacks()
+    }
+
+    private func onMoved(pid: pid_t, wid: CGWindowID, window: AXUIElement) {
+        let frame = axWindowFrame(window) ?? .zero
+        lastAxFire[wid] = Date().timeIntervalSince1970
+        WindowDebug.log("ax: window moved pid=\(pid) wid=\(wid)")
+        AppDelegate.shared?.host?.bang(name: "sd.window.moved", detail: [
+            "id": Int(wid),
+            "frame": [
+                "x": Int(frame.origin.x), "y": Int(frame.origin.y),
+                "w": Int(frame.size.width), "h": Int(frame.size.height)
+            ]
+        ])
+    }
+
+    private func onResized(pid: pid_t, wid: CGWindowID, window: AXUIElement) {
+        let frame = axWindowFrame(window) ?? .zero
+        lastAxFire[wid] = Date().timeIntervalSince1970
+        WindowDebug.log("ax: window resized pid=\(pid) wid=\(wid)")
+        AppDelegate.shared?.host?.bang(name: "sd.window.resized", detail: [
+            "id": Int(wid),
+            "frame": [
+                "x": Int(frame.origin.x), "y": Int(frame.origin.y),
+                "w": Int(frame.size.width), "h": Int(frame.size.height)
+            ]
+        ])
+    }
+
+    private func onFocusedWindowChanged(pid: pid_t, app: String, window: AXUIElement) {
+        var w: CGWindowID = 0
+        guard let getWindow = AXShim.getWindow, getWindow(window, &w) == .success, w != 0 else { return }
+        let wid = w
+        // If this is a brand-new window we haven't seen, install
+        // per-window observers (focusedWindowChanged commonly fires before
+        // windowCreated for the first window of a freshly-launched app).
+        if windows[pid]?[wid] == nil {
+            installPerWindow(pid: pid, app: app, window: window, firing: true)
+        }
+        WindowDebug.log("ax: focused window pid=\(pid) wid=\(wid)")
+        AppDelegate.shared?.host?.bang(name: "sd.window.focused", detail: ["id": Int(wid), "pid": Int(pid), "app": app])
+    }
+
+    // MARK: - AX helpers (window-scoped, to avoid colliding with the
+    // app-scoped helpers used by FrontmostWindowObserver above)
+
+    private func axWindowString(_ el: AXUIElement, _ attr: String) -> String? {
+        var ref: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(el, attr as CFString, &ref) == .success else { return nil }
+        return ref as? String
+    }
+
+    /// Three-way subrole classification — same gate
+    /// `WindowAddressabilityCache.probe` applies when enriching
+    /// `Windows.all()`, but with the read-error case kept distinct so
+    /// `installPerWindow` can retry instead of permanently dropping a
+    /// window whose subrole read merely timed out.
+    private enum SubroleVerdict { case standard, nonStandard, unknown }
+
+    private func axSubroleVerdict(_ el: AXUIElement) -> SubroleVerdict {
+        var ref: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(el, kAXSubroleAttribute as CFString, &ref) == .success,
+              let s = ref as? String else { return .unknown }
+        return s == (kAXStandardWindowSubrole as String) ? .standard : .nonStandard
+    }
+
+    private func axWindowBool(_ el: AXUIElement, _ attr: String) -> Bool? {
+        var ref: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(el, attr as CFString, &ref) == .success else { return nil }
+        return ref as? Bool
+    }
+
+    private func axWindowFrame(_ el: AXUIElement) -> CGRect? {
+        var posRef: CFTypeRef?
+        var sizeRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(el, kAXPositionAttribute as CFString, &posRef) == .success,
+              AXUIElementCopyAttributeValue(el, kAXSizeAttribute as CFString, &sizeRef) == .success,
+              let posCF = posRef, let sizeCF = sizeRef else { return nil }
+        var pt = CGPoint.zero, sz = CGSize.zero
+        AXValueGetValue(posCF as! AXValue, .cgPoint, &pt)
+        AXValueGetValue(sizeCF as! AXValue, .cgSize, &sz)
+        return CGRect(origin: pt, size: sz)
     }
 }

@@ -65,5 +65,18 @@ registerDisplaysChangedTests()
 registerMenubarChangedTests()
 registerComputeDeltaTests()
 registerChannelsRegistryTests()
+registerWindowsLifecycleObserverTests()
 registerPermissionsRegistryTests()
-exit(runAll())
+// Optional CLI filters: --filter <regex> (include) and --exclude <regex>.
+// Used by CI to split the suite into "pure" (no macOS permission prompts) and
+// "live" (camera / speech / location / AX) categories without touching every
+// registerXxxTests() call site. Test names are arbitrary strings passed to
+// test(name:_:) inside each register function; the regex matches against them.
+private func parseRegex(_ flag: String) -> NSRegularExpression? {
+    let args = CommandLine.arguments
+    guard let i = args.firstIndex(of: flag), i + 1 < args.count else { return nil }
+    return try? NSRegularExpression(pattern: args[i + 1], options: [])
+}
+let __include = parseRegex("--filter")
+let __exclude = parseRegex("--exclude")
+exit(runAll(include: __include, exclude: __exclude))

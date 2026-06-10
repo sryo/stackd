@@ -90,6 +90,7 @@ TEST_SOURCES=(
   Tests/MenubarChangedTests.swift
   Tests/ComputeDeltaTests.swift
   Tests/ChannelsRegistryTests.swift
+  Tests/WindowsLifecycleObserverTests.swift
   Tests/PermissionsRegistryTests.swift
   Tests/main.swift
 )

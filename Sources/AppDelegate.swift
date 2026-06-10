@@ -104,11 +104,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             host?.reloadAll()
         }
 
-        // Wire window lifecycle → bangs. Polling at 1s; stacks subscribe via
-        // manifest handles: ["sd.window.created" | "destroyed" | "titleChanged"].
+        // Wire window lifecycle → bangs. AX-primary (WindowsAXObserver) with
+        // the 10s poll as backstop; stacks subscribe via manifest
+        // handles: ["sd.window.created" | "destroyed" | "titleChanged"].
         WindowsLifecycleObserver.shared.onCreate = { [weak host] info in
             log("window created: \(info.app) — \(info.title) (id=\(info.id))")
-            host?.bang(name: "sd.window.created", detail: WindowsLifecycleObserver.detail(info))
+            // Gated fan-out: AX fires before CGWindowList lists the new wid
+            // (~50–500ms lag), and a bang that lands ahead of a pumped
+            // snapshot containing the window is a silent no-op for stacks
+            // that diff sd.windows.all. WindowLifecycleFanout holds the
+            // bang + pump until Windows.all() agrees (bounded retries),
+            // then pushes the channel BEFORE firing the bang.
+            WindowLifecycleFanout.fireCreated(host: host, snap: info)
         }
         WindowsLifecycleObserver.shared.onDestroy = { [weak host] info in
             log("window destroyed: \(info.app) — \(info.title) (id=\(info.id))")
@@ -121,6 +128,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // for the app's MAIN window to oscillate between rebuilds.
             WindowsByID.invalidateCache(pid: pid_t(info.pid), windowID: CGWindowID(info.id))
             host?.bang(name: "sd.window.destroyed", detail: WindowsLifecycleObserver.detail(info))
+            // Destroy bangs fire immediately (stacks eagerly drop the id),
+            // but the pumped snapshot can still CONTAIN the dead wid for a
+            // CGWindowList-lag beat — re-pump once the wid is really gone
+            // so the channel converges instead of resurrecting the window.
+            host?.pumpWindowsListForAllStacks(until: .absent(info.id))
         }
 
         // Drop the AX-addressability cache when an app fully quits. Per-window
@@ -140,25 +152,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             var d = WindowsLifecycleObserver.detail(info)
             d["oldTitle"] = oldTitle
             host?.bang(name: "sd.window.titleChanged", detail: d)
+            host?.pumpWindowsListForAllStacks()
         }
-        // Lazy: the 1Hz CGWindowList poll only runs while at least one stack
-        // declares a sd.window.* handle (subscribe + scope.adopt happens in
-        // StackHost.spawnInstance). With no listeners, daemon idle cost is 0.
+        // Safety backstop for AX. 10s CGWindowList diff that only fires
+        // callbacks when AX hasn't already fired for the affected wid in
+        // the last 12s — logs `win-poll missed-by-ax` when it catches a
+        // drop, which is the drift sensor for the CoreAudio-listener-
+        // silently-fails class of bug. Always-on at startup.
+        WindowsLifecycleObserver.shared.install()
 
-        // CGS connection-notify window events: faster + earlier than the 1Hz
-        // poll above, and they cover events the poll can't see (moved, resized,
-        // minimized, deminimized, reordered, focusedByMouse). SkyLight has no
-        // removeNotifyProc, so this is install-once for the process lifetime;
-        // the host.bang fan-out inside the callback is a no-op when no stack
-        // handles the bang. See Sources/DataSources/WindowEvents.swift for
-        // event IDs and payload decoding.
+        // Primary source for window create/destroy/title/move/resize/
+        // miniaturize. Per-app AXObserver per Hammerspoon's hs.window.filter
+        // and yabai's application_observe(). The polling observer above is
+        // the safety backstop only; CGS notify below is a secondary signal
+        // for things AX can't see (z-order, frontmost app change).
+        WindowsAXObserver.shared.install()
+
+        // CGS connection-notify window events: secondary source for
+        // reordered + focusedByMouse. SkyLight has no removeNotifyProc, so
+        // this is install-once for the process lifetime; the host.bang
+        // fan-out inside the callback is a no-op when no stack handles the
+        // bang. See Windows.swift CGS section for event IDs and payload
+        // decoding.
         WindowEvents.install()
-        // macOS 26 (Tahoe) lost CGS events 806/807/815/816 — moved, resized,
-        // minimized, deminimized. Without these, drag-to-resize and the
-        // minimize-bang-driven exclusion in tilers can't work. A 250ms CG
-        // diff loop synthesizes the same bangs; idempotent on pre-Tahoe
-        // where the native events still fire.
-        WindowEvents.startTahoeSynthPoll()
+        // The previous WindowEvents.startTahoeSynthPoll() (a 100ms CG diff
+        // loop that synthesized moved/resized/minimized/deminimized bangs
+        // because CGS events 806/807/815/816 went silent on Tahoe) is
+        // gone — `WindowsAXObserver` now installs per-window AX observers
+        // for those notifications, which work on every macOS we support.
 
         // Display hotplug bangs (added/removed/reconfigured). Same lifetime
         // pattern as WindowEvents — install once at startup; CG fans out per

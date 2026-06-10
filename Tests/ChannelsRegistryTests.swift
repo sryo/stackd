@@ -129,13 +129,22 @@ func registerChannelsRegistryTests() {
         }
     }
 
-    test("appsChanged is the only non-replayable channel today") {
+    test("non-replayable channels are pinned to the expected set") {
         // Pure delta channels never write to lastState so replay would
         // never have anything to push for them. This test pins the
-        // current split — if a new delta-only channel ships, update here
-        // in the SAME commit.
-        let nonReplayable = Channels.all.filter { !$0.replayable }.map(\.name)
-        try expectEqual(nonReplayable, ["appsChanged"])
+        // current set — if a new delta-only channel ships, update here
+        // in the SAME commit. Window-lifecycle bangs (windowCreated etc.)
+        // are non-replayable because "a window was just created" has no
+        // meaningful state snapshot.
+        let nonReplayable = Set(Channels.all.filter { !$0.replayable }.map(\.name))
+        let expected: Set<String> = [
+            "appsChanged",
+            "windowCreated", "windowDestroyed", "windowTitleChanged",
+            "windowMoved", "windowResized",
+            "windowMinimized", "windowDeminimized",
+            "windowReordered", "windowFocusedByMouse",
+        ]
+        try expectEqual(nonReplayable, expected)
     }
 
     test("jsBootstrapJSON omits channels without a jsPath") {

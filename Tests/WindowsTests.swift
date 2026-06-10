@@ -353,60 +353,69 @@ func registerWindowsTests() {
                         "within failTtl, probe must return cached entry (same ts)")
     }
 
-    // MARK: - WindowEvents.tahoeMinimizeBang — Tahoe poll bang gating
+    // MARK: - WindowAddressabilityCache.confirm / setMinimized — AX-fed seeding
     //
-    // The Tahoe synth-poll watches CGS `onscreen` bits to fan out the
-    // sd.window.minimized / .deminimized bangs (Tahoe killed the dedicated
-    // CGS events). Tab-merged background windows (Terminal / Safari / Finder)
-    // flip onscreen→false on tab switch even though the underlying window
-    // isn't minimized in the AX sense — they're just hidden behind a tab
-    // sibling. Bang would fire, snapshot subsystems (windowscape) capture
-    // a minimized thumbnail, user sees their previous foreground tab in the
-    // minimized strip. Decision gate filters via AX-confirmed isMinimized.
+    // WindowsAXObserver.installPerWindow calls confirm() with the verdict it
+    // already read from the live AX element, bypassing probe()'s grace
+    // machinery. Regression context: without seeding, a window created while
+    // AX is busy probes into the optimism grace (isStandard: false), gets
+    // filtered out of Windows.all(), and the snapshot pumped in response to
+    // its own create bang doesn't contain it — the create is silently
+    // absorbed. All tests use fake pids (no real AX RPC fires on the cache-
+    // hit path) and clean up via invalidate(pid:).
 
-    test("WindowEvents.tahoeMinimizeBang: no transition yields nil") {
-        // Steady-state ticks are the common case — most ids don't change
-        // onscreen between 100ms ticks. Locking nil here keeps the pure
-        // helper allocation-free for the hot path.
-        try expect(WindowEvents.tahoeMinimizeBang(
-            prevOnscreen: true, curOnscreen: true, axMinimizedNow: false) == nil)
-        try expect(WindowEvents.tahoeMinimizeBang(
-            prevOnscreen: false, curOnscreen: false, axMinimizedNow: false) == nil)
-        try expect(WindowEvents.tahoeMinimizeBang(
-            prevOnscreen: true, curOnscreen: true, axMinimizedNow: true) == nil)
+    test("WindowAddressabilityCache.confirm seeds a sticky-success verdict that survives past grace") {
+        let pid: pid_t = 7_777_704
+        defer { WindowAddressabilityCache.invalidate(pid: pid) }
+        WindowAddressabilityCache.confirm(pid: pid, windowID: 7_777_704,
+                                          isStandard: true, isMinimized: false, now: 1000.0)
+        let p = WindowAddressabilityCache.probe(pid: pid, windowID: 7_777_704, now: 1000.1)
+        try expectEqual(p.addressable, true)
+        try expectEqual(p.isStandard, true,
+            "AX-confirmed standard verdict must win over grace's isStandard:false")
+        // Far past the 5s grace — a probe-derived entry would have had to
+        // re-probe (and fail, fake pid); the confirmed entry must stick.
+        let late = WindowAddressabilityCache.probe(pid: pid, windowID: 7_777_704, now: 1100.0)
+        try expectEqual(late.addressable, true, "confirmed verdict must be sticky, not grace-scoped")
+        try expectEqual(late.isStandard, true)
     }
 
-    test("WindowEvents.tahoeMinimizeBang: off→on always fires deminimize") {
-        // Spurious for a background-tab-becoming-foreground transition but
-        // benign (snapshot subsystems no-op on never-snapshotted ids). The
-        // common real case — a Cmd+M'd window being dock-clicked back — is
-        // covered by the same branch. axMinimizedNow is ignored here by
-        // design; document the contract via explicit assertions for both.
-        try expectEqual(WindowEvents.tahoeMinimizeBang(
-            prevOnscreen: false, curOnscreen: true, axMinimizedNow: false),
-            "sd.window.deminimized")
-        try expectEqual(WindowEvents.tahoeMinimizeBang(
-            prevOnscreen: false, curOnscreen: true, axMinimizedNow: true),
-            "sd.window.deminimized")
+    test("WindowAddressabilityCache.setMinimized flips the bit on an established entry") {
+        // The probe's sticky-success fast path never re-reads AX, so the
+        // miniaturize/deminiaturize AX events are the ONLY thing keeping
+        // isMinimized live. Pin the round-trip both ways.
+        let pid: pid_t = 7_777_705
+        defer { WindowAddressabilityCache.invalidate(pid: pid) }
+        WindowAddressabilityCache.confirm(pid: pid, windowID: 7_777_705,
+                                          isStandard: true, isMinimized: false, now: 1000.0)
+        WindowAddressabilityCache.setMinimized(pid: pid, windowID: 7_777_705, true, now: 1001.0)
+        let minimized = WindowAddressabilityCache.probe(pid: pid, windowID: 7_777_705, now: 1001.1)
+        try expectEqual(minimized.isMinimized, true)
+        try expectEqual(minimized.isStandard, true, "setMinimized must not disturb isStandard")
+        WindowAddressabilityCache.setMinimized(pid: pid, windowID: 7_777_705, false, now: 1002.0)
+        let restored = WindowAddressabilityCache.probe(pid: pid, windowID: 7_777_705, now: 1002.1)
+        try expectEqual(restored.isMinimized, false)
+        try expectEqual(restored.addressable, true)
     }
 
-    test("WindowEvents.tahoeMinimizeBang: on→off + AX-confirmed minimize fires minimize bang") {
-        // The legitimate-Cmd+M case. AX-side check has already read
-        // kAXMinimized=true so it's safe to fan out the bang.
-        try expectEqual(WindowEvents.tahoeMinimizeBang(
-            prevOnscreen: true, curOnscreen: false, axMinimizedNow: true),
-            "sd.window.minimized")
+    test("WindowAddressabilityCache.setMinimized is a no-op for unknown (pid, wid)") {
+        // AX can fire miniaturized for a window the cache never probed
+        // (e.g. observer installed before any Windows.all() pass). The
+        // contract: don't invent an entry — the next real probe reads the
+        // live value — and don't crash.
+        let pid: pid_t = 7_777_706
+        defer { WindowAddressabilityCache.invalidate(pid: pid) }
+        WindowAddressabilityCache.setMinimized(pid: pid, windowID: 7_777_706, true, now: 1000.0)
+        // Probe goes down the normal (unseeded) path: fake pid → grace
+        // optimism with isStandard false, NOT a synthesized minimized entry.
+        let p = WindowAddressabilityCache.probe(pid: pid, windowID: 7_777_706, now: 1000.1)
+        try expectEqual(p.isMinimized, false,
+            "setMinimized on an unknown key must not fabricate cache state")
+        try expectEqual(p.isStandard, false)
     }
 
-    test("WindowEvents.tahoeMinimizeBang: on→off WITHOUT AX-confirmed minimize is the regression-fix nil branch") {
-        // The bug: Terminal tab switch flips onscreen 1→0 on the previous
-        // foreground tab's CGWindowID. AX has no element for that id
-        // (it's now a tab-merged background sibling), so WindowsByID
-        // .isMinimized returns false. Without this nil branch, the bang
-        // would fire and windowscape's snapshot subsystem would render
-        // the hidden tab as a minimized thumbnail.
-        try expect(WindowEvents.tahoeMinimizeBang(
-            prevOnscreen: true, curOnscreen: false, axMinimizedNow: false) == nil,
-            "tab-switch transition (onscreen 1→0 without real minimize) must NOT fire bang")
-    }
+    // (TahoeSynthPoll + WindowEvents.tahoeMinimizeBang removed 2026-06-05:
+    //  WindowsAXObserver now registers kAXWindowMiniaturizedNotification per
+    //  window, which only fires on real Cmd+M — no tab-switch ambiguity to
+    //  gate against. AX is the right primitive for this.)
 }

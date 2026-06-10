@@ -123,6 +123,22 @@ enum Channels {
         // sd.apps.changed binding and template authors can subscribe via
         // {{ sd.apps.changed.added.length }} etc.
         Channel(name: "appsChanged",     jsPath: "apps.changed",       permission: "apps", replayable: false),
+        // Window lifecycle bangs (sd.window.created etc.) are pure-event
+        // channels, dispatched via host.bang → onBang_… in JS, not via
+        // signal paths. Registered here so the same-commit
+        // PermissionsRegistryTests / ChannelsRegistryTests guard catches
+        // any new bang that doesn't declare its permission, and so a
+        // future template surface for window events (e.g. {{ sd.windows
+        // .created.app }}) can hang a jsPath off the same entry.
+        Channel(name: "windowCreated",       jsPath: nil, permission: "windows", replayable: false),
+        Channel(name: "windowDestroyed",     jsPath: nil, permission: "windows", replayable: false),
+        Channel(name: "windowTitleChanged",  jsPath: nil, permission: "windows", replayable: false),
+        Channel(name: "windowMoved",         jsPath: nil, permission: "windows", replayable: false),
+        Channel(name: "windowResized",       jsPath: nil, permission: "windows", replayable: false),
+        Channel(name: "windowMinimized",     jsPath: nil, permission: "windows", replayable: false),
+        Channel(name: "windowDeminimized",   jsPath: nil, permission: "windows", replayable: false),
+        Channel(name: "windowReordered",     jsPath: nil, permission: "windows", replayable: false),
+        Channel(name: "windowFocusedByMouse", jsPath: nil, permission: "windows", replayable: false),
     ]
 
     /// JSON payload injected as `window.__sd_channels` at document start so

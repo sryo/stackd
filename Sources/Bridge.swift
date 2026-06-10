@@ -47,6 +47,13 @@ final class Bridge: NSObject, WKScriptMessageHandler {
     // stacks don't have to also list the bang name in their manifest's
     // `handles` array.
     var handlesBangs: Set<String> = []
+    // Set in `startWorkspace` when the stack declares `windows` / `app`.
+    // AppDelegate's window-lifecycle handlers call `pumpWindowsList()` on
+    // every Bridge so each create / destroy / title-change refreshes the
+    // sd.windows.all channel — without this, the channel only re-fires
+    // on focus changes and a background-app window closing never reaches
+    // the stack's state. nil for stacks that don't need it.
+    fileprivate var windowsListPump: (() -> Void)?
     // Widened from private to internal so BridgeAX.swift's ax.* closures
     // can read/release handles via the per-Bridge HandleStore.
     let axHandles = AX.HandleStore()
@@ -408,12 +415,16 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         self.permissions = manifest.permissions
         self.handlesBangs = Set(manifest.handles ?? [])
         self.settings = StackSettings(stackId: manifest.id)
-        // Keep WindowsLifecycleObserver's 1Hz CGWindowList poll alive only
-        // while at least one loaded stack declares it cares (handles a
-        // sd.window.* bang). Token drains with the scope on unload.
-        if handlesBangs.contains(where: { $0.hasPrefix("sd.window.") }) {
-            scope.adopt(WindowsLifecycleObserver.shared.subscribe())
+        if WindowDebug.enabled {
+            let winHandles = handlesBangs.filter { $0.hasPrefix("sd.window.") }.sorted()
+            WindowDebug.log("stack \(manifest.id) handles=\(winHandles)")
         }
+        // (Per-stack WindowsLifecycleObserver.subscribe() removed in the
+        // Slice 4 rework. The poll is now always-on at startup as a
+        // safety backstop alongside WindowsAXObserver; no per-stack gate
+        // — gating both the source and the fan-out on the same manifest
+        // field was a single point of failure. AX is primary, the poll
+        // is the drift sensor.)
         if manifest.permissions.contains("battery")    { startBattery() }
         if manifest.permissions.contains("mouse")      { startMouse() }
         if manifest.permissions.contains("appearance") { startAppearance() }
@@ -1908,6 +1919,20 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         if includeWindows {
             scope.adopt(FrontmostWindowObserver.shared.subscribe(pushFn))
         }
+        // Expose pushFn for the AppDelegate window-lifecycle nudge — see
+        // the windowsListPump comment on the property for why this is
+        // needed (background window close has no focus-change signal).
+        self.windowsListPump = pushFn
+    }
+
+    /// Refire `pushFn` (frontApp + focusedWindow + windowsAll + the
+    /// matching deltas). AppDelegate calls this on every window
+    /// create / destroy / title-change so stacks see `sd.windows.all`
+    /// reflect the new set within one runloop hop instead of waiting for
+    /// the next focus change. No-op when this Bridge didn't subscribe to
+    /// the workspace pump (no `windows` / `app` permission).
+    func pumpWindowsList() {
+        windowsListPump?()
     }
 
     private func fireHotkey(callback: String) {

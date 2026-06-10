@@ -399,13 +399,33 @@ enum AX {
 /// follower, role-changed watchers) would build on the same wrapper.
 final class AXAppObserver {
     let pid: pid_t
-    private let appElement: AXUIElement
+    let appElement: AXUIElement
     private let observer: AXObserver
-    private var subs: [Int: (notif: String, cb: (String) -> Void)] = [:]
+    // Callback gets the element that produced the notification + the notif
+    // name. For app-level notifs (e.g. kAXFocusedWindowChangedNotification)
+    // element is usually the app; for kAXWindowCreatedNotification it's the
+    // freshly created window; for per-window observers (added via
+    // add(toElement:)) it's the window itself. Old call sites that don't
+    // need the element use add(notification:callback:) which discards it.
+    private var subs: [Int: (target: AXUIElement, notif: String, cb: (AXUIElement, String) -> Void)] = [:]
     private var nextId: Int = 1
-    // Per-notification subscriber counts. Goes 0→1 → AXObserverAddNotification;
-    // 1→0 → AXObserverRemoveNotification.
-    private var notifCounts: [String: Int] = [:]
+    // Per-(notification, target) subscriber counts. Goes 0→1 →
+    // AXObserverAddNotification on target; 1→0 → AXObserverRemoveNotification.
+    // Keyed by target so per-window registrations don't collide with
+    // app-level ones for the same notification name.
+    private var notifCounts: [TargetKey: Int] = [:]
+
+    fileprivate struct TargetKey: Hashable {
+        let element: AXUIElement
+        let notif: String
+        static func == (a: TargetKey, b: TargetKey) -> Bool {
+            CFEqual(a.element, b.element) && a.notif == b.notif
+        }
+        func hash(into hasher: inout Hasher) {
+            hasher.combine(CFHash(element))
+            hasher.combine(notif)
+        }
+    }
 
     init?(pid: pid_t) {
         self.pid = pid
@@ -414,14 +434,14 @@ final class AXAppObserver {
         self.appElement = appEl
 
         var obs: AXObserver?
-        let callback: AXObserverCallback = { _, _, notif, refcon in
+        let callback: AXObserverCallback = { _, element, notif, refcon in
             guard let refcon = refcon else { return }
             let me = Unmanaged<AXAppObserver>.fromOpaque(refcon).takeUnretainedValue()
             let name = notif as String
             // Snapshot before iterating — a callback that synchronously
             // cancels its own Token mutates subs mid-loop otherwise.
             for entry in Array(me.subs.values) where entry.notif == name {
-                entry.cb(name)
+                entry.cb(element, name)
             }
         }
         let err = AXObserverCreate(pid, callback, &obs)
@@ -442,26 +462,60 @@ final class AXAppObserver {
     /// side in sync with the subscriber set instead of relying on the whole
     /// observer dropping out of scope.
     func add(notification: String, callback: @escaping (String) -> Void) -> Token? {
+        add(target: appElement, notification: notification) { _, name in callback(name) }
+    }
+
+    /// As `add(notification:callback:)` but the callback also receives the
+    /// AXUIElement that produced the event. For `kAXWindowCreatedNotification`
+    /// observed on an application element, the element is the freshly-created
+    /// window — exactly what a per-window observer needs to attach its
+    /// destroy/title/move/resize watchers to. Existing call sites that don't
+    /// need the element use the simpler overload above.
+    func addWithElement(
+        notification: String,
+        callback: @escaping (AXUIElement, String) -> Void
+    ) -> Token? {
+        add(target: appElement, notification: notification, callback: callback)
+    }
+
+    /// Registers `notification` against a specific element (typically a
+    /// window for per-window destroy / title / minimize observers). One
+    /// AXObserverAddNotification is shared across subscribers via the same
+    /// (target, notif) refcount as the app-level overload.
+    func add(
+        toElement target: AXUIElement,
+        notification: String,
+        callback: @escaping (AXUIElement, String) -> Void
+    ) -> Token? {
+        add(target: target, notification: notification, callback: callback)
+    }
+
+    private func add(
+        target: AXUIElement,
+        notification: String,
+        callback: @escaping (AXUIElement, String) -> Void
+    ) -> Token? {
         let refcon = Unmanaged.passUnretained(self).toOpaque()
-        let currentCount = notifCounts[notification] ?? 0
+        let key = TargetKey(element: target, notif: notification)
+        let currentCount = notifCounts[key] ?? 0
         if currentCount == 0 {
-            let err = AXObserverAddNotification(observer, appElement, notification as CFString, refcon)
+            let err = AXObserverAddNotification(observer, target, notification as CFString, refcon)
             // .notificationUnsupported is common for AXTitleChanged on apps
             // without a window — treat as soft-failure, silently no-op.
             guard err == .success || err == .notificationAlreadyRegistered else { return nil }
         }
-        notifCounts[notification] = currentCount + 1
+        notifCounts[key] = currentCount + 1
         let id = nextId
         nextId += 1
-        subs[id] = (notification, callback)
+        subs[id] = (target, notification, callback)
         return Token { [weak self] in
             guard let self = self, self.subs.removeValue(forKey: id) != nil else { return }
-            let n = (self.notifCounts[notification] ?? 0) - 1
+            let n = (self.notifCounts[key] ?? 0) - 1
             if n <= 0 {
-                AXObserverRemoveNotification(self.observer, self.appElement, notification as CFString)
-                self.notifCounts.removeValue(forKey: notification)
+                AXObserverRemoveNotification(self.observer, target, notification as CFString)
+                self.notifCounts.removeValue(forKey: key)
             } else {
-                self.notifCounts[notification] = n
+                self.notifCounts[key] = n
             }
         }
     }
@@ -470,8 +524,8 @@ final class AXAppObserver {
         // Remove notifications BEFORE dropping the runloop source so any
         // already-queued callbacks see a still-valid refcon. Then drop the
         // source so the AXObserver's last CF reference is safely retired.
-        for notif in notifCounts.keys {
-            AXObserverRemoveNotification(observer, appElement, notif as CFString)
+        for key in notifCounts.keys {
+            AXObserverRemoveNotification(observer, key.element, key.notif as CFString)
         }
         notifCounts.removeAll()
         CFRunLoopRemoveSource(

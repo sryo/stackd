@@ -252,12 +252,57 @@ final class StackHost {
         schemeHandler.unregister(stackId: baseId)
     }
 
+    /// Fan-out a "the list of all windows has changed" nudge to every
+    /// Bridge with the `windows` / `app` permission. Called by
+    /// AppDelegate's window-lifecycle handlers so the sd.windows.all
+    /// channel refreshes on every create / destroy / title-change instead
+    /// of waiting for a focus event. See `Bridge.windowsListPump`.
+    func pumpWindowsListForAllStacks() {
+        for bridge in bridges.values {
+            bridge.pumpWindowsList()
+        }
+    }
+
+    /// Pump now, then verify CGWindowList caught up with the lifecycle event
+    /// and re-pump when it does. CGWindowList lags AX by ~50–500ms, so the
+    /// immediate pump after a destroy can still contain the dead wid (and
+    /// after a create, lack the new one) — consumers diffing the snapshot
+    /// then never see the change, because the next push only comes on a
+    /// focus event. Bounded by the WindowsPumpRetry ladder; exhaustion logs
+    /// a WindowDebug breadcrumb instead of retrying forever.
+    func pumpWindowsListForAllStacks(until expectation: WindowsPumpRetry.Expectation) {
+        pumpWindowsListForAllStacks()
+        verifyPump(expectation: expectation, attempt: 0)
+    }
+
+    private func verifyPump(expectation: WindowsPumpRetry.Expectation, attempt: Int) {
+        guard let delay = WindowsPumpRetry.delay(attempt: attempt) else {
+            WindowDebug.log("pump-retry exhausted \(expectation)")
+            return
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+            guard let self = self else { return }
+            let ids = Set(Windows.all().compactMap { $0["id"] as? Int })
+            if WindowsPumpRetry.satisfied(ids: ids, expectation: expectation) {
+                WindowDebug.log("pump-retry satisfied \(expectation) attempt=\(attempt)")
+                self.pumpWindowsListForAllStacks()
+            } else {
+                self.verifyPump(expectation: expectation, attempt: attempt + 1)
+            }
+        }
+    }
+
     @discardableResult
     func bang(name: String, detail: [String: Any]) -> Int {
         var fired = 0
-        for bridge in bridges.values where bridge.handles(bang: name) {
+        var handlerIds: [String] = []
+        for (key, bridge) in bridges where bridge.handles(bang: name) {
             bridge.fireBang(name: name, detail: detail)
             fired += 1
+            if WindowDebug.enabled && name.hasPrefix("sd.window.") { handlerIds.append(key) }
+        }
+        if WindowDebug.enabled && name.hasPrefix("sd.window.") {
+            WindowDebug.log("bang \(name) → fanout: \(fired)/\(bridges.count) (handlers=\(handlerIds))")
         }
         return fired
     }
