@@ -24,6 +24,7 @@ final class StackWindow: NSPanel, WKNavigationDelegate {
     // so a brand new instance gets a fresh gate.
     private var gate = FirstPaintGate()
     private var revealFallbackTimer: Timer?
+    private var crashBackoff = CrashBackoff()
     /// Latched by webView(_:didFinish:). For invocable stacks, the page
     /// finishes loading BEFORE the first orderFront — so the gate's normal
     /// arm-then-wait-for-didFinish dance would stall on its 2s fallback
@@ -411,6 +412,27 @@ final class StackWindow: NSPanel, WKNavigationDelegate {
         return body["value"] as? Bool
     }
 
+    func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+        let name = webView.url?.host ?? "?"
+        switch crashBackoff.crashed(now: Date().timeIntervalSinceReferenceDate) {
+        case .reload(let delay):
+            FileHandle.standardError.write(Data(
+                "stackd: stack '\(name)' web content process crashed — reloading in \(delay)s\n".utf8))
+            if delay == 0 {
+                webView.reload()
+            } else {
+                DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak webView] in
+                    webView?.reload()
+                }
+            }
+        case .giveUp:
+            // Crash loop — stop feeding it. The panel stays revealed (blank),
+            // which is debuggable; an invisible auto-reload cycle is not.
+            FileHandle.standardError.write(Data(
+                "stackd: stack '\(name)' web content process crash loop — giving up after \(CrashBackoff.delays.count) reloads\n".utf8))
+        }
+    }
+
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         FileHandle.standardError.write(Data("stackd: webview did-finish \(webView.url?.absoluteString ?? "?")\n".utf8))
         webView.evaluateJavaScript("window.dispatchEvent(new Event('stackd:load'))", completionHandler: nil)
@@ -508,5 +530,40 @@ struct FirstPaintGate {
         guard state == .idle, !overridden else { return false }
         state = .revealed
         return true
+    }
+}
+
+// MARK: - CrashBackoff
+
+/// Pure decision logic for `webViewWebContentProcessDidTerminate` recovery.
+/// Extracted from StackWindow (FirstPaintGate pattern) so the ladder can be
+/// unit-tested without crashing a real WKWebView. Consecutive crashes walk
+/// an escalating reload-delay ladder; a webview that stays up for
+/// `stableInterval` earns a reset; a crash loop that exhausts the ladder is
+/// abandoned (a revealed-but-blank panel is debuggable, an endless invisible
+/// reload cycle is not).
+struct CrashBackoff {
+    enum Decision: Equatable {
+        case reload(afterSeconds: TimeInterval)
+        case giveUp
+    }
+
+    static let delays: [TimeInterval] = [0, 2, 5, 15, 30]
+    static let stableInterval: TimeInterval = 60
+
+    private var consecutiveCrashes = 0
+    private var lastCrashAt: TimeInterval?
+
+    /// `now` is an injectable clock (seconds on any fixed reference) so the
+    /// ladder is testable without real waits.
+    mutating func crashed(now: TimeInterval) -> Decision {
+        if let last = lastCrashAt, now - last >= Self.stableInterval {
+            consecutiveCrashes = 0
+        }
+        lastCrashAt = now
+        guard consecutiveCrashes < Self.delays.count else { return .giveUp }
+        let delay = Self.delays[consecutiveCrashes]
+        consecutiveCrashes += 1
+        return .reload(afterSeconds: delay)
     }
 }

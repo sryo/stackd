@@ -66,6 +66,7 @@ registerMenubarChangedTests()
 registerComputeDeltaTests()
 registerChannelsRegistryTests()
 registerWindowsLifecycleObserverTests()
+registerCrashBackoffTests()
 registerPermissionsRegistryTests()
 // Optional CLI filters: --filter <regex> (include) and --exclude <regex>.
 // Used by CI to split the suite into "pure" (no macOS permission prompts) and

@@ -91,6 +91,7 @@ TEST_SOURCES=(
   Tests/ComputeDeltaTests.swift
   Tests/ChannelsRegistryTests.swift
   Tests/WindowsLifecycleObserverTests.swift
+  Tests/CrashBackoffTests.swift
   Tests/PermissionsRegistryTests.swift
   Tests/main.swift
 )
