@@ -325,16 +325,21 @@ record "S4 resize pairwise" "$S4_STATUS" "$S4_DETAIL"
 
 S5_STATUS="PASS"
 pgrep -xq Calculator || CALC_LAUNCHED=1
-open -a Calculator
-sleep 1
 # Owner names are localized (e.g. "Calculadora" on es-ES, baseline run
 # 2026-06-09), so don't match the name: Calculator's window is whatever
 # eligible window is frontmost right after activation, as long as it
-# isn't one of ours.
-CALC_FRONT=$(oracle frontmost "$(excl_json)")
-CALC_ID="${CALC_FRONT%% *}"
-[[ "$CALC_ID" =~ ^[0-9]+$ ]] || CALC_ID=""
-case " ${WIN_IDS[*]:-} " in *" $CALC_ID "*) CALC_ID="" ;; esac
+# isn't one of ours. `open -a` doesn't reliably steal focus on first try
+# (TextEdit re-asserts after its window churn) — retry with re-activation.
+CALC_ID=""
+for _i in 1 2 3 4 5; do
+  open -a Calculator
+  sleep 0.5
+  CALC_FRONT=$(oracle frontmost "$(excl_json)")
+  CALC_ID="${CALC_FRONT%% *}"
+  [[ "$CALC_ID" =~ ^[0-9]+$ ]] || CALC_ID=""
+  case " ${WIN_IDS[*]:-} " in *" $CALC_ID "*) CALC_ID="" ;; esac
+  [ -n "$CALC_ID" ] && break
+done
 S5_PARTS=()
 for tid in ${WIN_IDS[@]+"${WIN_IDS[@]}"}; do
   focus_te "$tid"

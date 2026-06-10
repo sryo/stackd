@@ -36,7 +36,10 @@ const DENY_OWNERS = {
   'stackd': 1, 'Dock': 1, 'Window Server': 1, 'WindowManager': 1,
   'Control Center': 1, 'Notification Center': 1, 'Spotlight': 1,
   'SystemUIServer': 1, 'TextInputMenuAgent': 1, 'CursorUIViewService': 1,
-  'Screenshot': 1, 'osascript': 1, 'loginwindow': 1
+  'Screenshot': 1, 'osascript': 1, 'loginwindow': 1,
+  // TCC permission dialog — repositions itself after any tiler placement,
+  // so it can never satisfy partition/overlap invariants.
+  'universalAccessAuthWarn': 1
 };
 
 const COLLAPSED_MAX_H = 14; // windowscape cfg.collapsedWindowHeight (12) + slack
@@ -117,20 +120,24 @@ function cmdFrontmost(params) {
   return 'NONE';
 }
 
-function overlapArea(a, b) {
+function overlapRect(a, b) {
   const ix = Math.min(a.x + a.w, b.x + b.w) - Math.max(a.x, b.x);
   const iy = Math.min(a.y + a.h, b.y + b.h) - Math.max(a.y, b.y);
-  return (ix <= 0 || iy <= 0) ? 0 : ix * iy;
+  return { w: Math.max(0, ix), h: Math.max(0, iy) };
 }
 
-// I1: pairwise intersection area <= 25 px^2 (1-2px rounding allowance).
+// I1: no real stacking. A seam overlap (thin strip along a shared edge)
+// is tolerated up to 8px: apps that snap their size (Terminal rounds to
+// character cells) can overhang a neighbor by a few px and the tiler
+// rightly leaves that alone. Only an intersection that is "thick" in BOTH
+// dimensions counts as windows stacked on each other.
 function cmdCheckI1(params) {
   const wins = eligibleWindows(params);
   for (let i = 0; i < wins.length; i++) {
     for (let j = i + 1; j < wins.length; j++) {
-      const a = overlapArea(wins[i], wins[j]);
-      if (a > 25) {
-        return `FAIL overlap ${wins[i].id}(${wins[i].app}) x ${wins[j].id}(${wins[j].app}) area=${Math.round(a)}px2`;
+      const o = overlapRect(wins[i], wins[j]);
+      if (Math.min(o.w, o.h) > 8) {
+        return `FAIL overlap ${wins[i].id}(${wins[i].app}) x ${wins[j].id}(${wins[j].app}) ${Math.round(o.w)}x${Math.round(o.h)}px`;
       }
     }
   }
