@@ -8,7 +8,7 @@ A 30-line pointer for any agent landing in this repo. The authority is [CLAUDE.m
 - Daemon ownership: rebuild, launch, kill, reload — you own it. Use `/stackd-rebuild-restart` (or `scripts/daemonctl.sh`) instead of ad-hoc `pkill stackd`.
 
 ## The four locked rules (see CLAUDE.md → Architecture)
-1. **Hammerspoon is the baseline** — match `hs.<x>`'s shape unless there's a thesis reason to diverge.
+1. **Hammerspoon is the inspiration — and the project stackd aims to replace.** `hs.<x>` names/coverage are the bar (parity or better, never worse); call semantics go web-native where the async bridge demands (Promises, batch-first). HS is a reference to consult, never a runtime dependency.
 2. **WebKit is the only rendering surface** — click-through `NSPanel` + `WKWebView`; no `CGContext` DSLs, no SVG path strings, no native canvas.
 3. **Primaries in respective sources** — window things in `Windows.swift`, AX walks for window properties in `Windows.swift`, not in callers.
 4. **Observe and set, nothing else** — daemon doesn't render, decide, diff, latch, or curate. Stacks do.

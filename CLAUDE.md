@@ -5,7 +5,7 @@ Rebuild, launch, kill, reload — all yours. `./build.sh` compiles; `.build/stac
 
 ## Architecture (locked rules)
 Four interlocking rules — apply them together; any one alone misses the joint:
-1. **Hammerspoon is the baseline.** Match `hs.<x>`'s shape unless there's a thesis reason to diverge.
+1. **Hammerspoon is the inspiration — and the project stackd aims to replace.** `hs.<x>` is the map of which primitives to ship and what to call them; feature parity with HS is the bar. Match names and coverage, not call semantics: the bridge is async message-passing into a web page, so where HS's synchronous Lua shapes don't survive it (read-modify-write loops, sync return values), web-native shapes win — Promises, batch-first actions, push channels. `sd.windows.batch` exists for exactly this reason. HS is a reference to consult — its source/docs/behavior define "correct" — but never a runtime dependency: don't build stackd tooling (QA harnesses, oracles, scripts) that requires a live HS instance. (Refined from "Hammerspoon is the baseline" on 2026-06-09.)
 2. **WebKit is the only rendering surface.** No CGContext DSLs, no SVG path strings, no native canvas. The overlay primitive is a click-through NSPanel + WKWebView.
 3. **Primaries in respective sources.** Window things in `Windows.swift` even when consumed by `Overlay.swift`. AX walks for window properties land in `Windows.swift`, not the caller.
 4. **Observe and set, nothing else.** Rendering, decisions, diffing, latching, curated payloads belong in stacks UNLESS rule 1 says HS does it daemon-side.
@@ -18,6 +18,7 @@ Also load-bearing:
 - **Daemon owns chrome.** Material/blur via manifest `material:` (`glass` / `vibrancy.<name>` / `glass.tinted(#RRGGBB)`); stack HTML must NOT use CSS `backdrop-filter` or `-webkit-backdrop-filter`. `NSWindow.hasShadow = false` on glass is intentional — the user finds the shadow ugly.
 - **Auto-padding contract.** Glass stacks with `cornerRadius > 0` and no explicit `padding:` get `body { padding: cornerRadius/2 }` injected last-cascade-wins. Full-bleed content (SVG, canvas) needs `"padding": 0` in the manifest — not in CSS, which loses the cascade.
 - **HS is the oracle for window/AX bugs.** Diverge from HS → stackd regression. `hs -c "..."` first; name BOTH the HS path AND the stackd path when claiming parity.
+- **JS namespaces are lowercase-smashed.** Multiword namespaces concatenate without camelCase: `httpserver`, `urlhandler`, `touchdevice` (`displayLink` is the lone grandfathered exception). Frozen — renaming is a stack-breaking change; new namespaces follow the lowercase convention.
 
 ## Test every new daemon-side behavior
 Every new sd.* primitive, template-engine feature, parser/frontmatter change, manifest field, channel inference rule, or any other daemon-side behavior MUST ship with at least one test in the SAME commit. No "I'll add tests later" deferrals.
