@@ -41,8 +41,11 @@ import CoreGraphics
 //     window of whatever app is up while the test suite runs.
 //   - `WindowsByID.setFrame` / `minimize` / `fullscreen` / `raise` / `focus`
 //     / `close` / `focusTab` — same reason: live AX mutations.
-//   - `WindowsByID.beginBatch` / `commitBatch` — would open an SLSTransaction
-//     and (if any setFrame fired) mutate user windows on commit.
+//   - `WindowsByID.setFrame` routed through a live batch — needs a real
+//     window to observe convergence; covered by the batch lifecycle tests
+//     below only up to the sink/ledger/commit contract (bogus CGWindowIDs,
+//     injected position applier — no user window is mutated; an SLS move on
+//     an id WindowServer doesn't know is a per-op error the tx ignores).
 //   - `WindowsByID.snapshot` — exercises the SkyLight HW-capture SPI; safe
 //     to read but environment-dependent (depends on which windows exist).
 //   - The CGS event callback (`windowEventsCallback`) and the
@@ -418,4 +421,75 @@ func registerWindowsTests() {
     //  WindowsAXObserver now registers kAXWindowMiniaturizedNotification per
     //  window, which only fires on real Cmd+M — no tab-switch ambiguity to
     //  gate against. AX is the right primitive for this.)
+
+    // MARK: - Batch transaction — AX position re-assert at commit (regression)
+    //
+    // Root cause being pinned (2026-06-10): the batch path used to send size
+    // via AX immediately and position ONLY via the SLSTransaction. AX writes
+    // propagate asynchronously to the target app, and an app processing a
+    // size set performs a full -[NSWindow setFrame:] — origin + size — with
+    // the origin read from its own (stale) frame cache. Commit fires ~1-2ms
+    // after the closure, so the SLS move landed first and each app's late
+    // resize re-asserted the OLD origin, clobbering the committed position
+    // (windowscape PASS-1: windows stacked at old origins / offscreen).
+    // The fix re-asserts kAXPositionAttribute per queued window after
+    // SLSTransactionCommit; these tests lock that contract.
+
+    test("BatchMoveLedger records last-write-wins per window id in first-seen order") {
+        var ledger = WindowsByID.BatchMoveLedger()
+        ledger.record(id: 101, point: CGPoint(x: 10, y: 20))
+        ledger.record(id: 202, point: CGPoint(x: 30, y: 40))
+        ledger.record(id: 101, point: CGPoint(x: 50, y: 60))
+        let drained = ledger.drain()
+        try expectEqual(drained.count, 2)
+        try expectEqual(drained[0].id, 101)
+        try expectEqual(drained[0].point, CGPoint(x: 50, y: 60),
+                        "second record for id 101 must overwrite the first")
+        try expectEqual(drained[1].id, 202)
+        try expectEqual(drained[1].point, CGPoint(x: 30, y: 40))
+    }
+
+    test("BatchMoveLedger.drain empties the ledger (no double re-assert across batches)") {
+        var ledger = WindowsByID.BatchMoveLedger()
+        ledger.record(id: 7, point: .zero)
+        _ = ledger.drain()
+        try expectEqual(ledger.drain().count, 0,
+                        "a drained ledger must not replay stale moves into the next batch")
+    }
+
+    test("commitBatch re-asserts every queued move through the position applier, then closes") {
+        // beginBatch returns false when the SkyLight tx symbols are
+        // unavailable (headless CI) — skip the body there, the ledger tests
+        // above still cover the bookkeeping.
+        guard WindowsByID.beginBatch() else { return }
+        // Bogus ids: WindowServer rejects the SLS move per-op (harmless) and
+        // the injected applier means no AX write ever fires.
+        WindowsByID.batchSink?(.moveWithGroup(id: 4_294_000_001, point: CGPoint(x: 100, y: 200)))
+        WindowsByID.batchSink?(.moveWithGroup(id: 4_294_000_002, point: CGPoint(x: 300, y: 400)))
+        var captured: [(id: CGWindowID, point: CGPoint)] = []
+        let ok = WindowsByID.commitBatch { id, point in captured.append((id: id, point: point)) }
+        try expectEqual(ok, true)
+        try expectEqual(captured.count, 2,
+                        "every queued move must be re-asserted through AX at commit")
+        try expectEqual(captured[0].id, 4_294_000_001)
+        try expectEqual(captured[0].point, CGPoint(x: 100, y: 200))
+        try expectEqual(captured[1].id, 4_294_000_002)
+        try expectEqual(captured[1].point, CGPoint(x: 300, y: 400))
+        // Commit must have closed the batch: no sink, second commit refuses.
+        try expect(WindowsByID.batchSink == nil, "commit must clear the sink")
+        try expectEqual(WindowsByID.commitBatch { _, _ in }, false)
+    }
+
+    test("commitBatch with no queued moves applies nothing; next batch starts clean") {
+        guard WindowsByID.beginBatch() else { return }
+        var applied = 0
+        try expectEqual(WindowsByID.commitBatch { _, _ in applied += 1 }, true)
+        try expectEqual(applied, 0)
+        // A fresh batch must not inherit moves from a previous one.
+        guard WindowsByID.beginBatch() else { return }
+        WindowsByID.batchSink?(.moveWithGroup(id: 4_294_000_003, point: CGPoint(x: 1, y: 2)))
+        var captured: [CGWindowID] = []
+        _ = WindowsByID.commitBatch { id, _ in captured.append(id) }
+        try expectEqual(captured, [4_294_000_003])
+    }
 }

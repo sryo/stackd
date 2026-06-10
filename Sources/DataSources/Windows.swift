@@ -14,9 +14,16 @@ import Foundation
 // Hammerspoon's per-extension SPI ownership.
 //
 // Signatures verified against yabai/src/misc/extern.h and JankyBorders/
-// src/misc/extern.h. Position moves go through SLSTransactionMoveWindowWithGroup
-// (CGPoint); size has to stay on AX (no SLSTransactionSetWindowSize exists)
-// which is what actually constrains the window's frame anyway.
+// src/misc/extern.h (SLSTransactionMoveWindowWithGroup: (CFTypeRef, uint32_t,
+// CGPoint), point = absolute CGS top-left global origin — same space as
+// AX/CG, no flip). Position moves go through SLSTransactionMoveWindowWithGroup;
+// size has to stay on AX (no SLSTransactionSetWindowSize exists) which is
+// what actually constrains the window's frame anyway. The SLS move is a
+// visual pre-snap only: the owning app's NSWindow frame cache never learns
+// about server-side moves, so commitBatch re-asserts the position via AX —
+// both reference users of this SPI only ever move windows their OWN process
+// owns, and yabai likewise applies the real frame via AX after SLS proxy
+// animations.
 // Permanent diagnostic switch for window lifecycle plumbing.
 // STACKD_WIN_DEBUG=1 turns on stderr logs at every gate in the
 // source → bang → JS fan-out chain so a "events never arrived" symptom
@@ -491,6 +498,27 @@ enum WindowsByID {
     static var batchSink: ((WindowMutation) -> Void)?
     private static var activeTransaction: CFTypeRef?
 
+    // Pending AX position re-asserts for the open batch. Last-write-wins per
+    // window id (matches the SLS transaction's own semantics), first-seen
+    // order preserved. Extracted as a pure struct so the bookkeeping is
+    // testable without opening a live SLSTransaction.
+    struct BatchMoveLedger {
+        private var entries: [(id: CGWindowID, point: CGPoint)] = []
+        mutating func record(id: CGWindowID, point: CGPoint) {
+            if let i = entries.firstIndex(where: { $0.id == id }) {
+                entries[i].point = point
+            } else {
+                entries.append((id: id, point: point))
+            }
+        }
+        mutating func drain() -> [(id: CGWindowID, point: CGPoint)] {
+            let out = entries
+            entries = []
+            return out
+        }
+    }
+    private static var pendingMoves = BatchMoveLedger()
+
     // Opens a fresh SLSTransaction and installs a sink that funnels mutations
     // into it. Process-global — returns false if a batch is already open. Must
     // run on the WindowServer/main thread (same as AX). Pairs with commitBatch.
@@ -503,10 +531,12 @@ enum WindowsByID {
             return false
         }
         activeTransaction = txRef
+        pendingMoves = BatchMoveLedger()
         batchSink = { mutation in
             switch mutation {
             case .moveWithGroup(let id, let point):
                 _ = move(txRef, UInt32(id), point)
+                pendingMoves.record(id: id, point: point)
             case .orderAbove(let id, let rel):
                 _ = WindowTransaction.orderWindow?(txRef, UInt32(id), 1, UInt32(rel))
             }
@@ -514,13 +544,53 @@ enum WindowsByID {
         return true
     }
 
+    // Commits the open transaction, then re-asserts every queued position
+    // through AX (kAXPositionAttribute).
+    //
+    // The AX re-assert is load-bearing, not belt-and-suspenders. Root cause
+    // of the 2026-06-10 "batch puts windows at wrong positions" bug: the
+    // batch path splits one window's geometry across two unsynchronized
+    // channels — size via AX at setFrame time, position via SLS at commit.
+    // AX writes propagate asynchronously to the target app, and an app
+    // processing a size set performs a full -[NSWindow setFrame:] (origin +
+    // size) with the origin read from its own frame cache — which a
+    // server-side SLS move does NOT update. Commit fires ~1-2ms after the
+    // batch closure, so the order was: SLS moves every window to its target,
+    // then each app's late resize re-asserts its STALE origin and clobbers
+    // the committed position (windows stacked at old origins / offscreen).
+    // The non-batch path never hits this because size and position ride the
+    // same AX channel and serialize in the app's event queue.
+    //
+    // Re-asserting the position via AX after SLSTransactionCommit makes both
+    // channels carry the same destination: AX messages to one app are
+    // delivered in send order, so the position (sent after the size) is the
+    // app's final word and converges on the target no matter how the app's
+    // processing interleaves with the commit. It also syncs the app's frame
+    // cache, which the SLS-only move left permanently stale (same reason
+    // yabai applies the real frame via AX after its SLS proxy animations).
+    // The SLS commit is kept for the feature it provides: all positions
+    // still flip on a single compositor transaction at commit.
+    //
+    // `applyPosition` is injectable for tests (default: real AX write).
     @discardableResult
-    static func commitBatch() -> Bool {
+    static func commitBatch(
+        applyPosition: (CGWindowID, CGPoint) -> Void = applyAXPosition
+    ) -> Bool {
         guard let tx = activeTransaction else { return false }
         _ = WindowTransaction.commit?(tx, 0)
         batchSink = nil
         activeTransaction = nil
+        for m in pendingMoves.drain() { applyPosition(m.id, m.point) }
         return true
+    }
+
+    // Default position applier for commitBatch. Same write the non-batch
+    // setFrame path issues; no-ops when the window vanished mid-batch.
+    static func applyAXPosition(_ windowID: CGWindowID, _ point: CGPoint) {
+        guard let el = elementFor(windowID: windowID) else { return }
+        var p = point
+        guard let posVal = AXValueCreate(.cgPoint, &p) else { return }
+        _ = AXUIElementSetAttributeValue(el, kAXPositionAttribute as CFString, posVal)
     }
 
     // pid → (CGWindowID → AXUIElement). Repopulated lazily on lookup miss.
@@ -620,6 +690,9 @@ enum WindowsByID {
         // window queued in this batch snaps to its new origin on a single
         // compositor flip. Size changes still cascade per-app (apps repaint at
         // their own pace) — that's the v1 tradeoff documented in the plan.
+        // The queued position is ALSO re-asserted via AX at commit — see the
+        // commitBatch doc comment for the stale-origin clobber race that
+        // makes the SLS move alone land windows at wrong positions.
         if let sink = batchSink {
             guard let el = elementFor(windowID: windowID) else { return false }
             var sz = CGSize(width: w, height: h)
@@ -1075,6 +1148,17 @@ final class WindowsLifecycleObserver {
     func install() {
         guard timer == nil else { return }
         snapshot = current()        // seed without firing on first tick
+        // Cold-start convergence: the seed (and every stack's boot replay
+        // of sd.windows.all) is taken while AX probes are still timing out
+        // en masse, so it under-counts the real window list. Two early
+        // ticks close that gap in ~1-3s — without them the first repeating
+        // tick at +10s fires the catch-up "created" storm after a 10s
+        // window in which freshly-booted stacks are blind to most windows.
+        for delay in [1.0, 3.0] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                self?.tick()
+            }
+        }
         let t = Timer.scheduledTimer(withTimeInterval: 10.0, repeats: true) { [weak self] _ in
             self?.tick()
         }
@@ -2048,10 +2132,14 @@ final class WindowsAXObserver {
     func install() {
         guard appObservers.isEmpty else { return }
 
-        // AX trust must be granted for AXObserverCreate to succeed. With
-        // `kAXTrustedCheckOptionPrompt: false` we don't trigger the system
-        // prompt — that's the user's choice via System Settings.
-        let opts: [String: Any] = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: false]
+        // AX trust must be granted for AXObserverCreate to succeed.
+        // Prompt: true — every rebuild changes the ad-hoc cdhash and TCC
+        // silently invalidates the previous grant, leaving a stale row in
+        // System Settings that toggling does NOT re-associate with the new
+        // binary. The system prompt is the one flow that binds the grant
+        // to the binary actually running; it appears only when trust is
+        // missing, so granted sessions never see it.
+        let opts: [String: Any] = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true]
         let trusted = AXIsProcessTrustedWithOptions(opts as CFDictionary)
         if !trusted {
             log("ax: process not trusted for Accessibility — sd.window.* events will not fire (grant in System Settings → Privacy & Security → Accessibility)")

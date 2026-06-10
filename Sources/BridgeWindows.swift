@@ -29,7 +29,10 @@ import Foundation
 ///
 ///   - `windows.batch.{begin, commit}` — atomic multi-window
 ///     transaction. `begin` opens a fresh SLSTransaction and installs
-///     `WindowsByID.batchSink`; `commit` calls `SLSTransactionCommit`
+///     `WindowsByID.batchSink`; `commit` calls `SLSTransactionCommit`,
+///     re-asserts every queued position via AX (the SLS move alone
+///     gets clobbered by each app's in-flight resize re-asserting its
+///     stale origin — see `WindowsByID.commitBatch` for the full race),
 ///     and clears the sink. Process-global — if a batch is already
 ///     open, begin refuses rather than nest, matching the JS-side
 ///     single-await model. Both hop to main because AX + the SkyLight
