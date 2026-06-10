@@ -10,6 +10,13 @@
 #   scripts/daemonctl.sh start    [extra args forwarded to .build/stackd]
 #   scripts/daemonctl.sh restart  [extra args]
 #   scripts/daemonctl.sh rebuild  [extra args]   # ./build.sh && restart
+#   scripts/daemonctl.sh install      # launchd LaunchAgent with KeepAlive
+#   scripts/daemonctl.sh uninstall    # bootout + remove the plist
+#   scripts/daemonctl.sh print-plist  # emit the plist to stdout (lintable)
+#
+# install is opt-in: the nohup dev workflow above keeps working untouched.
+# Once installed, stop/start/restart route through launchctl so KeepAlive
+# doesn't resurrect the daemon mid-rebuild.
 
 set -euo pipefail
 
@@ -20,9 +27,15 @@ STATE_DIR="$HOME/Library/Application Support/stackd"
 PID_FILE="$STATE_DIR/daemon.pid"
 SOCK_FILE="$STATE_DIR/daemon.sock"
 STOP_TIMEOUT_SECS="${STACKD_STOP_TIMEOUT:-5}"
+LAUNCHD_LABEL="com.stackd.daemon"
+PLIST_PATH="$HOME/Library/LaunchAgents/$LAUNCHD_LABEL.plist"
 
 log()  { printf '[daemonctl] %s\n' "$*" >&2; }
 fail() { log "$*"; exit 1; }
+
+launchd_managed() {
+  launchctl print "gui/$(id -u)/$LAUNCHD_LABEL" >/dev/null 2>&1
+}
 
 current_pid() {
   # Prefer pid file; fall back to pgrep against the literal binary path.
@@ -49,7 +62,60 @@ cmd_status() {
   return 1
 }
 
+# KeepAlive {SuccessfulExit: false} restarts the daemon on crashes and
+# signal deaths but NOT on a clean exit(0). ThrottleInterval 5 keeps a
+# crash-on-launch binary from hot-looping. gui/$UID domain gives the Aqua
+# session AppKit needs.
+print_plist() {
+  cat <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>$LAUNCHD_LABEL</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>$BIN</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key><false/>
+  </dict>
+  <key>ThrottleInterval</key><integer>5</integer>
+  <key>StandardOutPath</key><string>$LOG</string>
+  <key>StandardErrorPath</key><string>$LOG</string>
+</dict>
+</plist>
+EOF
+}
+
+cmd_install() {
+  [[ -x "$BIN" ]] || fail "binary not found: $BIN — run ./build.sh first"
+  if launchd_managed; then
+    log "already installed — reinstalling"
+    launchctl bootout "gui/$(id -u)/$LAUNCHD_LABEL" 2>/dev/null || true
+  elif [[ -n "$(current_pid)" ]]; then
+    fail "a manually-launched instance is running — 'daemonctl.sh stop' first"
+  fi
+  mkdir -p "$(dirname "$PLIST_PATH")"
+  print_plist > "$PLIST_PATH"
+  launchctl bootstrap "gui/$(id -u)" "$PLIST_PATH"
+  log "installed $PLIST_PATH (KeepAlive on — crashes self-restart)"
+}
+
+cmd_uninstall() {
+  launchctl bootout "gui/$(id -u)/$LAUNCHD_LABEL" 2>/dev/null || true
+  rm -f "$PLIST_PATH"
+  log "uninstalled (plist removed; daemon stopped if it was running)"
+}
+
 cmd_stop() {
+  if launchd_managed; then
+    log "launchd-managed — bootout (plist kept; 'start' re-bootstraps)"
+    launchctl bootout "gui/$(id -u)/$LAUNCHD_LABEL"
+    return 0
+  fi
   local pid; pid="$(current_pid)"
   if [[ -z "$pid" ]]; then
     log "not running"
@@ -77,6 +143,14 @@ cmd_stop() {
 
 cmd_start() {
   [[ -x "$BIN" ]] || fail "binary not found: $BIN — run ./build.sh first"
+  if launchd_managed; then
+    fail "already running under launchd — use restart"
+  fi
+  if [[ -f "$PLIST_PATH" ]]; then
+    log "installed plist found — bootstrapping via launchd"
+    launchctl bootstrap "gui/$(id -u)" "$PLIST_PATH"
+    return 0
+  fi
   local existing; existing="$(current_pid)"
   if [[ -n "$existing" ]]; then
     fail "already running pid=$existing — use restart, not start"
@@ -93,6 +167,11 @@ cmd_start() {
 }
 
 cmd_restart() {
+  if launchd_managed; then
+    log "launchd-managed — kickstart -k"
+    launchctl kickstart -k "gui/$(id -u)/$LAUNCHD_LABEL"
+    return 0
+  fi
   cmd_stop
   cmd_start "$@"
 }
@@ -107,12 +186,15 @@ main() {
   local sub="${1:-status}"
   shift || true
   case "$sub" in
-    status)  cmd_status ;;
-    stop)    cmd_stop ;;
-    start)   cmd_start "$@" ;;
-    restart) cmd_restart "$@" ;;
-    rebuild) cmd_rebuild "$@" ;;
-    *) fail "unknown subcommand: $sub (status|stop|start|restart|rebuild)" ;;
+    status)      cmd_status ;;
+    stop)        cmd_stop ;;
+    start)       cmd_start "$@" ;;
+    restart)     cmd_restart "$@" ;;
+    rebuild)     cmd_rebuild "$@" ;;
+    install)     cmd_install ;;
+    uninstall)   cmd_uninstall ;;
+    print-plist) print_plist ;;
+    *) fail "unknown subcommand: $sub (status|stop|start|restart|rebuild|install|uninstall|print-plist)" ;;
   esac
 }
 

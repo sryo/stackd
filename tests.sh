@@ -8,6 +8,9 @@ mkdir -p .build
 # README/BELIEFS/CLAUDE has drifted from its source file.
 python3 docs/sync.py --check
 
+# The LaunchAgent template daemonctl.sh install writes must stay valid XML.
+scripts/daemonctl.sh print-plist | plutil -lint -
+
 # Derive the production source list from build.sh so we don't have to keep
 # two lists in sync. Drop Sources/main.swift — Tests/main.swift replaces it
 # as the entry point.
