@@ -410,6 +410,38 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         return p
     }
 
+    /// Permission → channel-starter table walked by `start(manifest:)`.
+    /// One row per channel-vending permission ("app"/"windows" share
+    /// `startWorkspace` and are handled separately). The same-commit guard
+    /// is ChannelStartersTests: every replayable channel in `Channels.all`
+    /// must have its permission here (or be workspace-served) — a new
+    /// `Channel(...)` without a starter used to compile fine and silently
+    /// never replay.
+    static let channelStarters: [(permission: String, start: (Bridge) -> Void)] = [
+        ("battery",     { $0.startBattery() }),
+        ("mouse",       { $0.startMouse() }),
+        ("appearance",  { $0.startAppearance() }),
+        ("input",       { $0.startInput() }),
+        ("net",         { $0.startNetwork(); $0.startNetworkThroughput() }),
+        ("audio",       { $0.startAudio() }),
+        ("display",     { $0.startDisplay() }),
+        ("media",       { $0.startMedia() }),
+        ("calendar",    { $0.startCalendar() }),
+        ("privacy",     { $0.startPrivacy() }),
+        ("pasteboard",  { $0.startPasteboard() }),
+        ("apps",        { $0.startApps() }),
+        ("spaces",      { $0.startSpaces() }),
+        ("caffeinate",  { $0.startCaffeinate() }),
+        ("sensors",     { $0.startSensors() }),
+        ("location",    { $0.startLocation() }),
+        ("usb",         { $0.startUSB() }),
+        ("camera",      { $0.startCamera() }),
+        ("host",        { $0.startHost() }),
+        ("touchdevice", { $0.startTouchDevice() }),
+        ("displayLink", { $0.startDisplayLink() }),
+        ("menubar",     { $0.startMenubarItems() }),
+    ]
+
     func start(manifest: StackManifest) {
         self.stackId = manifest.id
         self.permissions = manifest.permissions
@@ -425,32 +457,17 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         // — gating both the source and the fan-out on the same manifest
         // field was a single point of failure. AX is primary, the poll
         // is the drift sensor.)
-        if manifest.permissions.contains("battery")    { startBattery() }
-        if manifest.permissions.contains("mouse")      { startMouse() }
-        if manifest.permissions.contains("appearance") { startAppearance() }
-        if manifest.permissions.contains("input")      { startInput() }
-        if manifest.permissions.contains("net")        { startNetwork(); startNetworkThroughput() }
-        if manifest.permissions.contains("audio")      { startAudio() }
-        if manifest.permissions.contains("display")    { startDisplay() }
-        if manifest.permissions.contains("media")      { startMedia() }
-        if manifest.permissions.contains("calendar")   { startCalendar() }
-        if manifest.permissions.contains("privacy")    { startPrivacy() }
-        if manifest.permissions.contains("pasteboard") { startPasteboard() }
-        if manifest.permissions.contains("apps")       { startApps() }
-        if manifest.permissions.contains("spaces")     { startSpaces() }
-        if manifest.permissions.contains("caffeinate") { startCaffeinate() }
-        if manifest.permissions.contains("sensors")    { startSensors() }
-        if manifest.permissions.contains("location")   { startLocation() }
-        if manifest.permissions.contains("usb")        { startUSB() }
-        if manifest.permissions.contains("camera")     { startCamera() }
-        if manifest.permissions.contains("host")       { startHost() }
-        if manifest.permissions.contains("touchdevice") { startTouchDevice() }
-        if manifest.permissions.contains("displayLink") { startDisplayLink() }
+        for (permission, start) in Bridge.channelStarters
+        where manifest.permissions.contains(permission) {
+            start(self)
+        }
+        // Workspace is the one combined starter: "app" and "windows" share
+        // an observer with per-permission payload gating, so it can't be a
+        // single-permission table row.
         if manifest.permissions.contains("app") || manifest.permissions.contains("windows") {
             startWorkspace(includeApp: manifest.permissions.contains("app"),
                            includeWindows: manifest.permissions.contains("windows"))
         }
-        if manifest.permissions.contains("menubar") { startMenubarItems() }
         if let hks = manifest.hotkeys {
             for hk in hks {
                 let cb = hk.callback
