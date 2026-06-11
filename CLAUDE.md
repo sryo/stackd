@@ -58,6 +58,6 @@ The `{{ }}` / `sd-each` / `sd-if` template engine lives in `Runtime/api.js`, not
 **DOM-coupled paths NOT tested here**: `__sdProcessTextNode`, `__sdProcessAttribute`, `__sdProcessEachElement`, `__sdSetupIfElement`, `__sdCompileTemplates` all mutate real DOM nodes. Testing those needs a WKWebView harness (async, semaphore-bridged) — open work item.
 
 ## Lineage
-Kept here (gitignored) rather than in the public README. Useful when naming new primitives or matching existing patterns — knowing the heritage tells you the convention.
+Kept here rather than in the README (which carries the public-facing Foundations/Refusals version). Useful when naming new primitives or matching existing patterns — knowing the heritage tells you the convention.
 
 `hs.canvas` and `hs.drawing` from Hammerspoon. `--item` and `--message` from SketchyBar. `stacks` from HyperCard. `bangs` from LiteStep. `signals` from Solid/Preact. `defaults.json` from SketchyBar's `--default`. The private SPI vendoring pattern (DisplayServices, MediaRemote, SkyLight, MultitouchSupport) from every macOS power-user tool that ever wanted to do something Apple didn't bless.
