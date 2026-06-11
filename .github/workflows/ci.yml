@@ -14,14 +14,20 @@ concurrency:
 jobs:
   build-and-test:
     name: build + test (macOS)
-    runs-on: macos-latest
+    # macos-latest is macOS 15 / Xcode 16 — its SDK predates NSGlassEffectView
+    # (macOS 26), which the build references behind a runtime #available guard.
+    # Compilation still needs the symbol, so the image must carry the 26 SDK.
+    runs-on: macos-26
     timeout-minutes: 15
 
     steps:
       - uses: actions/checkout@v4
 
       - name: Select Xcode
+        # Pick the newest installed Xcode so the SDK can't trail the image.
         run: |
+          newest="$(ls -d /Applications/Xcode*.app | sort -V | tail -1)"
+          sudo xcode-select -s "$newest/Contents/Developer"
           xcode-select -p
           swift --version
 
