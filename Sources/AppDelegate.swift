@@ -19,16 +19,29 @@ func stackdRoot() -> String {
     return path
 }
 
+/// Candidate Runtime/ roots, in priority order, for a binary whose executable
+/// lives in `executableDir`. Dev build symlinks Runtime next to the binary
+/// (.build/Runtime); the packaged .app ships it at Contents/Resources/Runtime,
+/// i.e. ../Resources/Runtime from Contents/MacOS.
+func runtimeCandidates(executableDir: URL) -> [String] {
+    [
+        executableDir.appendingPathComponent("Runtime").path,
+        executableDir.deletingLastPathComponent()
+            .appendingPathComponent("Resources/Runtime").path,
+    ]
+}
+
 /// Stdlib location (api.js etc.) — ships with the daemon, NOT in the user folder.
-/// Looks for Runtime/ next to the binary (dev: symlinked by build.sh into .build/;
-/// prod: would live in Contents/Resources/ inside an .app). STACKD_RUNTIME overrides.
+/// STACKD_RUNTIME overrides; otherwise the first existing `runtimeCandidates`.
 func runtimePath() -> String {
     if let env = ProcessInfo.processInfo.environment["STACKD_RUNTIME"] {
         return (env as NSString).expandingTildeInPath
     }
     if let exe = Bundle.main.executableURL?.deletingLastPathComponent() {
-        let bundled = exe.appendingPathComponent("Runtime").path
-        if FileManager.default.fileExists(atPath: bundled) { return bundled }
+        for candidate in runtimeCandidates(executableDir: exe)
+        where FileManager.default.fileExists(atPath: candidate) {
+            return candidate
+        }
     }
     return "/tmp/stackd-runtime-missing"
 }

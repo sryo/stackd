@@ -21,8 +21,15 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-BIN="$REPO_ROOT/.build/stackd"
-LOG="$REPO_ROOT/.build/stackd.log"
+# STACKD_BIN repoints every command at an installed bundle
+# (e.g. /Applications/stackd.app/Contents/MacOS/stackd) instead of the dev
+# build, so `install` autostarts the packaged app rather than the repo binary.
+BIN="${STACKD_BIN:-$REPO_ROOT/.build/stackd}"
+# Log under ~/Library/Logs, NOT in-repo: the repo lives in ~/Documents, which
+# is TCC-protected. A fresh launchd agent has no Documents access, so launchd's
+# own attempt to open StandardOutPath there fails the spawn with EX_CONFIG (78)
+# before the daemon runs a single line. ~/Library/Logs is always writable.
+LOG="$HOME/Library/Logs/stackd.log"
 STATE_DIR="$HOME/Library/Application Support/stackd"
 PID_FILE="$STATE_DIR/daemon.pid"
 SOCK_FILE="$STATE_DIR/daemon.sock"
@@ -66,10 +73,16 @@ cmd_status() {
   return 1
 }
 
-# KeepAlive {SuccessfulExit: false} restarts the daemon on crashes and
-# signal deaths but NOT on a clean exit(0). ThrottleInterval 5 keeps a
-# crash-on-launch binary from hot-looping. gui/$UID domain gives the Aqua
-# session AppKit needs.
+# KeepAlive: true restarts the daemon after ANY exit — crash, signal death,
+# OR a clean exit(0). The clean-exit case is load-bearing: macOS terminates
+# accessory apps during long sleep in a way launchd records as exit code 0,
+# and a narrower {SuccessfulExit: false} policy left the daemon dead until the
+# next manual launch (symptom: "unlock after hours, stackd gone"). Nothing in
+# the daemon exits cleanly on purpose, so unconditional restart never masks an
+# intentional quit. ThrottleInterval 5 keeps a crash-on-launch binary from
+# hot-looping; daemonctl stop/restart use bootout/kickstart (not pkill), so
+# KeepAlive can't resurrect the daemon mid-rebuild. gui/$UID domain gives the
+# Aqua session AppKit needs.
 print_plist() {
   cat <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -81,13 +94,10 @@ print_plist() {
   <array>
     <string>$BIN</string>
   </array>
-  <key>WorkingDirectory</key><string>$REPO_ROOT</string>
+  <key>WorkingDirectory</key><string>$HOME</string>
   <key>ProcessType</key><string>Interactive</string>
   <key>RunAtLoad</key><true/>
-  <key>KeepAlive</key>
-  <dict>
-    <key>SuccessfulExit</key><false/>
-  </dict>
+  <key>KeepAlive</key><true/>
   <key>ThrottleInterval</key><integer>5</integer>
   <key>StandardOutPath</key><string>$LOG</string>
   <key>StandardErrorPath</key><string>$LOG</string>
@@ -113,7 +123,7 @@ cmd_install() {
   mkdir -p "$(dirname "$PLIST_PATH")"
   print_plist > "$PLIST_PATH"
   launchctl bootstrap "gui/$(id -u)" "$PLIST_PATH"
-  log "installed $PLIST_PATH (KeepAlive on — crashes self-restart)"
+  log "installed $PLIST_PATH (KeepAlive on — any exit self-restarts)"
 }
 
 cmd_uninstall() {
