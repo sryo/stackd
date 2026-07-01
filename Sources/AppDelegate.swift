@@ -199,6 +199,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // change, host.bang is a no-op when no stack handles the bang.
         DisplayHotplug.install()
 
+        // Hide click-through panels while the macOS screenshot UI is up so
+        // the Cmd-Shift-4/5 window picker can target the windows beneath.
+        // Event-driven (runningApplications KVO); see ScreenshotHider.swift.
+        ScreenshotHider.shared.install()
+
         // Mission Control state bangs (entered/exited + the three "show"
         // gestures). "Entered" is the CGS 1204 event already wired in
         // Spaces.swift; this installs the Dock AX observer that surfaces the

@@ -306,6 +306,17 @@ enum Overlay {
         }
     }
 
+    /// After a screenshot session ends, ScreenshotHider re-shows every
+    /// panel it hid — including overlay panels, whose direct
+    /// orderFrontRegardless bypasses the vsync tick's re-show branch (the
+    /// one that forceRepin()s). Fan the repin out explicitly so borders
+    /// re-assert z-order above their targets on the next tick. Region
+    /// overlays have no z-order tick; orderFront alone restores them.
+    static func repinAllAfterScreenshot() {
+        for handle in liveHandles.allObjects {
+            handle.forceRepin()
+        }
+    }
 
     /// Shared WKWebView recipe for overlay panels — attach() and region()
     /// build byte-identical webviews. Always drag-passthrough: every

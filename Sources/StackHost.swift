@@ -7,6 +7,12 @@ struct StackManifest: Decodable {
     let region: String?             // "menubar" — overrides anchor, spans screen width
     let size: Size?
     let clickThrough: Bool?
+    /// Whether ScreenshotHider may order this stack's panel out while the
+    /// macOS screenshot UI is up. nil/true → hide (the default for
+    /// click-through surfaces); false → stay visible, e.g. a menubar bar
+    /// the user wants IN their screenshots. Clickable panels are never
+    /// hidden regardless — see ScreenshotHidePolicy.
+    let hideDuringScreenshot: Bool?
     /// First-class background-only stack. When true, daemon defaults
     /// anchor / size / clickThrough so the panel sits invisible in the
     /// bottom-right corner. Manifest fields that would override those
@@ -361,7 +367,8 @@ final class StackHost {
             invocable: invocable,
             material: resolvedMaterial,
             cornerRadius: resolvedRadius,
-            shape: isHeadless ? StackShape.rect : StackShape.parse(manifest.shape)
+            shape: isHeadless ? StackShape.rect : StackShape.parse(manifest.shape),
+            hideDuringScreenshot: manifest.hideDuringScreenshot ?? true
         )
         let bridge = Bridge(webView: win.webView, screen: screen, screenIndex: screenIndex, padding: resolvedPadding, injectReset: manifest.reset ?? true)
         bridge.start(manifest: manifest)

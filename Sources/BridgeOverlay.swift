@@ -74,6 +74,12 @@ extension Bridge {
                     let token = DisplayLinkObserver.shared.subscribe { [weak bridge] in
                         guard let bridge = bridge,
                               let h = bridge.overlayHandles[id] else { return }
+                        // Screenshot session in progress: ScreenshotHider
+                        // ordered the panel out; the re-show branch below
+                        // would undo that one frame later. Stay dormant —
+                        // geometry resumes on session exit (the hider's
+                        // restore + repinAllAfterScreenshot handles z-order).
+                        if ScreenshotHider.shared.active { return }
                         // Target gone or hidden (user closed / minimized /
                         // cmd-H'd the underlying window mid-overlay): hide
                         // the panel and bail. Without this, the panel stayed

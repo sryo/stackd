@@ -23,6 +23,7 @@ Only **`id`** and **`name`** are required. Everything else is optional with the 
 | `size.h` | int | `1` | any | Height. For `region:"menubar"`: `0`/unset → match this display's menubar height; `>0` → `max(h, menubarHeight)`. |
 | `display` | string | `"primary"` | `"primary"`, `"all"`, `"<index>"` (e.g. `"1"`) | Which screen(s). `"all"` spawns one instance per display, keyed `<id>@<N>`. |
 | `clickThrough` | bool | `true` | `true`/`false` | `true` → mouse events pass through (`ignoresMouseEvents`). Forced `true` for headless, `false` for invocable. |
+| `hideDuringScreenshot` | bool | `true` | `true`/`false` | Whether the panel auto-hides while the macOS screenshot UI (Cmd-Shift-4/5) is active so the window picker can target windows beneath. Only click-through panels are ever hidden; set `false` to keep a stack visible in screenshots. |
 | `headless` | bool | `false` | `true`/`false` | Background-only stack: invisible 1×1, click-through; ignores anchor/size/material/cornerRadius/shape/padding. |
 | `invocable` | bool | `false` | `true`/`false` | Starts hidden, can take keyboard focus via `sd.window.invoke()` (`canBecomeKey=true`). |
 | `level` | string | `"overlay"` (`"bar"` if `region:"menubar"`) | `"bar"`(900), `"overlay"`(950), `"tooltip"`(1000), `"cursor"`(1050), `"high"`(999), or numeric string | Window stacking level. |

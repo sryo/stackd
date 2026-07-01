@@ -11,6 +11,10 @@ final class StackWindow: NSPanel, WKNavigationDelegate {
     /// clickable already receives clicks, so the daemon-side mouseMoved
     /// observer would be pure churn.
     let createdClickThrough: Bool
+    /// Manifest `hideDuringScreenshot` (default true). false opts this
+    /// panel out of ScreenshotHider's auto-hide while the macOS screenshot
+    /// UI is active.
+    let hideDuringScreenshot: Bool
 
     // didMove/didResize fire during live drags + on every setFrame re-entry;
     // dedupe against the prior frame so we only emit on real geometry changes.
@@ -54,10 +58,12 @@ final class StackWindow: NSPanel, WKNavigationDelegate {
         invocable: Bool = false,
         material: StackMaterial = .none,
         cornerRadius: Double? = nil,
-        shape: StackShape = .rect
+        shape: StackShape = .rect,
+        hideDuringScreenshot: Bool = true
     ) {
         self.invocable = invocable
         self.createdClickThrough = clickThrough
+        self.hideDuringScreenshot = hideDuringScreenshot
         let config = WKWebViewConfiguration()
         config.setURLSchemeHandler(schemeHandler, forURLScheme: "sd")
         let prefs = WKPreferences()
