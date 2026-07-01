@@ -79,12 +79,23 @@ if [[ Sources/C/SafePredicate.m -nt .build/test-obj/SafePredicate.o ]]; then
     -o .build/test-obj/SafePredicate.o Sources/C/SafePredicate.m
 fi
 
+# The -sectcreate __info_plist embed below exists because TCC SIGABRTs the
+# process (not a denial) when a privacy-gated API is reached without its
+# usage-description key — Bluetooth.paired() in DevicesTests killed the whole
+# suite this way. Tests/Info.plist, NOT Sources/Info.plist: the test binary is
+# ad-hoc signed, and claiming the daemon's bundle id from a different code
+# identity can flap the daemon's TCC grants (same failure mode as the
+# rebuild-kills-AX-trust issue).
 swiftc \
   -o .build/stackd-tests \
   "${SWIFT_SOURCES[@]}" "${TEST_SOURCES[@]}" \
   .build/test-obj/TouchEvents.o .build/test-obj/SafePredicate.o \
   -import-objc-header Sources/C/StackdBridge.h \
   -Xcc -Wno-zero-length-array \
+  -Xlinker -sectcreate \
+  -Xlinker __TEXT \
+  -Xlinker __info_plist \
+  -Xlinker Tests/Info.plist \
   -framework AppKit \
   -framework AVFoundation \
   -framework Carbon \
@@ -107,4 +118,4 @@ swiftc \
 
 echo "Built .build/stackd-tests"
 echo
-exec .build/stackd-tests
+exec .build/stackd-tests "$@"

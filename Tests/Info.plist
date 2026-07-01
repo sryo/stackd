@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleIdentifier</key>
+	<string>com.stackd.tests</string>
+	<key>CFBundleName</key>
+	<string>stackd-tests</string>
+	<key>NSBluetoothAlwaysUsageDescription</key>
+	<string>The stackd test suite exercises the same paired-device enumeration the daemon ships; without this key TCC aborts the test process instead of denying.</string>
+</dict>
+</plist>

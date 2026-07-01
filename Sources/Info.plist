@@ -14,5 +14,7 @@
 	<string>stackd uses AppleScript to read now-playing state from media apps (e.g. Spotify) when the system MediaRemote framework returns no data, and to send play / pause / next commands to those apps.</string>
 	<key>NSAppleMusicUsageDescription</key>
 	<string>stackd reads now-playing state from Music when MediaRemote is silent.</string>
+	<key>NSBluetoothAlwaysUsageDescription</key>
+	<string>stackd lists your paired Bluetooth devices (AirPods, keyboards, mice) so stacks with the bluetooth permission can show what is connected.</string>
 </dict>
 </plist>
