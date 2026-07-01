@@ -1,3 +1,4 @@
+import CoreBluetooth
 import Foundation
 
 // Tests for the read-only enumeration surface of Devices.swift. The file is
@@ -25,9 +26,10 @@ import Foundation
 //                            absent-or-non-empty, never present-and-empty).
 //   - Bluetooth.paired()   → row shape (address string, connected Bool,
 //                            optional classOfDevice Int, optional services
-//                            array). Triggers Bluetooth TCC the first time;
-//                            denial yields [] which still satisfies the
-//                            shape contract.
+//                            array). Live call only when Bluetooth TCC is
+//                            already granted to this context — an
+//                            undetermined grant makes tccd abort the whole
+//                            process, not deny (see bluetoothTCCGranted).
 //   - Camera.snapshot() /
 //     Camera.discover()    → device enumeration + dict shape. Metadata-only;
 //                            does NOT trigger Camera TCC.
@@ -37,6 +39,27 @@ import Foundation
 // These are tracer-bullet tests: every method that Bridge dispatches into
 // has at least one shape assertion. Magnitudes (device counts, names,
 // vendor IDs) depend on the host, so we never assert on them.
+
+// Bundle.main reads the __info_plist section tests.sh embeds with -sectcreate,
+// so this checks the built binary — not a file on disk.
+private var hasBluetoothUsageDescription: Bool {
+    Bundle.main.object(forInfoDictionaryKey: "NSBluetoothAlwaysUsageDescription") != nil
+}
+
+// Whether this process may reach IOBluetooth without tccd killing it. TCC
+// attributes the access to the RESPONSIBLE process — the app that launched
+// the shell, not this binary — so the embedded usage description above is
+// not enough when the parent app (a terminal, an agent harness) lacks the
+// key: tccd then SIGABRTs the suite instead of denying. Observed 2026-07-01
+// on macOS 26.5.1 with the key verifiably embedded and visible to
+// Bundle.main. CBCentralManager.authorization is a passive TCC read for the
+// same kTCCServiceBluetoothAlways class: no prompt, no crash, any context.
+// Only .allowedAlways is safe — .notDetermined means tccd would need to
+// prompt, which is exactly the crash path; .denied yields [] and asserts
+// nothing anyway.
+private var bluetoothTCCGranted: Bool {
+    CBCentralManager.authorization == .allowedAlways
+}
 
 func registerDevicesTests() {
     // MARK: - USB.snapshot
@@ -76,11 +99,38 @@ func registerDevicesTests() {
 
     // MARK: - Bluetooth.paired
 
+    test("test binary embeds NSBluetoothAlwaysUsageDescription (TCC aborts without it)") {
+        // Reaching IOBluetoothDevice without this key is not a denial — tccd
+        // SIGABRTs the process mid-suite, and block-buffered output makes the
+        // crash point look like whatever test a stdio flush boundary landed
+        // on. tests.sh embeds Tests/Info.plist via -sectcreate __TEXT
+        // __info_plist; this assertion turns a broken embed into one readable
+        // failure. (The embed alone is still not launch-context-proof — see
+        // bluetoothTCCGranted — but it is what makes properly-attributed
+        // contexts prompt instead of crash.)
+        try expect(hasBluetoothUsageDescription,
+                   "NSBluetoothAlwaysUsageDescription missing from the embedded Info.plist — check the -sectcreate flags in tests.sh and Tests/Info.plist")
+    }
+
+    test("Sources/Info.plist declares NSBluetoothAlwaysUsageDescription (daemon dies without it)") {
+        // The daemon embeds Sources/Info.plist the same way (build.sh
+        // -sectcreate) and Bridge's bluetooth.paired sync calls the same
+        // IOBluetooth API — dropping the key from the daemon plist turns the
+        // first sd.devices bluetooth read into a daemon SIGABRT. Runs from
+        // the repo root, same cwd contract as JSHarness reading Runtime/api.js.
+        let data = try Data(contentsOf: URL(fileURLWithPath: "Sources/Info.plist"))
+        let plist = try PropertyListSerialization.propertyList(from: data, options: [], format: nil)
+        let usage = (plist as? [String: Any])?["NSBluetoothAlwaysUsageDescription"]
+        try expect(usage is String, "NSBluetoothAlwaysUsageDescription missing from Sources/Info.plist")
+    }
+
     test("Bluetooth.paired returns rows with required address + connected keys") {
-        // The first call triggers the Bluetooth TCC prompt on macOS 11+.
-        // Denial → []; permitted + no paired devices → []; permitted +
-        // paired devices → populated. All three states satisfy the shape
-        // contract: any row that DOES exist must carry the required keys.
+        // Live coverage only where Bluetooth is already granted: granted +
+        // no paired devices → []; granted + paired devices → populated.
+        // Both satisfy the shape contract: any row that DOES exist must
+        // carry the required keys. Everywhere else this skips — see
+        // bluetoothTCCGranted for why calling anyway can abort the suite.
+        guard bluetoothTCCGranted else { return }
         let rows = Bluetooth.paired()
         for row in rows {
             try expect(row["address"]   is String, "address should be String")
@@ -92,6 +142,7 @@ func registerDevicesTests() {
         // describe(_:) only emits classOfDevice if cod != 0 — stacks that
         // bitmask the packed 24-bit field assume the key is absent rather
         // than zero, so they don't false-positive on "no class info."
+        guard bluetoothTCCGranted else { return }
         let rows = Bluetooth.paired()
         for row in rows {
             if let cod = row["classOfDevice"] {
