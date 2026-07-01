@@ -155,6 +155,68 @@ extension Bridge {
                 b.overlayInFlight.remove(id)
                 return true
             },
+            // ── Free-region overlay ────────────────────────────────────────────
+            // Like overlay.attach but positioned by an absolute GLOBAL rect
+            // (top-left) instead of tracking a window. AppKit's global coord
+            // space spans all displays, so the panel lands on whichever display
+            // contains the rect — no per-vsync tick, no reorder. First consumer:
+            // windowscape's 3-finger resize preview (its own panel is
+            // display:"primary", so the preview couldn't show on other displays).
+            .custom("overlay.region.create", permission: "overlay") { bridge, body, requestId in
+                DispatchQueue.main.async { [weak bridge] in
+                    guard let bridge = bridge,
+                          let r = body["rect"] as? [String: Any],
+                          let x = (r["x"] as? NSNumber)?.doubleValue,
+                          let y = (r["y"] as? NSNumber)?.doubleValue,
+                          let w = (r["w"] as? NSNumber)?.doubleValue,
+                          let h = (r["h"] as? NSNumber)?.doubleValue else {
+                        bridge?.respond(requestId: requestId, value: NSNull()); return
+                    }
+                    let html = body["html"] as? String ?? ""
+                    let css  = body["css"]  as? String ?? ""
+                    let id = bridge.nextOverlayId
+                    bridge.nextOverlayId += 1
+                    guard let handle = Overlay.region(
+                        id: id, rect: CGRect(x: x, y: y, width: w, height: h),
+                        html: html, css: css
+                    ) else {
+                        bridge.respond(requestId: requestId, value: NSNull()); return
+                    }
+                    bridge.regionOverlayHandles[id] = handle
+                    bridge.respond(requestId: requestId, value: id)
+                }
+            },
+            // Re-place an existing region overlay at a new global rect.
+            .syncBridge("overlay.region.setFrame", permission: "overlay", denyValue: false) { b, body in
+                guard let id = body["id"] as? Int,
+                      let r = body["rect"] as? [String: Any],
+                      let x = (r["x"] as? NSNumber)?.doubleValue,
+                      let y = (r["y"] as? NSNumber)?.doubleValue,
+                      let w = (r["w"] as? NSNumber)?.doubleValue,
+                      let h = (r["h"] as? NSNumber)?.doubleValue,
+                      let handle = b.regionOverlayHandles[id] else { return false }
+                let rect = CGRect(x: x, y: y, width: w, height: h)
+                if Thread.isMainThread { handle.setFrame(rect) }
+                else { DispatchQueue.main.sync { handle.setFrame(rect) } }
+                return true
+            },
+            // Evaluate JS in a region overlay's WebView (parity with overlay.eval).
+            .syncBridge("overlay.region.eval", permission: "overlay", denyValue: false) { b, body in
+                guard let id = body["id"] as? Int,
+                      let js = body["js"] as? String,
+                      let handle = b.regionOverlayHandles[id] else { return false }
+                if Thread.isMainThread { handle.evaluate(js) }
+                else { DispatchQueue.main.sync { handle.evaluate(js) } }
+                return true
+            },
+            // Tear down: close the panel synchronously (sync-hop to main if needed).
+            .syncBridge("overlay.region.remove", permission: "overlay", denyValue: false) { b, body in
+                guard let id = body["id"] as? Int,
+                      let handle = b.regionOverlayHandles.removeValue(forKey: id) else { return false }
+                if Thread.isMainThread { handle.remove() }
+                else { DispatchQueue.main.sync { handle.remove() } }
+                return true
+            },
         ]
     }
 }

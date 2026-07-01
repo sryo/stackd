@@ -119,6 +119,10 @@ final class Bridge: NSObject, WKScriptMessageHandler {
     // (e.g. snapshot-driven reposition). Currently the tick is synchronous —
     // setFrame + an evaluateJavaScript fire-and-forget — so this stays empty.
     var overlayInFlight: Set<Int> = []
+    // Free-region overlays (sd.overlay.region) — fixed global rect, any
+    // display, no window tracking. Shares nextOverlayId with the window-
+    // tracked overlays so ids never collide.
+    var regionOverlayHandles: [Int: RegionOverlayHandle] = [:]
     // Owned HTTP servers: serverId → Token (cancel = server.stop()).
     // Pending route requests waiting for sd.httpserver.respond() — keyed
     // by mint id, value is the NWConnection-side completion closure.
@@ -596,11 +600,15 @@ final class Bridge: NSObject, WKScriptMessageHandler {
             let handles = Array(self.overlayHandles.values)
             self.overlayHandles.removeAll()
             self.overlayInFlight.removeAll()
+            let regionHandles = Array(self.regionOverlayHandles.values)
+            self.regionOverlayHandles.removeAll()
             if Thread.isMainThread {
                 for h in handles { h.detach() }
+                for h in regionHandles { h.remove() }
             } else {
                 DispatchQueue.main.sync {
                     for h in handles { h.detach() }
+                    for h in regionHandles { h.remove() }
                 }
             }
         })

@@ -214,7 +214,7 @@ final class OverlayHandle: NSObject, WKNavigationDelegate {
         _ = commit(txRef, 0)
     }
 
-    private static func cgsToAppKit(_ cgsFrame: CGRect) -> CGRect {
+    static func cgsToAppKit(_ cgsFrame: CGRect) -> CGRect {
         // CGS uses top-left origin with y growing down; AppKit uses
         // bottom-left with y growing up. The screen height for the flip is
         // the primary display's height (NSScreen.screens[0]) — same
@@ -416,5 +416,138 @@ enum Overlay {
         var shown: DarwinBoolean = false
         _ = fn(SkyLight.cid, UInt32(wid), &shown)
         return shown.boolValue
+    }
+}
+
+// MARK: - Free-region overlay (fixed global rect, any display)
+
+/// Pure geometry for the free-region overlay — validates the caller's rect and
+/// converts global (top-left) coords to AppKit (bottom-left). Separate + pure
+/// so the placement flip is testable without spawning an NSPanel.
+enum RegionOverlayGeometry {
+    /// Reject non-finite or non-positive rects before they reach NSPanel — a
+    /// zero/negative/NaN size yields an invisible panel or an AppKit assert.
+    static func sanitize(_ rect: CGRect) -> CGRect? {
+        guard rect.origin.x.isFinite, rect.origin.y.isFinite,
+              rect.size.width.isFinite, rect.size.height.isFinite,
+              rect.size.width > 0, rect.size.height > 0 else { return nil }
+        return rect
+    }
+
+    /// Global (top-left) → AppKit (bottom-left). One named entry point so the
+    /// placement flip has a single test surface; shares OverlayHandle's recipe.
+    static func toAppKit(_ globalRect: CGRect) -> CGRect {
+        return OverlayHandle.cgsToAppKit(globalRect)
+    }
+}
+
+/// Live free-region overlay: a borderless click-through NSPanel + WKWebView
+/// drawn at an absolute global rect on whichever display contains it. Unlike
+/// `OverlayHandle` it tracks no window — no per-vsync tick, no z-order reorder.
+/// Placed on create, re-placed via `setFrame`.
+final class RegionOverlayHandle: NSObject, WKNavigationDelegate {
+    let id: Int
+    let panel: NSPanel
+    let webView: WKWebView
+    private var navigationReady = false
+    private var pendingEvalJS: String?
+    private var released = false
+
+    init(id: Int, panel: NSPanel, webView: WKWebView) {
+        self.id = id
+        self.panel = panel
+        self.webView = webView
+        super.init()
+        webView.navigationDelegate = self
+    }
+
+    /// Move/resize to a new global rect. A rejected rect is ignored (the prior
+    /// frame stays) rather than collapsing the panel.
+    func setFrame(_ globalRect: CGRect) {
+        if released { return }
+        guard let r = RegionOverlayGeometry.sanitize(globalRect) else { return }
+        panel.setFrame(RegionOverlayGeometry.toAppKit(r), display: true)
+    }
+
+    /// Evaluate JS in the overlay's WebView, buffering until didFinish so calls
+    /// right after create still run. Mirrors `OverlayHandle.evaluate`.
+    func evaluate(_ js: String) {
+        if released { return }
+        if navigationReady {
+            webView.evaluateJavaScript(js, completionHandler: nil)
+        } else {
+            pendingEvalJS = (pendingEvalJS ?? "") + ";" + js
+        }
+    }
+
+    /// Tear down: close the panel (drops the WKWebView). Idempotent.
+    func remove() {
+        if released { return }
+        released = true
+        panel.orderOut(nil)
+        panel.close()
+    }
+
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        navigationReady = true
+        if let pending = pendingEvalJS {
+            pendingEvalJS = nil
+            webView.evaluateJavaScript(pending, completionHandler: nil)
+        }
+    }
+}
+
+extension Overlay {
+    /// Create a free-region overlay at `rect` (global, top-left). Returns nil
+    /// on a degenerate rect. Reuses attach()'s WKWebView + OverlayPanel recipe,
+    /// minus the target/tick/reorder machinery.
+    static func region(id: Int, rect: CGRect, html: String, css: String) -> RegionOverlayHandle? {
+        guard let sane = RegionOverlayGeometry.sanitize(rect) else { return nil }
+        let appKit = RegionOverlayGeometry.toAppKit(sane)
+
+        let config = WKWebViewConfiguration()
+        let prefs = WKPreferences()
+        prefs.javaScriptCanOpenWindowsAutomatically = false
+        config.preferences = prefs
+
+        let webView = WKWebView(frame: NSRect(origin: .zero, size: appKit.size), configuration: config)
+        webView.setValue(false, forKey: "drawsBackground")
+        webView.wantsLayer = true
+        webView.layer?.isOpaque = false
+        webView.layer?.backgroundColor = NSColor.clear.cgColor
+        if #available(macOS 12.0, *) { webView.underPageBackgroundColor = .clear }
+        if #available(macOS 13.3, *) { webView.isInspectable = true }
+        webView.autoresizingMask = [.width, .height]
+
+        let panel = OverlayPanel(
+            contentRect: appKit,
+            styleMask: [.borderless, .nonactivatingPanel],
+            backing: .buffered,
+            defer: false
+        )
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
+        panel.hasShadow = false
+        panel.level = .statusBar
+        panel.collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary, .ignoresCycle]
+        panel.ignoresMouseEvents = true
+        panel.isMovableByWindowBackground = false
+        panel.hidesOnDeactivate = false
+        panel.contentView = webView
+
+        let doc = """
+        <!doctype html><html><head><meta charset="utf-8">
+        <style>
+          html, body { margin: 0; padding: 0; background: transparent; overflow: hidden; }
+          \(css)
+        </style>
+        </head><body>
+        \(html)
+        </body></html>
+        """
+        webView.loadHTMLString(doc, baseURL: nil)
+        panel.orderFrontRegardless()
+
+        return RegionOverlayHandle(id: id, panel: panel, webView: webView)
     }
 }

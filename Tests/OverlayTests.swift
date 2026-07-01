@@ -290,4 +290,52 @@ func registerOverlayTests() {
         try expectEqual(Overlay.isOrderedIn(0), false)
         try expect(Overlay.bounds(of: 0) == nil)
     }
+
+    // MARK: - RegionOverlayGeometry — free-region overlay placement (pure)
+
+    test("RegionOverlayGeometry.sanitize rejects degenerate rects") {
+        // Zero / negative / non-finite sizes would make an invisible panel or
+        // trip an AppKit assertion — gate them before NSPanel.setFrame.
+        try expect(RegionOverlayGeometry.sanitize(CGRect(x: 0, y: 0, width: 0, height: 10)) == nil)
+        try expect(RegionOverlayGeometry.sanitize(CGRect(x: 0, y: 0, width: 10, height: 0)) == nil)
+        try expect(RegionOverlayGeometry.sanitize(CGRect(x: 0, y: 0, width: -5, height: 10)) == nil)
+        try expect(RegionOverlayGeometry.sanitize(CGRect(x: CGFloat.nan, y: 0, width: 10, height: 10)) == nil)
+        try expect(RegionOverlayGeometry.sanitize(CGRect(x: 0, y: 0, width: CGFloat.infinity, height: 10)) == nil)
+    }
+
+    test("RegionOverlayGeometry.sanitize passes a normal rect through") {
+        let r = CGRect(x: 12, y: 34, width: 200, height: 100)
+        try expect(RegionOverlayGeometry.sanitize(r) == r)
+    }
+
+    test("RegionOverlayGeometry.toAppKit preserves x/w/h and flips y") {
+        // Global (top-left) → AppKit (bottom-left): only y changes; x, w, h
+        // are invariant. The flip is what lands the panel on the right
+        // display, so pin the relationship rather than a hardcoded number.
+        let g = CGRect(x: 100, y: 50, width: 300, height: 80)
+        let a = RegionOverlayGeometry.toAppKit(g)
+        try expectEqual(a.origin.x, g.origin.x)
+        try expectEqual(a.size.width, g.size.width)
+        try expectEqual(a.size.height, g.size.height)
+        if let primary = NSScreen.screens.first {
+            try expectEqual(a.origin.y, primary.frame.maxY - g.maxY)
+        } else {
+            // Headless fallback (no screens): identity, per cgsToAppKit's guard.
+            try expectEqual(a.origin.y, g.origin.y)
+        }
+    }
+
+    test("RegionOverlayHandle.remove then setFrame is a safe no-op") {
+        // Teardown race: a gesture step can land after the bracket closed and
+        // remove() ran. The released guard must swallow setFrame rather than
+        // touch a closed panel. Degenerate panel, no orderFront → nothing
+        // visible during the suite (same constraint as the OverlayHandle tests).
+        let panel   = NSPanel(contentRect: .zero, styleMask: .borderless,
+                              backing: .buffered, defer: true)
+        let webView = WKWebView(frame: .zero, configuration: WKWebViewConfiguration())
+        let h = RegionOverlayHandle(id: 1, panel: panel, webView: webView)
+        h.remove()
+        h.setFrame(CGRect(x: 0, y: 0, width: 100, height: 100))  // must not crash
+        try expectEqual(h.panel.isVisible, false)
+    }
 }

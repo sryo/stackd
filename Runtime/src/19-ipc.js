@@ -116,6 +116,42 @@ sd.overlay = {
         },
         detach() { return request({ type: "overlay.detach", id: handleId }); }
       };
+    },
+    // Free-region overlay: a click-through panel the daemon draws at an
+    // absolute GLOBAL screen rect (top-left, spanning all displays) — not
+    // tracking any window. The daemon places it on whichever display contains
+    // the rect, so a stack on display:"primary" can still render UI over a
+    // window on another display. Returns a handle; the panel sits where put
+    // until setFrame() / remove(). Permission: "overlay".
+    //
+    //   const p = await sd.overlay.region({
+    //     rect: { x, y, w, h },          // global screen coords
+    //     html: `<div class="ring"></div>`,
+    //     css:  `.ring { position:absolute; inset:0; border:8px solid #1a4de6;
+    //                    border-radius:16px; pointer-events:none; }`
+    //   });
+    //   p.setFrame({ x, y, w, h });      // re-place
+    //   p.remove();
+    async region(spec) {
+      const s = spec || {};
+      const r = s.rect || {};
+      const handleId = await request({
+        type: "overlay.region.create",
+        rect: { x: +r.x || 0, y: +r.y || 0, w: +r.w || 0, h: +r.h || 0 },
+        html: s.html != null ? String(s.html) : "",
+        css:  s.css  != null ? String(s.css)  : ""
+      });
+      if (handleId == null) return null;
+      return {
+        id: handleId,
+        setFrame(rect) {
+          const q = rect || {};
+          return request({ type: "overlay.region.setFrame", id: handleId,
+            rect: { x: +q.x || 0, y: +q.y || 0, w: +q.w || 0, h: +q.h || 0 } });
+        },
+        eval(js)  { return request({ type: "overlay.region.eval", id: handleId, js: String(js ?? "") }); },
+        remove()  { return request({ type: "overlay.region.remove", id: handleId }); }
+      };
     }
   };
   // Long-running HTTP server. Loopback-only by default; pass
