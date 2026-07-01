@@ -11,6 +11,7 @@ SWIFT_SOURCES=(
   Sources/main.swift
   Sources/AppDelegate.swift
   Sources/StackWindow.swift
+  Sources/PassthroughWebView.swift
   Sources/StackMaterial.swift
   Sources/StackHost.swift
   Sources/StackSource.swift

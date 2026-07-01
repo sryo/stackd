@@ -306,6 +306,37 @@ enum Overlay {
         }
     }
 
+
+    /// Shared WKWebView recipe for overlay panels — attach() and region()
+    /// build byte-identical webviews. Always drag-passthrough: every
+    /// sd.overlay panel is ignoresMouseEvents=true by contract, and a
+    /// drag-registered webview would make the invisible panel a Finder
+    /// drag target (see PassthroughWebView).
+    static func makeOverlayWebView(size: CGSize) -> PassthroughWebView {
+        let config = WKWebViewConfiguration()
+        let prefs = WKPreferences()
+        prefs.javaScriptCanOpenWindowsAutomatically = false
+        config.preferences = prefs
+
+        let webView = PassthroughWebView(
+            frame: NSRect(origin: .zero, size: size),
+            configuration: config,
+            dragPassthrough: true
+        )
+        webView.setValue(false, forKey: "drawsBackground")
+        webView.wantsLayer = true
+        webView.layer?.isOpaque = false
+        webView.layer?.backgroundColor = NSColor.clear.cgColor
+        if #available(macOS 12.0, *) {
+            webView.underPageBackgroundColor = .clear
+        }
+        if #available(macOS 13.3, *) {
+            webView.isInspectable = true
+        }
+        webView.autoresizingMask = [.width, .height]
+        return webView
+    }
+
     /// Attach a new WebKit overlay pinned to `targetID`. Returns nil on
     /// allocation failure. The handle owns the NSPanel — call `detach()`
     /// to release it.
@@ -323,26 +354,7 @@ enum Overlay {
         // in tick() once we know the panel exists.
         let initialFrame = NSRect(x: -9999, y: -9999, width: 1, height: 1)
 
-        let config = WKWebViewConfiguration()
-        let prefs = WKPreferences()
-        prefs.javaScriptCanOpenWindowsAutomatically = false
-        config.preferences = prefs
-
-        let webView = WKWebView(
-            frame: NSRect(origin: .zero, size: initialFrame.size),
-            configuration: config
-        )
-        webView.setValue(false, forKey: "drawsBackground")
-        webView.wantsLayer = true
-        webView.layer?.isOpaque = false
-        webView.layer?.backgroundColor = NSColor.clear.cgColor
-        if #available(macOS 12.0, *) {
-            webView.underPageBackgroundColor = .clear
-        }
-        if #available(macOS 13.3, *) {
-            webView.isInspectable = true
-        }
-        webView.autoresizingMask = [.width, .height]
+        let webView = makeOverlayWebView(size: initialFrame.size)
 
         let panel = OverlayPanel(
             contentRect: initialFrame,
@@ -363,6 +375,7 @@ enum Overlay {
         // cmd-tab / mission-control surface). Same recipe StackWindow uses.
         panel.collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary, .ignoresCycle]
         panel.ignoresMouseEvents = true
+        panel.unregisterDraggedTypes()
         panel.isMovableByWindowBackground = false
         panel.hidesOnDeactivate = false
         panel.contentView = webView
@@ -505,19 +518,7 @@ extension Overlay {
         guard let sane = RegionOverlayGeometry.sanitize(rect) else { return nil }
         let appKit = RegionOverlayGeometry.toAppKit(sane)
 
-        let config = WKWebViewConfiguration()
-        let prefs = WKPreferences()
-        prefs.javaScriptCanOpenWindowsAutomatically = false
-        config.preferences = prefs
-
-        let webView = WKWebView(frame: NSRect(origin: .zero, size: appKit.size), configuration: config)
-        webView.setValue(false, forKey: "drawsBackground")
-        webView.wantsLayer = true
-        webView.layer?.isOpaque = false
-        webView.layer?.backgroundColor = NSColor.clear.cgColor
-        if #available(macOS 12.0, *) { webView.underPageBackgroundColor = .clear }
-        if #available(macOS 13.3, *) { webView.isInspectable = true }
-        webView.autoresizingMask = [.width, .height]
+        let webView = makeOverlayWebView(size: appKit.size)
 
         let panel = OverlayPanel(
             contentRect: appKit,
@@ -531,6 +532,7 @@ extension Overlay {
         panel.level = .statusBar
         panel.collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary, .ignoresCycle]
         panel.ignoresMouseEvents = true
+        panel.unregisterDraggedTypes()
         panel.isMovableByWindowBackground = false
         panel.hidesOnDeactivate = false
         panel.contentView = webView

@@ -64,9 +64,10 @@ final class StackWindow: NSPanel, WKNavigationDelegate {
         prefs.javaScriptCanOpenWindowsAutomatically = false
         config.preferences = prefs
 
-        webView = WKWebView(
+        webView = PassthroughWebView(
             frame: NSRect(origin: .zero, size: frame.size),
-            configuration: config
+            configuration: config,
+            dragPassthrough: clickThrough
         )
         webView.setValue(false, forKey: "drawsBackground")
         // drawsBackground=false stops WebKit painting; the non-opaque CALayer
@@ -96,6 +97,9 @@ final class StackWindow: NSPanel, WKNavigationDelegate {
         self.level = level
         self.collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary, .ignoresCycle]
         self.ignoresMouseEvents = clickThrough
+        // Defensive: the webview owns drag suppression (PassthroughWebView),
+        // but keep the panel itself out of drag-destination lookup too.
+        if clickThrough { self.unregisterDraggedTypes() }
         self.isMovableByWindowBackground = false
 
         // Material backing — see `MaterialAttachment` in StackMaterial.swift for
@@ -408,8 +412,13 @@ final class StackWindow: NSPanel, WKNavigationDelegate {
     /// system menubar EXCEPT when the mouse is over one of its own items.
     /// The bar polls `sd.mouse` and toggles this as the cursor enters /
     /// leaves item rectangles.
+    /// Mouse and drag stay in lockstep: a click-through surface must also
+    /// be drag-inert (Finder drags route by registered types, not by
+    /// ignoresMouseEvents), and flipping clickable back on restores the
+    /// webview's deferred drag types so DOM drops work again.
     func setClickThrough(_ clickThrough: Bool) {
         self.ignoresMouseEvents = clickThrough
+        (webView as? PassthroughWebView)?.dragPassthrough = clickThrough
     }
 
     /// Parse a `window.setClickThrough` body into a Bool. Returns nil if the
