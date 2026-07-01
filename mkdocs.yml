@@ -1,0 +1,34 @@
+site_name: stackd
+site_description: Author documentation for stackd — build macOS stacks in web tech.
+docs_dir: docs
+theme:
+  name: material
+  palette:
+    - scheme: slate
+      toggle: { icon: material/weather-night, name: Light mode }
+    - scheme: default
+      toggle: { icon: material/weather-sunny, name: Dark mode }
+  features:
+    - navigation.sections
+    - navigation.top
+    - navigation.footer
+    - content.code.copy
+    - search.suggest
+markdown_extensions:
+  - admonition
+  - tables
+  - toc: { permalink: true }
+  - pymdownx.highlight
+  - pymdownx.superfences
+nav:
+  - Home: README.md
+  - Getting started: getting-started.md
+  - Concepts:
+      - The reactive model: concepts/reactive-model.md
+      - Permissions: concepts/permissions.md
+      - Chrome & material: concepts/chrome-and-material.md
+      - Lifecycle & rules: concepts/lifecycle-and-rules.md
+  - Reference:
+      - Manifest (stack.json): reference/manifest.md
+      - Template engine: reference/template-engine.md
+      - sd.* API: reference/api.md
