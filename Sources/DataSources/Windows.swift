@@ -1775,6 +1775,16 @@ enum WindowEvents {
         }
     }
 
+    /// Positive-verdict standard-window gate for the fast-create path —
+    /// the SAME rule installPerWindow's three-way subrole gate enforces
+    /// for AX creates. nil (unreadable: app still constructing its AX
+    /// tree, timeout under load) is NOT announceable: announcing unknowns
+    /// tiled Arc's tab-creation hint (2026-07-02). Unreadable windows
+    /// defer to the AX create path, which retries and gates properly.
+    static func fastCreateAnnounceable(subrole: String?) -> Bool {
+        subrole == (kAXStandardWindowSubrole as String)
+    }
+
     /// 1325 wears two hats: for a window we already track it's a space
     /// move (re-push the spaces channel); for an unknown-but-listed window
     /// it's the FAST create trigger — the window server announces it
@@ -1806,6 +1816,14 @@ enum WindowEvents {
               (info[kCGWindowLayer as String] as? Int) == 0,
               let pid = info[kCGWindowOwnerPID as String] as? Int
         else { return }
+        // Standard-window gate (positive verdict only): layer 0 alone
+        // admits app helper windows — Arc's tab-creation hint, Chromium
+        // bubbles, tooltips-with-a-layer. Non-standard or not-yet-readable
+        // subroles fall back to the AX create path and its retry ladder.
+        guard fastCreateAnnounceable(subrole: WindowsByID.subrole(windowID: cgWid)) else {
+            WindowDebug.log("cgs 1325: wid=\(wid) subrole not confirmably standard — deferring to AX create path")
+            return
+        }
         let bounds = info[kCGWindowBounds as String] as? [String: CGFloat] ?? [:]
         let snap = WindowsLifecycleObserver.Snap(
             id: Int(wid),
