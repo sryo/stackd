@@ -475,74 +475,90 @@ func registerWindowsTests() {
     //  window, which only fires on real Cmd+M — no tab-switch ambiguity to
     //  gate against. AX is the right primitive for this.)
 
-    // MARK: - Batch transaction — AX position re-assert at commit (regression)
+    // MARK: - Batch — all-AX queued commit
     //
-    // Root cause being pinned (2026-06-10): the batch path used to send size
-    // via AX immediately and position ONLY via the SLSTransaction. AX writes
-    // propagate asynchronously to the target app, and an app processing a
-    // size set performs a full -[NSWindow setFrame:] — origin + size — with
-    // the origin read from its own (stale) frame cache. Commit fires ~1-2ms
-    // after the closure, so the SLS move landed first and each app's late
-    // resize re-asserted the OLD origin, clobbering the committed position
-    // (windowscape PASS-1: windows stacked at old origins / offscreen).
-    // The fix re-asserts kAXPositionAttribute per queued window after
-    // SLSTransactionCommit; these tests lock that contract.
+    // History being pinned: the original batch split one window's geometry
+    // across two unsynchronized channels — size via AX at setFrame time,
+    // position via SLSTransaction at commit — and each app's late resize
+    // re-asserted its stale origin over the committed SLS move (2026-06-10:
+    // windows stacked at old origins / offscreen). The rework queues FULL
+    // frames and applies them all through the normal AX setFrame dance in
+    // one main-thread burst at commit: one channel, no split, and begin no
+    // longer depends on SkyLight tx symbols (it can't fail unless a batch
+    // is already open).
 
-    test("BatchMoveLedger records last-write-wins per window id in first-seen order") {
-        var ledger = WindowsByID.BatchMoveLedger()
-        ledger.record(id: 101, point: CGPoint(x: 10, y: 20))
-        ledger.record(id: 202, point: CGPoint(x: 30, y: 40))
-        ledger.record(id: 101, point: CGPoint(x: 50, y: 60))
+    test("BatchFrameLedger records last-write-wins per window id in first-seen order") {
+        var ledger = WindowsByID.BatchFrameLedger()
+        ledger.record(id: 101, frame: CGRect(x: 10, y: 20, width: 100, height: 100))
+        ledger.record(id: 202, frame: CGRect(x: 30, y: 40, width: 200, height: 200))
+        ledger.record(id: 101, frame: CGRect(x: 50, y: 60, width: 300, height: 300))
         let drained = ledger.drain()
         try expectEqual(drained.count, 2)
         try expectEqual(drained[0].id, 101)
-        try expectEqual(drained[0].point, CGPoint(x: 50, y: 60),
+        try expectEqual(drained[0].frame, CGRect(x: 50, y: 60, width: 300, height: 300),
                         "second record for id 101 must overwrite the first")
         try expectEqual(drained[1].id, 202)
-        try expectEqual(drained[1].point, CGPoint(x: 30, y: 40))
+        try expectEqual(drained[1].frame, CGRect(x: 30, y: 40, width: 200, height: 200))
     }
 
-    test("BatchMoveLedger.drain empties the ledger (no double re-assert across batches)") {
-        var ledger = WindowsByID.BatchMoveLedger()
-        ledger.record(id: 7, point: .zero)
+    test("BatchFrameLedger.drain empties the ledger (no replay across batches)") {
+        var ledger = WindowsByID.BatchFrameLedger()
+        ledger.record(id: 7, frame: .zero)
         _ = ledger.drain()
         try expectEqual(ledger.drain().count, 0,
-                        "a drained ledger must not replay stale moves into the next batch")
+                        "a drained ledger must not replay stale frames into the next batch")
     }
 
-    test("commitBatch re-asserts every queued move through the position applier, then closes") {
-        // beginBatch returns false when the SkyLight tx symbols are
-        // unavailable (headless CI) — skip the body there, the ledger tests
-        // above still cover the bookkeeping.
-        guard WindowsByID.beginBatch() else { return }
-        // Bogus ids: WindowServer rejects the SLS move per-op (harmless) and
-        // the injected applier means no AX write ever fires.
-        WindowsByID.batchSink?(.moveWithGroup(id: 4_294_000_001, point: CGPoint(x: 100, y: 200)))
-        WindowsByID.batchSink?(.moveWithGroup(id: 4_294_000_002, point: CGPoint(x: 300, y: 400)))
-        var captured: [(id: CGWindowID, point: CGPoint)] = []
-        let ok = WindowsByID.commitBatch { id, point in captured.append((id: id, point: point)) }
+    test("beginBatch always opens unless a batch is already open") {
+        try expectEqual(WindowsByID.beginBatch(), true,
+                        "begin must not depend on SkyLight symbols any more")
+        try expectEqual(WindowsByID.beginBatch(), false, "no nesting")
+        _ = WindowsByID.commitBatch { _, _ in }
+    }
+
+    test("commitBatch applies every queued frame through the frame applier, then closes") {
+        guard WindowsByID.beginBatch() else { throw Expectation(message: "begin refused") }
+        // Bogus ids; the injected applier means no AX write ever fires.
+        WindowsByID.batchSink?(4_294_000_001, CGRect(x: 100, y: 200, width: 640, height: 480))
+        WindowsByID.batchSink?(4_294_000_002, CGRect(x: 300, y: 400, width: 800, height: 600))
+        var captured: [(id: CGWindowID, frame: CGRect)] = []
+        let ok = WindowsByID.commitBatch { id, frame in captured.append((id: id, frame: frame)) }
         try expectEqual(ok, true)
         try expectEqual(captured.count, 2,
-                        "every queued move must be re-asserted through AX at commit")
+                        "every queued frame must be applied at commit")
         try expectEqual(captured[0].id, 4_294_000_001)
-        try expectEqual(captured[0].point, CGPoint(x: 100, y: 200))
+        try expectEqual(captured[0].frame, CGRect(x: 100, y: 200, width: 640, height: 480))
         try expectEqual(captured[1].id, 4_294_000_002)
-        try expectEqual(captured[1].point, CGPoint(x: 300, y: 400))
+        try expectEqual(captured[1].frame, CGRect(x: 300, y: 400, width: 800, height: 600))
         // Commit must have closed the batch: no sink, second commit refuses.
         try expect(WindowsByID.batchSink == nil, "commit must clear the sink")
         try expectEqual(WindowsByID.commitBatch { _, _ in }, false)
     }
 
-    test("commitBatch with no queued moves applies nothing; next batch starts clean") {
-        guard WindowsByID.beginBatch() else { return }
+    test("commitBatch with no queued frames applies nothing; next batch starts clean") {
+        guard WindowsByID.beginBatch() else { throw Expectation(message: "begin refused") }
         var applied = 0
         try expectEqual(WindowsByID.commitBatch { _, _ in applied += 1 }, true)
         try expectEqual(applied, 0)
-        // A fresh batch must not inherit moves from a previous one.
-        guard WindowsByID.beginBatch() else { return }
-        WindowsByID.batchSink?(.moveWithGroup(id: 4_294_000_003, point: CGPoint(x: 1, y: 2)))
+        // A fresh batch must not inherit frames from a previous one.
+        guard WindowsByID.beginBatch() else { throw Expectation(message: "begin refused") }
+        WindowsByID.batchSink?(4_294_000_003, CGRect(x: 1, y: 2, width: 3, height: 4))
         var captured: [CGWindowID] = []
         _ = WindowsByID.commitBatch { id, _ in captured.append(id) }
         try expectEqual(captured, [4_294_000_003])
+    }
+
+    test("setFrame inside an open batch queues instead of writing") {
+        guard WindowsByID.beginBatch() else { throw Expectation(message: "begin refused") }
+        // A bogus id would fail element lookup on the direct path; queueing
+        // must succeed regardless because commit owns the lookup.
+        try expectEqual(
+            WindowsByID.setFrame(windowID: 4_294_000_004, x: 5, y: 6, w: 700, h: 500), true,
+            "batched setFrame returns true (queued)")
+        var captured: [(id: CGWindowID, frame: CGRect)] = []
+        _ = WindowsByID.commitBatch { id, frame in captured.append((id: id, frame: frame)) }
+        try expectEqual(captured.count, 1)
+        try expectEqual(captured[0].id, 4_294_000_004)
+        try expectEqual(captured[0].frame, CGRect(x: 5, y: 6, width: 700, height: 500))
     }
 }

@@ -31,16 +31,16 @@ import Foundation
 ///     `.ax`) because it doesn't touch AX. Distinct from
 ///     `sd.display.snapshot` (ScreenCaptureKit).
 ///
-///   - `windows.batch.{begin, commit}` — atomic multi-window
-///     transaction. `begin` opens a fresh SLSTransaction and installs
-///     `WindowsByID.batchSink`; `commit` calls `SLSTransactionCommit`,
-///     re-asserts every queued position via AX (the SLS move alone
-///     gets clobbered by each app's in-flight resize re-asserting its
-///     stale origin — see `WindowsByID.commitBatch` for the full race),
-///     and clears the sink. Process-global — if a batch is already
-///     open, begin refuses rather than nest, matching the JS-side
-///     single-await model. Both hop to main because AX + the SkyLight
-///     tx symbols want the WindowServer connection thread.
+///   - `windows.batch.{begin, commit}` — multi-window frame batch.
+///     `begin` installs `WindowsByID.batchSink` (setFrame calls queue
+///     full frames instead of writing); `commit` applies every queued
+///     frame through the normal AX setFrame dance in one main-thread
+///     burst and clears the sink. All-AX by design — the old
+///     SLS-position/AX-size split raced each app's stale frame cache
+///     (see `WindowsByID.batchSink` for the 2026-06-10 post-mortem).
+///     Process-global — if a batch is already open, begin refuses
+///     rather than nest, matching the JS-side single-await model.
+///     Both hop to main because AX wants the main thread.
 ///
 /// Bridge-side scope drain in Bridge.swift commits any leftover batch
 /// at unload (`WindowsByID.commitBatch()` no-ops when no batch is open),
@@ -235,13 +235,12 @@ extension Bridge {
                 )
             },
 
-            // Atomic multi-window transaction. begin opens a fresh SLSTransaction
-            // and installs the WindowsByID.batchSink that funnels per-id setFrame
-            // calls (and future per-id windows mutations) into it; commit calls
-            // SLSTransactionCommit and clears the sink. Process-global — if a
-            // batch is already open the begin refuses rather than nest, matching
-            // the JS-side single-await model. Hops to main because both AX and
-            // the SkyLight tx symbols want the WindowServer connection thread.
+            // Multi-window frame batch. begin installs the WindowsByID.batchSink
+            // that queues per-id setFrame frames; commit applies them all through
+            // the normal AX write path in one main-thread burst and clears the
+            // sink. Process-global — if a batch is already open the begin refuses
+            // rather than nest, matching the JS-side single-await model. Hops to
+            // main because AX wants the main thread.
             .custom("windows.batch.begin", permission: "windows", denyValue: false) { bridge, _, requestId in
                 DispatchQueue.main.async { [weak bridge] in
                     bridge?.respond(requestId: requestId, value: WindowsByID.beginBatch())

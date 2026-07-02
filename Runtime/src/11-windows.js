@@ -186,13 +186,15 @@ sd.windows = {
         quality: o.quality ?? 0.85   // canonical default lives here, not in Swift
       });
     },
-    // Atomic multi-window transaction. setFrame calls with an explicit id
-    // inside the closure are queued and committed atomically on closure
-    // return — every window snaps to its new origin on a single compositor
-    // flip instead of cascading. Size still goes through AX per-window (no
-    // SLS size symbol exists), so size cascade may still be visible. Calls
-    // without an id (which target the AX focused window) bypass batching.
-    // Throws-through; queued ops are dropped via commit-empty-then-rethrow.
+    // Multi-window frame batch. setFrame calls with an explicit id inside
+    // the closure are queued (last-write-wins per window) and applied in one
+    // daemon-side burst on closure return — every frame rides the same AX
+    // channel, so the old SLS/AX split race can't misplace windows. For an
+    // ANIMATED multi-window pass, skip batch and issue parallel
+    // setFrame(id, frame, {duration}) calls instead — the motion engine
+    // already ticks them on one clock. Calls without an id (which target
+    // the AX focused window) bypass batching. Throws-through; queued ops
+    // are dropped via commit-empty-then-rethrow.
     async batch(fn) {
       const ok = await request({ type: "windows.batch.begin" });
       if (!ok) return false;
