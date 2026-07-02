@@ -1068,6 +1068,14 @@ final class Bridge: NSObject, WKScriptMessageHandler {
             let id = UInt64((body["spaceID"] as? Int) ?? 0)
             return Spaces.minimizedWindows(spaceID: id).map { NSNumber(value: $0) }
         },
+        // Write side — verified move; { ok, spaces } either way so callers
+        // can update their per-window space caches without polling.
+        .sync("spaces.moveWindow", permission: "spaces",
+              denyValue: ["ok": false, "spaces": [NSNumber]()] as [String: Any]) { body in
+            Spaces.moveWindow(
+                windowID: UInt32((body["id"] as? Int) ?? 0),
+                toSpace: UInt64((body["spaceID"] as? Int) ?? 0))
+        },
 
         // Native popup menu — async (resolves on user pick / cancel).
         .custom("menu.popup", permission: "menu") { bridge, body, requestId in

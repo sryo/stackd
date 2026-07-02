@@ -96,7 +96,15 @@ sd.spaces = {
     // Backed by SLSCopySpacesForWindows.
     windowSpaces(id) { return request({ type: "spaces.windowSpaces", id }); },
     // CGWindowIDs of minimized windows on a space — Promise<number[]>.
-    minimizedWindows(spaceID) { return request({ type: "spaces.minimizedWindows", spaceID }); }
+    minimizedWindows(spaceID) { return request({ type: "spaces.minimizedWindows", spaceID }); },
+    // Move a window to another user space (hs.spaces.moveWindowToSpace
+    // parity). Fullscreen/tiled target spaces are refused. Resolves
+    //   { ok: bool, spaces: number[] }
+    // where spaces is the VERIFIED post-move space list — update caches
+    // from it directly, no convergence polling needed. ok=false means the
+    // window didn't move (bad ids, fullscreen target, or the SLS write
+    // didn't take on this macOS build).
+    moveWindow(id, spaceID) { return request({ type: "spaces.moveWindow", id, spaceID }); }
   };
 sd.menu = {
     // Native NSMenu at the current cursor position. items is an array of
