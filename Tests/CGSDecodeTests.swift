@@ -49,4 +49,15 @@ func registerCGSDecodeTests() {
     test("unknown event types are ignored") {
         try expectEqual(decode(999, u32(1)), .ignored)
     }
+
+    test("fast-create gate announces only positively-standard subroles") {
+        // Layer 0 alone admits app helper windows (Arc's tab-creation
+        // hint). nil = AX not readable yet — must defer to the AX create
+        // path, not announce optimistically.
+        try expect(WindowEvents.fastCreateAnnounceable(subrole: "AXStandardWindow"))
+        try expect(!WindowEvents.fastCreateAnnounceable(subrole: nil), "unreadable must defer")
+        try expect(!WindowEvents.fastCreateAnnounceable(subrole: "AXDialog"))
+        try expect(!WindowEvents.fastCreateAnnounceable(subrole: "AXSystemDialog"))
+        try expect(!WindowEvents.fastCreateAnnounceable(subrole: "AXUnknown"))
+    }
 }
