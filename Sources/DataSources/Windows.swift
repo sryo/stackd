@@ -1179,6 +1179,16 @@ final class WindowsLifecycleObserver {
             log("win-poll missed-by-ax: +\(missedCreated) -\(missedDestroyed) ~\(missedTitled) (10s safety backstop caught what AX did not fire)")
         }
         WindowDebug.log("poll tick: total seen=\(diff.created.count + diff.destroyed.count + diff.titleChanged.count) missed-by-ax=\(total)")
+        // Listener-fires sensor for the CGS codes: per-code counts since
+        // launch, piggybacked on the poll's cadence. Codes stuck at zero
+        // (806/807 need the interest list; 1325/1326 are build-dependent)
+        // mean AX is carrying that signal alone on this macOS.
+        let cgsCounts = WindowEvents.fireCountsSnapshot()
+        if !cgsCounts.isEmpty {
+            let summary = cgsCounts.sorted { $0.key < $1.key }
+                .map { "\($0.key):\($0.value)" }.joined(separator: " ")
+            WindowDebug.log("cgs fire counts: \(summary)")
+        }
 
         // Housekeeping piggybacked on the poll tick: lastAxFire only needs
         // ~12s of history for the missed-by-ax gate; without pruning it
@@ -1218,6 +1228,15 @@ final class WindowsLifecycleObserver {
     /// the poll on its next tick would otherwise re-fire the same event.
     private func axCoveredRecently(wid: CGWindowID) -> Bool {
         WindowsAXObserver.shared.axFiredRecently(wid: wid, within: 12.0)
+    }
+
+    /// Whether the poll has already seen this window on a previous tick —
+    /// the "is this window actually new?" oracle for the CGS 1325 create
+    /// trigger. A space-MOVE fires 1325 too; a wid the poll has snapshotted
+    /// is a move, not a create, even when AX never installed observers on
+    /// it (unobservable apps).
+    func knownWindow(_ id: Int) -> Bool {
+        snapshot[id] != nil
     }
 
     /// JSON-able detail dict for bang dispatch.
@@ -1492,42 +1511,32 @@ final class FrontmostWindowObserver: RefCountedObserver {
 // MARK: - CGS window events (formerly Sources/DataSources/WindowEvents.swift)
 // =====================================================================
 
-// Window-level CGS notifications via SkyLight private SPI.
-//
-// Role after the AX-primary rework (Slice 2): CGS is the **secondary**
-// signal for things `WindowsAXObserver` can't see:
+// Window-level CGS notifications via SkyLight private SPI. AX stays
+// co-primary; CGS adds window-server latency (~1-5ms) and covers what AX
+// can't see:
 //   - 808 — window reordered (z-order). AX has no reordered notification.
-//   - 804 — window destroyed. AX already covers this with
-//           kAXUIElementDestroyedNotification, but yabai (the de facto
-//           authority for tilers) registers 804 unconditionally including
-//           on Tahoe, so we keep it as a belt-and-suspenders second
-//           destroy source — the host.bang fan-out is a no-op when AX
-//           fired first for the same wid.
+//   - 804 — window destroyed. Belt-and-suspenders with AX's
+//           kAXUIElementDestroyedNotification (yabai registers it on Tahoe).
+//   - 806/807 — moved/resized. Feed the same classify+coalesce pipeline as
+//           the AX notifications; also cover apps with unobservable AX trees.
+//   - 1322 — title changed; triggers the AX title re-read early.
+//   - 1325/1326 — window added/removed on a space. 1325 is the FAST create
+//           trigger (fires before slow AX trees publish) and the space-move
+//           signal for known windows.
 //   - 1508 — frontmost app changed. Distinct from AX's
 //            kAXFocusedWindowChangedNotification because 1508 fires on
 //            user-driven app activation specifically (mouse click,
 //            Cmd-Tab); AX focused-changed fires on programmatic focus too.
 //
-// Switch to `SLSRegisterConnectionNotifyProc` (yabai's pattern in
-// `src/yabai.c`) instead of the global `SLSRegisterNotifyProc`. yabai uses
-// the per-connection entry point for all its window/space subscriptions
-// and is the most-tested tiler on Tahoe; mirroring its choice means we
-// inherit its reliability profile.
-//
-// Event-ID source of truth: yabai's `src/yabai.c:322-334` enumerates the
-// IDs it registers (808 + 1327 + 1328 + 1202 + 1204 on pre-Tahoe; 808 +
-// 1327 + 1328 + 804 on Tahoe). This contradicts stackd's previous comment
-// that 804 was "no-fire on Tahoe" — yabai's Tahoe branch explicitly
-// registers 804 because that *is* the Tahoe destroy event. The previous
-// stackd intel (1325 / 1326) appears to have come from JankyBorders'
-// events.h; yabai doesn't use those IDs.
-//
-// Events explicitly DROPPED in this rewrite:
-//   1325 / 1326 — not in yabai's set; never fired reliably for the user.
-//   806 / 807 / 815 / 816 — Sequoia-only; AX now covers move / resize /
-//                           miniaturize / deminiaturize directly. The
-//                           previous 100ms TahoeSynthPoll backstop is
-//                           removed alongside.
+// Per-connection registration (`SLSRegisterConnectionNotifyProc`, yabai's
+// pattern in `src/yabai.c`) — and, load-bearing for the per-window codes:
+// `SLSRequestNotificationsForWindows` with the layer-0 window interest
+// list. The 2026-06 rewrite dropped 806/807/1325/1326 as "never fired
+// reliably" — the missing interest-list call is why; OmniWM subscribes
+// window ids and those codes fire on Tahoe. The per-code fire counters
+// (logged from the 10s poll tick) are the standing verification that they
+// keep firing across macOS bumps; codes stuck at zero degrade gracefully
+// to AX-only coverage.
 //
 // To rediscover IDs after a macOS bump: launch with STACKD_CGS_DEBUG=1
 // and the existing debug loop logs every event in [700, 2000).
@@ -1540,43 +1549,98 @@ private enum SkyLightWindowEvents {
     // (`src/yabai.c:322-334`) is the reference.
     typealias CGSConnectionCallback = @convention(c) (UInt32, UnsafeMutableRawPointer?, Int, UnsafeMutableRawPointer?, Int32) -> Void
     typealias RegisterNotifyProcFn  = @convention(c) (Int32, CGSConnectionCallback, UInt32, UnsafeMutableRawPointer?) -> Int32
+    // SLSRequestNotificationsForWindows(cid, wids, count) — the interest
+    // list. Per-window CGS events (806/807/1322/1325/1326) only fire for
+    // windows subscribed on your connection; registering the event codes
+    // alone stays silent. This missing call is why the 2026-06 rewrite
+    // concluded those codes "never fired reliably" — OmniWM registers the
+    // same codes AND subscribes window ids, and they fire on Tahoe.
+    // Treated as replace-not-append: the full list is re-issued on every
+    // create/destroy (safe under either semantic).
+    typealias RequestNotificationsFn = @convention(c) (Int32, UnsafePointer<UInt32>, Int32) -> Int32
 
     static let registerNotifyProc: RegisterNotifyProcFn? = SkyLight.sym("SLSRegisterConnectionNotifyProc")
+    static let requestNotifications: RequestNotificationsFn? = SkyLight.sym("SLSRequestNotificationsForWindows")
 }
 
-// CGS window event IDs we register, per yabai's canonical set:
-//   804  — window destroyed       (ACTIVE on Tahoe per yabai; payload:
-//                                  uint32 wid at offset 0)
-//   808  — window reordered       (all macOS; payload: uint32 wid)
-//   1508 — frontmost app changed  (no payload; surfaced as
-//                                  sd.window.focusedByMouse)
-private let kSDWindowClosed:        UInt32 = 804
-private let kSDWindowReordered:     UInt32 = 808
+// CGS window event IDs we register — yabai's canonical set plus the
+// per-window codes OmniWM proved live on Tahoe (given an interest list):
+//   804  — window destroyed       (payload: uint32 wid at offset 0)
+//   806  — window moved           (uint32 wid; needs interest list)
+//   807  — window resized         (uint32 wid; needs interest list)
+//   808  — window reordered       (uint32 wid)
+//   1322 — window title changed   (uint32 wid; needs interest list)
+//   1325 — window added to space  (uint64 spaceID @0 + uint32 wid @8;
+//                                  fires at window-server latency — the
+//                                  fast create trigger AND the space-move
+//                                  signal for known windows)
+//   1326 — window removed from space (same payload; destroy is covered by
+//                                  804, space-moves by 1325 on the new
+//                                  space — counted, not routed)
+//   1508 — frontmost app changed  (surfaced as sd.window.focusedByMouse)
+private let kSDWindowClosed:         UInt32 = 804
+private let kSDWindowMoved:          UInt32 = 806
+private let kSDWindowResized:        UInt32 = 807
+private let kSDWindowReordered:      UInt32 = 808
+private let kSDWindowTitleChanged:   UInt32 = 1322
+private let kSDSpaceWindowCreated:   UInt32 = 1325
+private let kSDSpaceWindowDestroyed: UInt32 = 1326
 private let kSDWindowFocusedByMouse: UInt32 = 1508
 
-// The shared callback. SkyLight invokes us off the main thread; we hop to main
-// before touching AppDelegate.shared / host so bang dispatch and WebView fan-out
-// stay on the runloop they were built on.
-//
-// Per-connection callback signature (yabai shape): (event, data, dataLen,
-// ctx, cid). All payloads carry uint32_t wid at offset 0 for the IDs we
-// register; 1508 has no payload.
-private let windowEventsCallback: SkyLightWindowEvents.CGSConnectionCallback = { eventType, data, dataLen, _, _ in
-    if eventType == kSDWindowFocusedByMouse {
-        WindowDebug.log("cgs evt=\(eventType) (focusedByMouse)")
-        DispatchQueue.main.async {
-            AppDelegate.shared?.host?.bang(name: "sd.window.focusedByMouse", detail: [:])
-        }
-        return
-    }
+/// Decoded CGS window event. Pure decode so the offset arithmetic is
+/// headless-testable — payload offsets per OmniWM's CGSEventObserver.
+enum CGSDecodedWindowEvent: Equatable {
+    case destroyed(wid: UInt32)
+    case moved(wid: UInt32)
+    case resized(wid: UInt32)
+    case reordered(wid: UInt32)
+    case titleChanged(wid: UInt32)
+    case spaceWindowCreated(wid: UInt32, spaceID: UInt64)
+    case spaceWindowDestroyed(wid: UInt32, spaceID: UInt64)
+    case frontmostByMouse
+    case ignored
+    case malformed
+}
 
-    guard let data = data, dataLen >= 4 else {
-        WindowDebug.log("cgs evt=\(eventType) (no payload, dataLen=\(dataLen))")
-        return
+enum CGSWindowEventDecoder {
+    static func decode(eventType: UInt32, data: UnsafeRawPointer?, length: Int) -> CGSDecodedWindowEvent {
+        func wid(at offset: Int) -> UInt32? {
+            guard let data = data, length >= offset + 4 else { return nil }
+            return data.loadUnaligned(fromByteOffset: offset, as: UInt32.self)
+        }
+        func space(at offset: Int) -> UInt64? {
+            guard let data = data, length >= offset + 8 else { return nil }
+            return data.loadUnaligned(fromByteOffset: offset, as: UInt64.self)
+        }
+        switch eventType {
+        case kSDWindowClosed:        return wid(at: 0).map { .destroyed(wid: $0) } ?? .malformed
+        case kSDWindowMoved:         return wid(at: 0).map { .moved(wid: $0) } ?? .malformed
+        case kSDWindowResized:       return wid(at: 0).map { .resized(wid: $0) } ?? .malformed
+        case kSDWindowReordered:     return wid(at: 0).map { .reordered(wid: $0) } ?? .malformed
+        case kSDWindowTitleChanged:  return wid(at: 0).map { .titleChanged(wid: $0) } ?? .malformed
+        case kSDSpaceWindowCreated:
+            guard let s = space(at: 0), let w = wid(at: 8) else { return .malformed }
+            return .spaceWindowCreated(wid: w, spaceID: s)
+        case kSDSpaceWindowDestroyed:
+            guard let s = space(at: 0), let w = wid(at: 8) else { return .malformed }
+            return .spaceWindowDestroyed(wid: w, spaceID: s)
+        case kSDWindowFocusedByMouse: return .frontmostByMouse
+        default:                      return .ignored
+        }
     }
-    let wid = data.load(as: UInt32.self)
-    WindowDebug.log("cgs evt=\(eventType) wid=\(wid)")
-    WindowEvents.handleModify(eventType: eventType, wid: wid)
+}
+
+// The shared callback. SkyLight invokes us off the main thread; we count
+// the fire (the "does this code actually fire on this macOS?" sensor the
+// poll tick logs), decode, then hop to main before touching
+// AppDelegate.shared / host so bang dispatch stays on the runloop it was
+// built on.
+private let windowEventsCallback: SkyLightWindowEvents.CGSConnectionCallback = { eventType, data, dataLen, _, _ in
+    WindowEvents.countFire(eventType)
+    let event = CGSWindowEventDecoder.decode(
+        eventType: eventType, data: data.map { UnsafeRawPointer($0) }, length: dataLen)
+    WindowDebug.log("cgs evt=\(eventType) → \(event)")
+    WindowEvents.route(event)
 }
 
 // Debug logger: prints every event ID + first 32 bytes of payload to stderr.
@@ -1596,15 +1660,18 @@ private let debugWindowEventsCallback: SkyLightWindowEvents.CGSConnectionCallbac
 enum WindowEvents {
     private static var cgsRegistered = false
 
-    /// Install the CGS callbacks. Idempotent; safe to call from AppDelegate.
-    /// SkyLight has no removeNotifyProc, so registration lives for the
-    /// lifetime of the process — matches the SpacesObserver pattern.
+    /// Install the CGS callbacks + the per-window interest list. Idempotent;
+    /// safe to call from AppDelegate. Registrations live for the lifetime of
+    /// the process by choice — SLSRemoveConnectionNotifyProc does exist
+    /// (OmniWM binds it), but there's nothing to tear down: the callback
+    /// no-ops cheaply when nothing consumes it.
     static func install() {
         guard !cgsRegistered, let reg = SkyLightWindowEvents.registerNotifyProc else { return }
         let cid = SkyLight.cid
-        // yabai's canonical set (src/yabai.c:322-334), trimmed to the
-        // events stackd uses. AX covers everything else.
-        for evt in [kSDWindowClosed, kSDWindowReordered, kSDWindowFocusedByMouse] {
+        for evt in [kSDWindowClosed, kSDWindowMoved, kSDWindowResized,
+                    kSDWindowReordered, kSDWindowTitleChanged,
+                    kSDSpaceWindowCreated, kSDSpaceWindowDestroyed,
+                    kSDWindowFocusedByMouse] {
             _ = reg(cid, windowEventsCallback, evt, nil)
         }
         // STACKD_CGS_DEBUG=1 → log every event in [700, 2000) so we can
@@ -1616,19 +1683,73 @@ enum WindowEvents {
             }
         }
         cgsRegistered = true
+        DispatchQueue.main.async { refreshWindowInterestList() }
     }
 
-    // MARK: - Bang fan-out
+    // MARK: - Per-window interest list
 
-    /// Secondary CGS signals: reordered (AX has no equivalent) + destroyed
-    /// (AX already fired this via kAXUIElementDestroyedNotification, but
-    /// 804 stays as belt-and-suspenders — host.bang's per-stack dedup is
-    /// the consumer's responsibility, and in practice AX wins the race).
-    fileprivate static func handleModify(eventType: UInt32, wid: UInt32) {
+    /// Subscribe every layer-0 window id on our connection so the
+    /// per-window codes (806/807/1322/1325/1326) fire. Re-issued in full on
+    /// create/destroy via `scheduleInterestRefresh` — full-list replace is
+    /// safe whether the SPI replaces or appends.
+    private static var interestRefreshPending = false
+
+    static func scheduleInterestRefresh() {
+        guard !interestRefreshPending else { return }
+        interestRefreshPending = true
+        // 500ms coalescing: a tooltip storm (one 804 per tooltip) re-issues
+        // once, not per event.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            interestRefreshPending = false
+            refreshWindowInterestList()
+        }
+    }
+
+    private static func refreshWindowInterestList() {
+        guard let request = SkyLightWindowEvents.requestNotifications else { return }
+        guard let raw = CGWindowListCopyWindowInfo([.optionAll, .excludeDesktopElements], kCGNullWindowID),
+              let list = raw as? [[String: Any]] else { return }
+        let wids: [UInt32] = list.compactMap { info in
+            guard (info[kCGWindowLayer as String] as? Int) == 0,
+                  let num = info[kCGWindowNumber as String] as? Int else { return nil }
+            return UInt32(num)
+        }
+        guard !wids.isEmpty else { return }
+        let status = wids.withUnsafeBufferPointer {
+            request(SkyLight.cid, $0.baseAddress!, Int32(wids.count))
+        }
+        WindowDebug.log("cgs interest list: \(wids.count) windows (status \(status))")
+    }
+
+    // MARK: - Fire counters (listener-actually-fires sensor)
+
+    /// Per-code fire counts, read by the 10s lifecycle poll's log line.
+    /// This is the CLAUDE.md "verify the listener actually fires" gate for
+    /// the newly-registered codes: if 806/807 stay at zero on some macOS
+    /// build even with the interest list, the counter says so and AX
+    /// remains co-primary — nothing regresses.
+    private static let fireCountLock = NSLock()
+    private static var fireCounts: [UInt32: Int] = [:]
+
+    static func countFire(_ eventType: UInt32) {
+        fireCountLock.lock()
+        fireCounts[eventType, default: 0] += 1
+        fireCountLock.unlock()
+    }
+
+    static func fireCountsSnapshot() -> [UInt32: Int] {
+        fireCountLock.lock()
+        defer { fireCountLock.unlock() }
+        return fireCounts
+    }
+
+    // MARK: - Routing
+
+    fileprivate static func route(_ event: CGSDecodedWindowEvent) {
         DispatchQueue.main.async {
             guard let host = AppDelegate.shared?.host else { return }
-            switch eventType {
-            case kSDWindowReordered:
+            switch event {
+            case .reordered(let wid):
                 // Overlay z-order repair: if an overlay panel is pinned to
                 // this window, the raise may have put the target ABOVE the
                 // panel without moving it — the frame-diff short-circuit in
@@ -1637,7 +1758,7 @@ enum WindowEvents {
                 // primary for the repin; tick's cadence is the backstop.
                 Overlay.notifyWindowReordered(wid: CGWindowID(wid))
                 host.bang(name: "sd.window.reordered", detail: ["id": Int(wid)])
-            case kSDWindowClosed:
+            case .destroyed(let wid):
                 // Targeted invalidation only. The previous invalidateAll()
                 // nuked every pid's AX map on EVERY 804 — and 804 fires for
                 // every window destroyed system-wide (tooltips, menus,
@@ -1653,12 +1774,68 @@ enum WindowEvents {
                     WindowsByID.invalidateCache(pid: pid, windowID: CGWindowID(wid))
                 }
                 host.bang(name: "sd.window.destroyed", detail: ["id": Int(wid)])
-            default:
+                scheduleInterestRefresh()
+            case .moved(let wid):
+                WindowsAXObserver.shared.cgsFrameEvent(.moved, wid: CGWindowID(wid))
+            case .resized(let wid):
+                WindowsAXObserver.shared.cgsFrameEvent(.resized, wid: CGWindowID(wid))
+            case .titleChanged(let wid):
+                WindowsAXObserver.shared.cgsTitleEvent(wid: CGWindowID(wid))
+            case .spaceWindowCreated(let wid, _):
+                handleSpaceWindowCreated(wid: wid, host: host)
+            case .spaceWindowDestroyed:
+                // Destroy rides 804; a space-move fires 1325 on the NEW
+                // space, which re-pushes sd.spaces.all. Counted only.
+                break
+            case .frontmostByMouse:
+                host.bang(name: "sd.window.focusedByMouse", detail: [:])
+            case .ignored, .malformed:
                 break
             }
         }
     }
 
+    /// 1325 wears two hats: for a window we already track it's a space
+    /// move (re-push the spaces channel); for an unknown-but-listed window
+    /// it's the FAST create trigger — the window server announces it
+    /// milliseconds after creation, long before slow AX trees (Electron)
+    /// publish kAXWindowCreatedNotification. The fan-out still rides the
+    /// CGWindowList-consistency ladder, but it starts at window-server
+    /// time instead of AX time.
+    private static func handleSpaceWindowCreated(wid: UInt32, host: StackHost) {
+        let cgWid = CGWindowID(wid)
+        if WindowsAXObserver.shared.pidFor(wid: cgWid) != nil
+            || WindowsLifecycleObserver.shared.knownWindow(Int(wid)) {
+            SpacesObserver.shared.fire()
+            return
+        }
+        // AX (or the poll) already announced this create — don't double-fire.
+        if WindowsAXObserver.shared.axFiredRecently(wid: cgWid, within: 12.0) { return }
+
+        // Snap from CGWindowList; layer-0 standard candidates only. Title
+        // via kCGWindowName is TCC-gated (screen recording) — empty is fine,
+        // AX fills it in on its own create/titleChanged pass.
+        guard let raw = CGWindowListCopyWindowInfo([.optionIncludingWindow], cgWid),
+              let list = raw as? [[String: Any]],
+              let info = list.first(where: { ($0[kCGWindowNumber as String] as? Int) == Int(wid) }),
+              (info[kCGWindowLayer as String] as? Int) == 0,
+              let pid = info[kCGWindowOwnerPID as String] as? Int
+        else { return }
+        let bounds = info[kCGWindowBounds as String] as? [String: CGFloat] ?? [:]
+        let snap = WindowsLifecycleObserver.Snap(
+            id: Int(wid),
+            pid: pid,
+            app: info[kCGWindowOwnerName as String] as? String ?? "",
+            title: info[kCGWindowName as String] as? String ?? "",
+            frame: CGRect(
+                x: bounds["X"] ?? 0, y: bounds["Y"] ?? 0,
+                width: bounds["Width"] ?? 0, height: bounds["Height"] ?? 0)
+        )
+        WindowDebug.log("cgs 1325 create trigger: wid=\(wid) app=\(snap.app)")
+        WindowsAXObserver.shared.markExternallyAnnounced(wid: cgWid)
+        WindowLifecycleFanout.fireCreated(host: host, snap: snap)
+        scheduleInterestRefresh()
+    }
 }
 
 // =====================================================================
@@ -1970,12 +2147,12 @@ enum Spaces {
 //          interaction that NSWorkspace's activeSpaceDidChange doesn't fire on
 //          when no active-space change happens)
 //
-// SkyLight exposes no public "remove notify" entry point, so once registered
-// the callback lives for the process. We guard registration with a static
-// flag and route into the singleton; Token cancel only tears down the
-// NSWorkspace / NSApplication observers (the CGS callback no-ops once
-// SpacesObserver has no subscribers because fire() iterates an empty subs
-// dict).
+// The registration is deliberately process-lifetime — SLSRemoveConnectionNotifyProc
+// exists (OmniWM binds it) but there's nothing worth tearing down. We guard
+// registration with a static flag and route into the singleton; Token cancel
+// only tears down the NSWorkspace / NSApplication observers (the CGS callback
+// no-ops once SpacesObserver has no subscribers because fire() iterates an
+// empty subs dict).
 private let kCGSEventSpaceCreated:        UInt32 = 1327
 private let kCGSEventSpaceDestroyed:      UInt32 = 1328
 private let kCGSEventMissionControlEnter: UInt32 = 1204
@@ -2324,6 +2501,33 @@ final class WindowsAXObserver {
         return nil
     }
 
+    /// Stamp the recency map for an announcement made on another channel
+    /// (CGS 1325 create fan-out) so the AX create that lands moments later
+    /// — and the 10s poll — suppress their duplicate.
+    func markExternallyAnnounced(wid: CGWindowID) {
+        lastAxFire[wid] = Date().timeIntervalSince1970
+    }
+
+    /// CGS 806/807 entry into the same classify+coalesce pipeline the AX
+    /// moved/resized notifications use. Frame read from CGWindowList —
+    /// window-server ground truth, no AX round-trip — which also covers
+    /// windows whose apps never published an observable AX tree.
+    func cgsFrameEvent(_ kind: FrameBangCoalescer.Kind, wid: CGWindowID) {
+        guard let frame = WindowsByID.cgBounds(windowID: wid) else { return }
+        dispatchFrameBang(kind, wid: wid, frame: frame, source: "cgs")
+    }
+
+    /// CGS 1322 → the existing AX title diff for windows we track. The
+    /// title itself still reads via AX (kCGWindowName is screen-recording-
+    /// TCC-gated); 1322 just makes the read happen at window-server
+    /// latency instead of waiting for kAXTitleChangedNotification.
+    /// onTitleChanged no-ops when the title didn't actually change.
+    func cgsTitleEvent(wid: CGWindowID) {
+        guard let pid = pidFor(wid: wid), let entry = windows[pid]?[wid] else { return }
+        let app = NSRunningApplication(processIdentifier: pid)?.localizedName ?? ""
+        onTitleChanged(pid: pid, wid: wid, app: app, window: entry.element)
+    }
+
     // Install retry ladders. Launch path mirrors yabai's
     // kAXErrorCannotComplete retry (application.c:93-96) with tail entries
     // for slow-AX apps (Electron can take >1s to vend AXWindows). Startup
@@ -2552,9 +2756,18 @@ final class WindowsAXObserver {
         lastTitle[pid, default: [:]][wid] = title
 
         if firing {
+            // CGS 1325 usually beats AX here (window-server latency vs. AX
+            // tree publication) and already ran the create fan-out — check
+            // the recency map BEFORE stamping it or the check always passes.
+            let alreadyAnnounced = axFiredRecently(wid: wid, within: 12.0)
             lastAxFire[wid] = Date().timeIntervalSince1970
-            WindowDebug.log("ax: window created pid=\(pid) wid=\(wid) app=\(app) title='\(title)'")
-            WindowsLifecycleObserver.shared.onCreate?(snap)
+            WindowEvents.scheduleInterestRefresh()
+            if alreadyAnnounced {
+                WindowDebug.log("ax: window created pid=\(pid) wid=\(wid) — already announced (cgs), bang suppressed")
+            } else {
+                WindowDebug.log("ax: window created pid=\(pid) wid=\(wid) app=\(app) title='\(title)'")
+                WindowsLifecycleObserver.shared.onCreate?(snap)
+            }
         }
     }
 
@@ -2567,6 +2780,7 @@ final class WindowsAXObserver {
         FrameLedger.shared.clear(windowID: wid)
         frameBangCoalescer.purge(windowID: wid)
         heldFrameBangs = heldFrameBangs.filter { $0.key.windowID != wid }
+        WindowEvents.scheduleInterestRefresh()
         WindowDebug.log("ax: window destroyed pid=\(pid) wid=\(wid)")
         let snap = WindowsLifecycleObserver.Snap(
             id: Int(wid), pid: Int(pid), app: app, title: title, frame: .zero
@@ -2635,20 +2849,24 @@ final class WindowsAXObserver {
     private var heldFrameBangs: [FrameBangCoalescer.Key: [String: Any]] = [:]
 
     private func fireFrameBang(_ kind: FrameBangCoalescer.Kind, pid: pid_t, wid: CGWindowID, window: AXUIElement) {
-        let frame = axWindowFrame(window) ?? .zero
+        dispatchFrameBang(kind, wid: wid, frame: axWindowFrame(window) ?? .zero, source: "ax")
+    }
+
+    fileprivate func dispatchFrameBang(_ kind: FrameBangCoalescer.Kind, wid: CGWindowID, frame: CGRect, source: String) {
         lastAxFire[wid] = Date().timeIntervalSince1970
         if WindowMotionEngine.shared.isAnimating(windowID: wid) {
-            WindowDebug.log("ax: \(kind.rawValue) swallowed (animating) pid=\(pid) wid=\(wid)")
+            WindowDebug.log("\(source): \(kind.rawValue) swallowed (animating) wid=\(wid)")
             return
         }
         let isSelf = FrameLedger.shared.isSelf(
             windowID: wid, observed: frame,
             now: CFAbsoluteTimeGetCurrent(), animating: false
         )
-        WindowDebug.log("ax: window \(kind.rawValue) pid=\(pid) wid=\(wid) self=\(isSelf)")
+        WindowDebug.log("\(source): window \(kind.rawValue) wid=\(wid) self=\(isSelf)")
         let detail: [String: Any] = [
             "id": Int(wid),
             "self": isSelf,
+            "source": source,
             "frame": [
                 "x": Int(frame.origin.x), "y": Int(frame.origin.y),
                 "w": Int(frame.size.width), "h": Int(frame.size.height)
