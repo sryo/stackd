@@ -16,11 +16,13 @@ import CoreGraphics
 //      every `sd.window.*` consumer relies on. Stable, no side effects.
 //
 //   2. `Windows.all()` shape contract — `CGWindowListCopyWindowInfo` is a
-//      public, no-prompt read. The test process runs on a real macOS host,
-//      so the inventory is non-empty in practice, and we can characterize
-//      the dict contract (id / app / pid / title / onscreen / frame{x,y,w,h})
-//      that JS consumers depend on without depending on which specific
-//      windows are open.
+//      public, no-prompt read. We characterize the dict contract (id / app /
+//      pid / title / onscreen / frame{x,y,w,h}) that JS consumers depend on
+//      without depending on which specific windows are open. Non-emptiness
+//      is asserted only for `includeNonStandard: true` and only when raw
+//      CGWindowList carries qualifying candidates — the default list's
+//      isStandard filter rides on third-party AX state that headless
+//      sessions never satisfy. See `rawWindowCandidatesExist`.
 //
 //   3. Negative branches of every `WindowsByID.*` reader for an obviously-
 //      invalid CGWindowID — `elementFor(windowID:)` walks CGWindowList and
@@ -55,6 +57,29 @@ import CoreGraphics
 // Pattern mirrors AppsTests + MenubarItemsTests: pure helpers get the full
 // table-driven treatment; AX-coupled readers get negative-input contract
 // pinning so the JS-visible return type stays deterministic.
+
+// Whether raw CGWindowList carries at least one row decode promises to keep
+// under includeNonStandard: true — same field requirements as decode's
+// guard-let chain, minus the own-pid exclusion it applies. The default
+// Windows.all() additionally filters on the AX isStandard probe, and that
+// depends on third-party processes' live AX state (headless CI sessions
+// resolve none, even with AXIsProcessTrusted() granted) — so the default
+// list's count is a fact about the environment, not about decode, and is
+// never asserted. Same capability-gate pattern as bluetoothTCCGranted in
+// DevicesTests: assert hard where the environment can deliver, skip where
+// it can't.
+private var rawWindowCandidatesExist: Bool {
+    guard let raw = CGWindowListCopyWindowInfo([.optionAll, .excludeDesktopElements], kCGNullWindowID)
+            as? [[String: Any]] else { return false }
+    let ownPid = Int(ProcessInfo.processInfo.processIdentifier)
+    return raw.contains { info in
+        info[kCGWindowNumber as String] is Int &&
+        (info[kCGWindowLayer as String] as? Int) == 0 &&
+        info[kCGWindowOwnerName as String] is String &&
+        (info[kCGWindowOwnerPID as String] as? Int).map { $0 != ownPid } == true &&
+        info[kCGWindowBounds as String] is [String: CGFloat]
+    }
+}
 
 func registerWindowsTests() {
     // MARK: - WindowsLifecycleObserver.detail (pure: Snap → JSON dict)
@@ -120,14 +145,19 @@ func registerWindowsTests() {
 
     // MARK: - Windows.all() — public CGWindowList shape contract
 
-    test("Windows.all returns the documented per-entry keys") {
-        // On an interactive macOS host, at least the Dock / Finder /
-        // WindowServer helper produce normal-layer windows. Headless CI
-        // runners have NO windows in the GUI session, so an empty list is
-        // a property of the environment, not a bug — the shape contract
-        // is vacuous there. Any interactive host runs the real assertions.
-        let entries = Windows.all()
-        guard let first = entries.first else { return }
+    test("Windows.all keeps raw candidates (includeNonStandard) with the documented per-entry keys") {
+        // includeNonStandard: true keeps every normal-layer non-own CGWindow,
+        // so with raw candidates present, emptiness means decode's field
+        // extraction broke — assertable in any session that has windows at
+        // all. (The default Windows.all() additionally filters on the AX
+        // isStandard probe, which resolves nothing in headless sessions —
+        // its count is never asserted, see rawWindowCandidatesExist.)
+        let entries = Windows.all(includeNonStandard: true)
+        guard let first = entries.first else {
+            try expect(!rawWindowCandidatesExist,
+                       "raw CGWindowList has normal-layer candidates but decode produced 0 rows")
+            return
+        }
         try expect(first["id"] is Int, "id should be Int (CGWindowID)")
         try expect(first["app"] is String, "app should be String (owner name)")
         try expect(first["pid"] is Int, "pid should be Int (owner pid)")
@@ -140,7 +170,7 @@ func registerWindowsTests() {
         // The `decode` helper flattens kCGWindowBounds (CGFloat dict) into
         // an Int-keyed sub-dict. Every entry should have all four keys —
         // a missing dimension is a bug that breaks any JS frame consumer.
-        for entry in Windows.all() {
+        for entry in Windows.all(includeNonStandard: true) {
             guard let frame = entry["frame"] as? [String: Int] else {
                 throw Expectation(message: "frame not [String: Int] in \(entry)")
             }
@@ -154,9 +184,15 @@ func registerWindowsTests() {
     test("Windows.all ids are unique (one row per CGWindowID)") {
         // CGWindowList keys by window number; if `decode` ever dropped that
         // invariant, JS dedup logic in tilers / window switchers would
-        // double-count the same window. Vacuous on a windowless headless
-        // CI runner (see the shape-contract test above).
-        let ids = Windows.all().compactMap { $0["id"] as? Int }
+        // double-count the same window. includeNonStandard for the widest
+        // row set; emptiness only counts as a failure when raw candidates
+        // exist (see rawWindowCandidatesExist).
+        let ids = Windows.all(includeNonStandard: true).compactMap { $0["id"] as? Int }
+        guard !ids.isEmpty else {
+            try expect(!rawWindowCandidatesExist,
+                       "no ids extracted from Windows.all despite raw CGWindowList candidates")
+            return
+        }
         try expectEqual(Set(ids).count, ids.count)
     }
 
