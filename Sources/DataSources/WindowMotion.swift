@@ -197,13 +197,17 @@ struct MotionPlanner {
         for windowID in active.keys.sorted() {
             guard var reg = active[windowID] else { continue }
 
-            if reg.startTime == nil {
+            let startTime: Double
+            if let assigned = reg.startTime {
+                startTime = assigned
+            } else {
+                startTime = now
                 reg.startTime = now
                 if reg.easing == .spring {
                     reg.springs = Self.makeSprings(from: reg.from, to: reg.to, seed: reg.seedVelocity)
                 }
             }
-            let elapsed = max(0, now - (reg.startTime ?? now))
+            let elapsed = max(0, now - startTime)
 
             if Self.isComplete(reg, elapsed: elapsed) {
                 writes.append(FrameWrite(windowID: windowID, frame: reg.to.motionRounded, isFinal: true))
@@ -334,8 +338,7 @@ final class FrameLedger {
         writeGeneration[windowID] = nil
     }
 
-    func isSelf(windowID: CGWindowID, observed: CGRect, now: Double, animating: Bool) -> Bool {
-        if animating { return true }
+    func isSelf(windowID: CGWindowID, observed: CGRect, now: Double) -> Bool {
         guard let applied = lastApplied[windowID] else { return false }
         guard now - applied.at <= Self.echoTTL else { return false }
         let q = sizeQuantum[windowID] ?? .zero
@@ -422,8 +425,12 @@ final class WindowMotionEngine {
         easing: MotionEasing,
         completion: @escaping (Bool) -> Void
     ) {
+        // One element resolution; the from-frame reads off the element
+        // directly. WindowsByID.frame(windowID:) would repeat the full
+        // CGWindowList walk elementFor just paid — twice per window at
+        // the exact moment the first animation frame should render.
         guard let el = WindowsByID.elementFor(windowID: windowID),
-              let current = WindowsByID.frame(windowID: windowID)
+              let current = Self.axFrame(of: el)
         else {
             completion(false)
             return
@@ -458,6 +465,24 @@ final class WindowMotionEngine {
 
     func isAnimating(windowID: CGWindowID) -> Bool {
         planner.isAnimating(windowID)
+    }
+
+    /// Frame read straight off an already-resolved element. Fine as the
+    /// animation's from-frame: at animate() time no write is in flight for
+    /// this window, so the AX-cached-requested-value staleness that makes
+    /// probe read-backs use CG bounds doesn't apply.
+    private static func axFrame(of element: AXUIElement) -> CGRect? {
+        var posRef: CFTypeRef?
+        var sizeRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, kAXPositionAttribute as CFString, &posRef) == .success,
+              AXUIElementCopyAttributeValue(element, kAXSizeAttribute as CFString, &sizeRef) == .success
+        else { return nil }
+        var pos = CGPoint.zero
+        var size = CGSize.zero
+        guard let posVal = posRef, AXValueGetValue(posVal as! AXValue, .cgPoint, &pos),
+              let sizeVal = sizeRef, AXValueGetValue(sizeVal as! AXValue, .cgSize, &size)
+        else { return nil }
+        return CGRect(origin: pos, size: size)
     }
 
     private func ensureClock() {

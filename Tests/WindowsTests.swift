@@ -475,6 +475,31 @@ func registerWindowsTests() {
     //  window, which only fires on real Cmd+M — no tab-switch ambiguity to
     //  gate against. AX is the right primitive for this.)
 
+    // MARK: - CreateAnnouncementLedger — single-owner create dedup
+    //
+    // All three create announcers (AX observer, CGS 1325 fast path, 10s
+    // poll) funnel through WindowLifecycleFanout.fireCreated, which
+    // check-and-marks against this ledger. One owner, so no announcer can
+    // forget half the protocol (the failure mode behind the 2026-07-02
+    // dropped-creates regression).
+
+    test("CreateAnnouncementLedger announces once per window per TTL") {
+        var l = CreateAnnouncementLedger()
+        try expect(l.shouldAnnounce(id: 1, now: 0), "first announce passes")
+        try expect(!l.shouldAnnounce(id: 1, now: 1.0), "second within TTL dedups")
+        try expect(l.shouldAnnounce(id: 2, now: 1.0), "windows must not couple")
+        try expect(l.shouldAnnounce(id: 1, now: 0 + CreateAnnouncementLedger.ttl + 0.1),
+                   "post-TTL re-announce passes (window id reuse)")
+    }
+
+    test("CreateAnnouncementLedger read-only recency view for the poll gate") {
+        var l = CreateAnnouncementLedger()
+        try expect(!l.announcedRecently(id: 3, now: 0), "unknown id")
+        _ = l.shouldAnnounce(id: 3, now: 0)
+        try expect(l.announcedRecently(id: 3, now: 5.0), "inside TTL")
+        try expect(!l.announcedRecently(id: 3, now: CreateAnnouncementLedger.ttl + 0.1), "expired")
+    }
+
     // MARK: - Batch — all-AX queued commit
     //
     // History being pinned: the original batch split one window's geometry

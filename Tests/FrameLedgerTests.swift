@@ -13,21 +13,16 @@ func registerFrameLedgerTests() {
     test("observed frame near a recent write classifies as self") {
         let l = FrameLedger()
         l.recordWrite(windowID: 1, frame: rect(100, 100, 800, 600), now: 10.0)
-        try expect(l.isSelf(windowID: 1, observed: rect(100, 100, 800, 600), now: 10.3, animating: false), "exact echo")
-        try expect(l.isSelf(windowID: 1, observed: rect(105, 98, 792, 611), now: 10.3, animating: false), "echo within tolerance")
+        try expect(l.isSelf(windowID: 1, observed: rect(100, 100, 800, 600), now: 10.3), "exact echo")
+        try expect(l.isSelf(windowID: 1, observed: rect(105, 98, 792, 611), now: 10.3), "echo within tolerance")
     }
 
     test("foreign frames and stale echoes classify as external") {
         let l = FrameLedger()
         l.recordWrite(windowID: 1, frame: rect(100, 100, 800, 600), now: 10.0)
-        try expect(!l.isSelf(windowID: 1, observed: rect(400, 100, 800, 600), now: 10.2, animating: false), "user moved it 300px")
-        try expect(!l.isSelf(windowID: 1, observed: rect(100, 100, 800, 600), now: 12.0, animating: false), "echo TTL expired")
-        try expect(!l.isSelf(windowID: 2, observed: rect(100, 100, 800, 600), now: 10.1, animating: false), "never-written window")
-    }
-
-    test("active animation classifies everything on that window as self") {
-        let l = FrameLedger()
-        try expect(l.isSelf(windowID: 3, observed: rect(0, 0, 1, 1), now: 0, animating: true), "animating = ours by construction")
+        try expect(!l.isSelf(windowID: 1, observed: rect(400, 100, 800, 600), now: 10.2), "user moved it 300px")
+        try expect(!l.isSelf(windowID: 1, observed: rect(100, 100, 800, 600), now: 12.0), "echo TTL expired")
+        try expect(!l.isSelf(windowID: 2, observed: rect(100, 100, 800, 600), now: 10.1), "never-written window")
     }
 
     test("verify converges on an honored frame and within a learned quantum") {
@@ -58,7 +53,7 @@ func registerFrameLedgerTests() {
         _ = l.verify(windowID: 6, target: target, observed: clamped)
         _ = l.verify(windowID: 6, target: target, observed: clamped)
         // The app's own clamp echo must classify as self — WE caused it.
-        try expect(l.isSelf(windowID: 6, observed: clamped, now: 0.1, animating: false), "clamp echo is ours")
+        try expect(l.isSelf(windowID: 6, observed: clamped, now: 0.1), "clamp echo is ours")
     }
 
     test("retry budget resets after convergence") {
@@ -90,7 +85,7 @@ func registerFrameLedgerTests() {
         l.recordWrite(windowID: 8, frame: rect(1, 1, 2, 2), now: 0)
         _ = l.verify(windowID: 8, target: rect(0, 0, 800, 600), observed: rect(0, 0, 793, 596))
         l.clear(windowID: 8)
-        try expect(!l.isSelf(windowID: 8, observed: rect(1, 1, 2, 2), now: 0.1, animating: false), "lastApplied must be gone")
+        try expect(!l.isSelf(windowID: 8, observed: rect(1, 1, 2, 2), now: 0.1), "lastApplied must be gone")
         try expectEqual(l.verify(windowID: 8, target: rect(0, 0, 800, 600), observed: rect(0, 0, 793, 596)), .retry, "retry budget must be fresh")
     }
 }
