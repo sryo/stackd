@@ -1772,11 +1772,23 @@ private enum SkyLightSpaces {
     typealias CGSConnectionCallback = @convention(c) (UInt32, UnsafeMutableRawPointer?, Int, UnsafeMutableRawPointer?, Int32) -> Void
     typealias RegisterNotifyProcFn  = @convention(c) (Int32, CGSConnectionCallback, UInt32, UnsafeMutableRawPointer?) -> Int32
 
+    // Write side (hs.spaces.moveWindowToSpace parity). Signatures per
+    // yabai/src/misc/extern.h and Hammerspoon's hs.spaces implementation:
+    //   void SLSMoveWindowsToManagedSpace(int cid, CFArrayRef wids, uint64 sid)
+    //   CGError SLSSpaceSetCompatID(int cid, uint64 sid, int workspace)
+    //   CGError SLSSetWindowListWorkspace(int cid, uint32 *wids, int count, int workspace)
+    typealias MoveWindowsToManagedSpaceFn = @convention(c) (Int32, CFArray, UInt64) -> Void
+    typealias SpaceSetCompatIDFn          = @convention(c) (Int32, UInt64, Int32) -> Int32
+    typealias SetWindowListWorkspaceFn    = @convention(c) (Int32, UnsafePointer<UInt32>, Int32, Int32) -> Int32
+
     static let copyManagedSpaces:    CopyManagedSpacesFn?    = SkyLight.sym("SLSCopyManagedDisplaySpaces")
     static let spaceGetType:         SpaceGetTypeFn?         = SkyLight.sym("SLSSpaceGetType")
     static let getActiveSpace:       GetActiveSpaceFn?       = SkyLight.sym("SLSGetActiveSpace")
     static let copySpacesForWindows: CopySpacesForWindowsFn? = SkyLight.sym("SLSCopySpacesForWindows")
     static let registerNotifyProc:   RegisterNotifyProcFn?   = SkyLight.sym("SLSRegisterConnectionNotifyProc")
+    static let moveWindowsToManagedSpace: MoveWindowsToManagedSpaceFn? = SkyLight.sym("SLSMoveWindowsToManagedSpace")
+    static let spaceSetCompatID:          SpaceSetCompatIDFn?          = SkyLight.sym("SLSSpaceSetCompatID")
+    static let setWindowListWorkspace:    SetWindowListWorkspaceFn?    = SkyLight.sym("SLSSetWindowListWorkspace")
 }
 
 enum Spaces {
@@ -1896,6 +1908,57 @@ enum Spaces {
             }
         }
         return out
+    }
+
+    /// Move a window to another user space — hs.spaces.moveWindowToSpace
+    /// parity, closing windowscape's space-move gap (2026-06-10 QA round).
+    /// Fullscreen/tiled target spaces (SLSSpaceGetType == 4) are refused,
+    /// mirroring hs.spaces.
+    ///
+    /// Two routes, each verified via windowSpaces (the same SLS query
+    /// sd.spaces.forWindow vends), because SLSMoveWindowsToManagedSpace
+    /// silently stopped moving other-process windows on macOS 14.5:
+    ///  A. SLSMoveWindowsToManagedSpace — the direct call.
+    ///  B. yabai's workaround: tag the target space with a compat ID,
+    ///     SLSSetWindowListWorkspace the window onto that workspace tag,
+    ///     clear the tag.
+    /// Returns { ok, spaces } where spaces is the VERIFIED post-move space
+    /// list — callers update their caches from it instead of polling for
+    /// convergence. ok=false leaves the window wherever it was.
+    static func moveWindow(windowID: UInt32, toSpace spaceID: UInt64) -> [String: Any] {
+        let cid = SkyLight.cid
+        func payload(_ ok: Bool) -> [String: Any] {
+            ["ok": ok,
+             "spaces": windowSpaces(windowID: windowID).map { NSNumber(value: $0) }]
+        }
+        guard windowID != 0, spaceID != 0 else { return payload(false) }
+        if let getType = SkyLightSpaces.spaceGetType, getType(cid, spaceID) == 4 {
+            return payload(false)
+        }
+        func landed() -> Bool { windowSpaces(windowID: windowID).contains(spaceID) }
+        if landed() { return payload(true) }
+
+        if let move = SkyLightSpaces.moveWindowsToManagedSpace {
+            move(cid, [NSNumber(value: windowID)] as CFArray, spaceID)
+            if landed() { notifySpacesChanged(); return payload(true) }
+        }
+        if let setCompat = SkyLightSpaces.spaceSetCompatID,
+           let setWorkspace = SkyLightSpaces.setWindowListWorkspace {
+            // yabai's magic workspace tag ("yabe" in ASCII). Any nonzero
+            // value works; matching yabai's keeps the two tools from
+            // littering the space with distinct compat IDs.
+            let compatTag: Int32 = 0x7961_6265
+            _ = setCompat(cid, spaceID, compatTag)
+            var wid = windowID
+            _ = setWorkspace(cid, &wid, 1, compatTag)
+            _ = setCompat(cid, spaceID, 0)
+            if landed() { notifySpacesChanged(); return payload(true) }
+        }
+        return payload(false)
+    }
+
+    private static func notifySpacesChanged() {
+        DispatchQueue.main.async { SpacesObserver.shared.fire() }
     }
 }
 
