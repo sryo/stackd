@@ -199,8 +199,18 @@ cmd_restart() {
 }
 
 cmd_rebuild() {
-  log "./build.sh"
-  ( cd "$REPO_ROOT" && ./build.sh )
+  # Launchd runs the PACKAGED bundle (/Applications/stackd.app), not
+  # .build/stackd — rebuilding without repackaging relaunches the STALE
+  # bundle (the 2026-07-02 "new APIs missing at runtime" trap).
+  # package-app.sh runs ./build.sh itself, so the non-launchd branch is
+  # the only one that needs a direct build.
+  if launchd_managed; then
+    log "launchd-managed — package-app.sh (build + bundle + sign)"
+    ( cd "$REPO_ROOT" && scripts/package-app.sh )
+  else
+    log "./build.sh"
+    ( cd "$REPO_ROOT" && ./build.sh )
+  fi
   cmd_restart "$@"
 }
 
