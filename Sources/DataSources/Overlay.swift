@@ -61,6 +61,13 @@ final class OverlayHandle: NSObject, WKNavigationDelegate {
     // short-circuit alone would then never reorder and the border would
     // sit invisible behind its own target).
     private(set) var repinRequested: Bool = false
+    // Points the panel extends BEYOND the target frame on every side.
+    // 0 = panel pins exactly to the target (legacy behavior). A border
+    // stack passes its ring thickness so the CSS border draws in the
+    // outset band AROUND the window instead of covering ~thickness px of
+    // window content. Survives setTarget — retargeting a border overlay
+    // keeps its ring geometry.
+    private(set) var outset: CGFloat = 0
     // Ticks since the last SLSTransactionOrderWindow. Drives the
     // low-frequency safety reorder in tick() — see OverlayRepinPolicy.
     private var ticksSinceReorder: Int = 0
@@ -70,11 +77,13 @@ final class OverlayHandle: NSObject, WKNavigationDelegate {
     private var pendingTargetJS: String?
     private var released: Bool = false
 
-    init(id: Int, targetWID: CGWindowID, panel: NSPanel, webView: WKWebView) {
+    init(id: Int, targetWID: CGWindowID, panel: NSPanel, webView: WKWebView,
+         outset: CGFloat = 0) {
         self.id = id
         self.targetWID = targetWID
         self.panel = panel
         self.webView = webView
+        self.outset = OverlayGeometry.sanitizeOutset(outset)
         super.init()
         webView.navigationDelegate = self
     }
@@ -89,6 +98,18 @@ final class OverlayHandle: NSObject, WKNavigationDelegate {
         if released { return }
         if newWID == targetWID { return }
         targetWID = newWID
+        forceRepin()
+    }
+
+    /// Change how far the panel extends beyond the target on every side.
+    /// Requests a repin so the next tick re-runs setFrame even when the
+    /// target itself hasn't moved — the panel frame derives from
+    /// (target, outset), and only the outset half changed.
+    func setOutset(_ n: CGFloat) {
+        if released { return }
+        let sane = OverlayGeometry.sanitizeOutset(n)
+        if sane == outset { return }
+        outset = sane
         forceRepin()
     }
 
@@ -121,8 +142,9 @@ final class OverlayHandle: NSObject, WKNavigationDelegate {
     }
     private var pendingEvalJS: String?
 
-    /// Per-tick: reposition the panel to the target's current bounds and
-    /// push `window.sd.target = {x,y,w,h}` into the overlay's WebView.
+    /// Per-tick: reposition the panel to the target's current bounds
+    /// (grown by `outset` on all sides) and push `window.sd.target =
+    /// {x,y,w,h,outset}` in PANEL coordinates into the overlay's WebView.
     /// `targetFrame` comes from SLSGetWindowBounds(targetWID) (top-left,
     /// screen-points).
     func tick(targetFrame: CGRect) {
@@ -132,7 +154,8 @@ final class OverlayHandle: NSObject, WKNavigationDelegate {
         // The target's top edge in CGS == the panel's top edge in AppKit;
         // AppKit setFrame uses the bottom edge, so origin.y becomes
         // (screen height - targetFrame.maxY).
-        let appKitFrame = OverlayHandle.cgsToAppKit(targetFrame)
+        let panelFrame = OverlayGeometry.panelFrame(target: targetFrame, outset: outset)
+        let appKitFrame = OverlayHandle.cgsToAppKit(panelFrame)
 
         // A requested repin invalidates the frame cache so BOTH the
         // setFrame and the reorder below re-run this tick.
@@ -161,9 +184,11 @@ final class OverlayHandle: NSObject, WKNavigationDelegate {
         }
 
         // Push target geometry into the WebView. Spec authors absolute-position
-        // their elements off window.sd.target.{x,y,w,h}. (0,0) is the panel's
-        // top-left, which is also the target's top-left.
-        let js = "window.sd=window.sd||{};window.sd.target={x:0,y:0,w:\(Int(targetFrame.width)),h:\(Int(targetFrame.height))};window.dispatchEvent(new CustomEvent('sd:target',{detail:window.sd.target}));"
+        // their elements off window.sd.target.{x,y,w,h,outset} — panel
+        // coordinates, so the target's top-left sits at (outset, outset).
+        // With outset 0 that's (0,0), byte-compatible with the pre-outset
+        // payload plus the new field.
+        let js = OverlayGeometry.targetPayloadJS(targetFrame: targetFrame, outset: outset)
         if navigationReady {
             webView.evaluateJavaScript(js, completionHandler: nil)
         } else {
@@ -238,6 +263,35 @@ final class OverlayHandle: NSObject, WKNavigationDelegate {
         abs(a.origin.y - b.origin.y) < 0.5 &&
         abs(a.size.width  - b.size.width)  < 0.5 &&
         abs(a.size.height - b.size.height) < 0.5
+    }
+}
+
+// MARK: - Overlay tick geometry (pure, testable)
+
+/// Pure geometry for the window-tracking overlay tick — panel placement and
+/// the per-tick `window.sd.target` payload, both parameterized by `outset`.
+/// Separate + pure so the outset math is testable without an NSPanel.
+enum OverlayGeometry {
+    /// Non-finite or negative outsets fall back to 0 — a negative outset
+    /// would shrink the panel INSIDE the target and, past half the target
+    /// size, hand NSPanel a negative-size frame.
+    static func sanitizeOutset(_ n: CGFloat) -> CGFloat {
+        n.isFinite && n > 0 ? n : 0
+    }
+
+    /// Panel frame for a target window frame grown by `outset` on all four
+    /// sides. Same coordinate space in as out (the tick passes CGS top-left).
+    /// Outset 0 is the identity — today's pin-exactly behavior.
+    static func panelFrame(target: CGRect, outset: CGFloat) -> CGRect {
+        target.insetBy(dx: -outset, dy: -outset)
+    }
+
+    /// The per-tick JS push, in PANEL coordinates: the target's top-left
+    /// sits at (outset, outset) inside the panel. Outset 0 reproduces the
+    /// legacy `{x:0,y:0,w,h}` payload plus the new `outset` field.
+    static func targetPayloadJS(targetFrame: CGRect, outset: CGFloat) -> String {
+        let o = Int(outset)
+        return "window.sd=window.sd||{};window.sd.target={x:\(o),y:\(o),w:\(Int(targetFrame.width)),h:\(Int(targetFrame.height)),outset:\(o)};window.dispatchEvent(new CustomEvent('sd:target',{detail:window.sd.target}));"
     }
 }
 
@@ -356,7 +410,8 @@ enum Overlay {
         id: Int,
         html: String,
         css: String,
-        js: String
+        js: String,
+        outset: CGFloat = 0
     ) -> OverlayHandle? {
         // Initial frame: 1x1 offscreen. The first tick reshapes to the
         // target's actual bounds. We can't size correctly here because
@@ -391,6 +446,7 @@ enum Overlay {
         panel.hidesOnDeactivate = false
         panel.contentView = webView
 
+        let saneOutset = Int(OverlayGeometry.sanitizeOutset(outset))
         let doc = """
         <!doctype html><html><head><meta charset="utf-8">
         <style>
@@ -403,8 +459,9 @@ enum Overlay {
           // Buffer for the daemon's per-vsync sd.target push. The Bridge
           // sets window.sd.target before dispatching 'sd:target'; stack
           // scripts can read either the global or the event payload.
+          // Panel coords: the target's top-left is at (outset, outset).
           window.sd = window.sd || {};
-          window.sd.target = { x: 0, y: 0, w: 0, h: 0 };
+          window.sd.target = { x: \(saneOutset), y: \(saneOutset), w: 0, h: 0, outset: \(saneOutset) };
         </script>
         <script>
           \(js)
@@ -418,7 +475,8 @@ enum Overlay {
         // cross-process z-ordering.
         panel.orderFrontRegardless()
 
-        let handle = OverlayHandle(id: id, targetWID: targetID, panel: panel, webView: webView)
+        let handle = OverlayHandle(id: id, targetWID: targetID, panel: panel,
+                                   webView: webView, outset: outset)
         register(handle)
         return handle
     }
@@ -462,6 +520,20 @@ enum RegionOverlayGeometry {
     /// placement flip has a single test surface; shares OverlayHandle's recipe.
     static func toAppKit(_ globalRect: CGRect) -> CGRect {
         return OverlayHandle.cgsToAppKit(globalRect)
+    }
+}
+
+/// Pure geometry for the daemon-side cursor follower (overlay.region.follow):
+/// where the region panel goes when it tracks the cursor. Global top-left
+/// coords throughout — the same space Mouse.location() reports and
+/// RegionOverlayHandle.setFrame consumes.
+enum RegionFollowGeometry {
+    /// origin = cursor + offset, size unchanged. The offset is the caller's
+    /// grab point (a drag ghost passes the cursor-to-window-corner delta at
+    /// drag start so the ghost doesn't snap its top-left under the cursor).
+    static func frame(cursor: CGPoint, offset: CGPoint, size: CGSize) -> CGRect {
+        CGRect(x: cursor.x + offset.x, y: cursor.y + offset.y,
+               width: size.width, height: size.height)
     }
 }
 

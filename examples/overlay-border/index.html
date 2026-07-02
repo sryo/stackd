@@ -130,12 +130,20 @@
   // thickness / radius / color; an empty style (thickness 0, transparent)
   // hides the border for non-standard windows without tearing the panel
   // down.
+  //
+  // The attach carries `outset: cfg.thickness`, so the daemon grows the
+  // panel by the ring thickness on every side. The ring (inset: 0,
+  // box-sizing: border-box, border-width == outset) then occupies exactly
+  // the outset band AROUND the window instead of covering ~thickness px of
+  // window content the way the old pin-exact panel did.
   function bootSpec() {
     return {
+      outset: cfg.thickness,
       css: `
         html, body { margin: 0; padding: 0; background: transparent; overflow: hidden; }
-        /* inset: 0 + box-sizing: border-box draws the border at the panel
-           edge — no inner padding before the border starts. */
+        /* inset: 0 + box-sizing: border-box draws the border inward from
+           the panel edge; with border-width == the attach outset, the
+           ring's inner edge lands exactly on the window edge. */
         #ws-border {
           position: absolute;
           inset: 0;
@@ -151,7 +159,10 @@
           var el = document.getElementById('ws-border');
           if (!el) return;
           el.style.border = thickness + 'px solid ' + color;
-          el.style.borderRadius = radius + 'px';
+          // radius is the WINDOW corner radius; the ring's outer edge sits
+          // thickness px outside the window, so add thickness to keep the
+          // inner edge (radius') hugging the window corner.
+          el.style.borderRadius = (radius + thickness) + 'px';
         };
       `
     };

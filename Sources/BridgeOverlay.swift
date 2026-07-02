@@ -57,11 +57,16 @@ extension Bridge {
                     let html = body["html"] as? String ?? ""
                     let css  = body["css"]  as? String ?? ""
                     let js   = body["js"]   as? String ?? ""
+                    // Panel extends this many points beyond the target on
+                    // every side (0 = legacy exact pin). Lets a border stack
+                    // draw its ring AROUND the window instead of over it.
+                    let outset = (body["outset"] as? NSNumber)?.doubleValue ?? 0
                     let id = bridge.nextOverlayId
                     bridge.nextOverlayId += 1
                     guard let handle = Overlay.attach(
                         targetID: CGWindowID(wid), id: id,
-                        html: html, css: css, js: js
+                        html: html, css: css, js: js,
+                        outset: CGFloat(outset)
                     ) else {
                         bridge.respond(requestId: requestId, value: NSNull()); return
                     }
@@ -121,6 +126,20 @@ extension Bridge {
                     handle.setTarget(CGWindowID(wid))
                 } else {
                     DispatchQueue.main.sync { handle.setTarget(CGWindowID(wid)) }
+                }
+                return true
+            },
+            // Change the panel's outset without retargeting. The handle
+            // forceRepin()s so the next vsync tick repositions even if the
+            // target itself hasn't moved.
+            .syncBridge("overlay.setOutset", permission: "overlay", denyValue: false) { b, body in
+                guard let id = body["id"] as? Int,
+                      let n = (body["outset"] as? NSNumber)?.doubleValue,
+                      let handle = b.overlayHandles[id] else { return false }
+                if Thread.isMainThread {
+                    handle.setOutset(CGFloat(n))
+                } else {
+                    DispatchQueue.main.sync { handle.setOutset(CGFloat(n)) }
                 }
                 return true
             },
@@ -215,10 +234,61 @@ extension Bridge {
                 else { DispatchQueue.main.sync { handle.evaluate(js) } }
                 return true
             },
-            // Tear down: close the panel synchronously (sync-hop to main if needed).
-            .syncBridge("overlay.region.remove", permission: "overlay", denyValue: false) { b, body in
+            // Daemon-side cursor follower. Per-mousemove JS RPCs (eventtap →
+            // stack JS → region.setFrame) are two IPC hops with no coalescing
+            // and lag progressively during a drag; instead the daemon moves
+            // the panel itself per vsync tick: origin = Mouse.location() +
+            // (dx, dy), size unchanged. Re-follow replaces the prior offsets
+            // (last-write-wins). Subscription lifecycle mirrors overlay.attach:
+            // one DisplayLinkObserver token per region id, cancelled by
+            // unfollow / region.remove / scope drain.
+            .syncBridge("overlay.region.follow", permission: "overlay", denyValue: false) { b, body in
                 guard let id = body["id"] as? Int,
-                      let handle = b.regionOverlayHandles.removeValue(forKey: id) else { return false }
+                      b.regionOverlayHandles[id] != nil else { return false }
+                let dx = CGFloat((body["dx"] as? NSNumber)?.doubleValue ?? 0)
+                let dy = CGFloat((body["dy"] as? NSNumber)?.doubleValue ?? 0)
+                // Subscribe on main: DisplayLinkObserver primes the callback
+                // synchronously at subscribe time, and the tick body touches
+                // the NSPanel (setFrame) — same reason attach subscribes
+                // inside its main-async block.
+                let subscribe = {
+                    b.regionFollowTokens.removeValue(forKey: id)?.cancel()
+                    let offset = CGPoint(x: dx, y: dy)
+                    var lastCursor: CGPoint?
+                    let token = DisplayLinkObserver.shared.subscribe { [weak b] in
+                        guard let b = b,
+                              let h = b.regionOverlayHandles[id] else { return }
+                        // Screenshot session: ScreenshotHider ordered the
+                        // panel out; moving it would re-show it one frame
+                        // later. Stay dormant (mirrors the attach tick).
+                        if ScreenshotHider.shared.active { return }
+                        let cursor = Mouse.location()
+                        if cursor == lastCursor { return }
+                        lastCursor = cursor
+                        h.setFrame(RegionFollowGeometry.frame(
+                            cursor: cursor, offset: offset,
+                            size: h.panel.frame.size))
+                    }
+                    b.regionFollowTokens[id] = token
+                }
+                if Thread.isMainThread { subscribe() }
+                else { DispatchQueue.main.sync { subscribe() } }
+                return true
+            },
+            // Stop following. Double-unfollow (or unfollow without a live
+            // follow) is a safe no-op that still resolves true — the desired
+            // end state ("panel not following") already holds.
+            .syncBridge("overlay.region.unfollow", permission: "overlay", denyValue: false) { b, body in
+                guard let id = body["id"] as? Int else { return false }
+                b.regionFollowTokens.removeValue(forKey: id)?.cancel()
+                return true
+            },
+            // Tear down: cancel any live cursor follow, then close the panel
+            // synchronously (sync-hop to main if needed).
+            .syncBridge("overlay.region.remove", permission: "overlay", denyValue: false) { b, body in
+                guard let id = body["id"] as? Int else { return false }
+                b.regionFollowTokens.removeValue(forKey: id)?.cancel()
+                guard let handle = b.regionOverlayHandles.removeValue(forKey: id) else { return false }
                 if Thread.isMainThread { handle.remove() }
                 else { DispatchQueue.main.sync { handle.remove() } }
                 return true
