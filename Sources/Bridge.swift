@@ -123,6 +123,11 @@ final class Bridge: NSObject, WKScriptMessageHandler {
     // display, no window tracking. Shares nextOverlayId with the window-
     // tracked overlays so ids never collide.
     var regionOverlayHandles: [Int: RegionOverlayHandle] = [:]
+    // Live cursor-follow subscriptions (overlay.region.follow): region id →
+    // DisplayLinkObserver token. Mirrors overlayTokens — follow mints,
+    // unfollow / region.remove / scope drain cancel, so a stack unload never
+    // strands a vsync subscription moving a closed panel.
+    var regionFollowTokens: [Int: Token] = [:]
     // Owned HTTP servers: serverId → Token (cancel = server.stop()).
     // Pending route requests waiting for sd.httpserver.respond() — keyed
     // by mint id, value is the NWConnection-side completion closure.
@@ -597,6 +602,8 @@ final class Bridge: NSObject, WKScriptMessageHandler {
             guard let self = self else { return }
             for (_, t) in self.overlayTokens { t.cancel() }
             self.overlayTokens.removeAll()
+            for (_, t) in self.regionFollowTokens { t.cancel() }
+            self.regionFollowTokens.removeAll()
             let handles = Array(self.overlayHandles.values)
             self.overlayHandles.removeAll()
             self.overlayInFlight.removeAll()

@@ -77,14 +77,18 @@ sd.urlhandler = {
   //     css:  `.border { position: absolute; inset: 1px;
   //                      border: 2px solid #7c8cff; border-radius: 16px;
   //                      pointer-events: none; }`,
-  //     js:   `/* optional — runs inside the overlay's WebView */`
+  //     js:   `/* optional — runs inside the overlay's WebView */`,
+  //     outset: 0  // optional — panel extends N px beyond the target on
+  //                // every side, so a border can draw AROUND the window
+  //                // instead of covering its edge content
   //   });
   //   ...later...
   //   await h.detach();
   //
-  // Inside the overlay's WebView, `window.sd.target = {x:0, y:0, w, h}`
-  // is updated each vsync (x/y are relative to the panel's own origin —
-  // always 0,0). Permission: "overlay".
+  // Inside the overlay's WebView, `window.sd.target = {x, y, w, h, outset}`
+  // is updated each vsync — PANEL coordinates, so the target's top-left is
+  // at (outset, outset); with outset 0 that's the legacy (0,0).
+  // Permission: "overlay".
 sd.overlay = {
     async attach(targetId, spec) {
       const s = spec || {};
@@ -93,7 +97,8 @@ sd.overlay = {
         targetId,
         html: s.html != null ? String(s.html) : "",
         css:  s.css  != null ? String(s.css)  : "",
-        js:   s.js   != null ? String(s.js)   : ""
+        js:   s.js   != null ? String(s.js)   : "",
+        outset: +s.outset || 0
       });
       if (handleId == null) return null;
       return {
@@ -106,6 +111,12 @@ sd.overlay = {
         // race and leave duplicate panels on screen.
         setTarget(newTargetId) {
           return request({ type: "overlay.setTarget", id: handleId, targetId: newTargetId });
+        },
+        // Change the outset without retargeting. Retarget (setTarget)
+        // preserves the current outset, so a border stack sets it once at
+        // attach and only calls this when the ring thickness changes.
+        setOutset(n) {
+          return request({ type: "overlay.setOutset", id: handleId, outset: +n || 0 });
         },
         // Evaluate JS in the overlay's WebView. Pairs with setTarget to
         // refresh styling (color, radius, theme) when retargeting. The
@@ -131,7 +142,13 @@ sd.overlay = {
     //                    border-radius:16px; pointer-events:none; }`
     //   });
     //   p.setFrame({ x, y, w, h });      // re-place
-    //   p.remove();
+    //   p.follow({ dx, dy });            // daemon moves the panel per vsync:
+    //                                    // origin = cursor + (dx, dy). Use for
+    //                                    // drag ghosts — per-mousemove setFrame
+    //                                    // RPCs lag progressively; the daemon-
+    //                                    // side follower doesn't.
+    //   p.unfollow();                    // stop following (safe to call twice)
+    //   p.remove();                      // also cancels any live follow
     async region(spec) {
       const s = spec || {};
       const r = s.rect || {};
@@ -150,6 +167,15 @@ sd.overlay = {
             rect: { x: +q.x || 0, y: +q.y || 0, w: +q.w || 0, h: +q.h || 0 } });
         },
         eval(js)  { return request({ type: "overlay.region.eval", id: handleId, js: String(js ?? "") }); },
+        // Daemon-side cursor follower: panel origin tracks the global cursor
+        // plus (dx, dy) every vsync tick, with no per-move JS round-trips.
+        // Calling follow again replaces the offsets (last-write-wins).
+        follow(offset) {
+          const o = offset || {};
+          return request({ type: "overlay.region.follow", id: handleId,
+            dx: +o.dx || 0, dy: +o.dy || 0 });
+        },
+        unfollow() { return request({ type: "overlay.region.unfollow", id: handleId }); },
         remove()  { return request({ type: "overlay.region.remove", id: handleId }); }
       };
     }
