@@ -52,6 +52,21 @@ import Foundation
 /// NOTE: `windows.changed` channel + the per-Bridge `lastWindowsByID` /
 /// `windowsChangedPrimed` cache stay in Bridge.swift — they belong to
 /// the observer / channel-push side, not the runtime API.
+/// One spelling of the setFrame/setFrameProbed request body — id, frame,
+/// and the animation options both handlers forward to performFrameWrite.
+private func parseFrameWrite(_ body: [String: Any])
+    -> (id: CGWindowID, frame: CGRect, duration: Double, easing: MotionEasing?)
+{
+    (
+        id: CGWindowID((body["id"] as? Int) ?? 0),
+        frame: CGRect(
+            x: body["x"] as? Double ?? 0, y: body["y"] as? Double ?? 0,
+            width: body["w"] as? Double ?? 0, height: body["h"] as? Double ?? 0),
+        duration: body["duration"] as? Double ?? 0,
+        easing: (body["easing"] as? String).flatMap(MotionEasing.init(rawValue:))
+    )
+}
+
 extension Bridge {
     /// Windows primitives — concatenated into `Bridge.primitives` alongside
     /// the rest of the inline registrations. Pure builder; no side effects.
@@ -78,31 +93,19 @@ extension Bridge {
             // Windows-by-id. setFrame is `.custom` (not `.ax`) because the
             // animated path resolves its promise at settle — potentially
             // hundreds of ms after the RPC arrives — via the motion engine's
-            // completion callback. The instant path (no duration/easing)
-            // stays byte-for-byte the old behavior, and either way an
-            // in-flight animation on the same window is superseded: instant
-            // writes cancel it first so the next tick can't clobber them.
+            // completion callback. Instant-vs-animated routing (and the
+            // instant-write-cancels-animation rule) lives in ONE place:
+            // WindowMotionEngine.performFrameWrite.
             .custom("windows.byId.setFrame", permission: "windows", denyValue: false) { bridge, body, requestId in
-                let id = CGWindowID((body["id"] as? Int) ?? 0)
-                let frame = CGRect(
-                    x: body["x"] as? Double ?? 0, y: body["y"] as? Double ?? 0,
-                    width: body["w"] as? Double ?? 0, height: body["h"] as? Double ?? 0)
-                let duration = body["duration"] as? Double ?? 0
-                let easing = (body["easing"] as? String).flatMap(MotionEasing.init(rawValue:))
+                let (id, frame, duration, easing) = parseFrameWrite(body)
                 DispatchQueue.main.async { [weak bridge] in
-                    guard duration > 0 || easing == .spring else {
-                        WindowMotionEngine.shared.instantWriteWins(windowID: id)
-                        bridge?.respond(requestId: requestId, value: WindowsByID.setFrame(
-                            windowID: id,
-                            x: frame.origin.x, y: frame.origin.y,
-                            w: frame.size.width, h: frame.size.height))
-                        return
-                    }
-                    WindowMotionEngine.shared.animate(
-                        windowID: id, to: frame,
-                        duration: duration, easing: easing ?? .easeOutCubic
-                    ) { settled in
-                        bridge?.respond(requestId: requestId, value: settled)
+                    WindowMotionEngine.shared.performFrameWrite(
+                        windowID: id, frame: frame, duration: duration, easing: easing
+                    ) { outcome in
+                        switch outcome {
+                        case .instant(let ok):       bridge?.respond(requestId: requestId, value: ok)
+                        case .animated(let settled): bridge?.respond(requestId: requestId, value: settled)
+                        }
                     }
                 }
             },
@@ -122,32 +125,32 @@ extension Bridge {
             // target?" sweep. With {duration, easing} the probe runs at
             // settle, so the promise IS the post-animation refusal check.
             .custom("windows.byId.setFrameProbed", permission: "windows") { bridge, body, requestId in
-                let id = CGWindowID((body["id"] as? Int) ?? 0)
-                let x = body["x"] as? Double ?? 0, y = body["y"] as? Double ?? 0
-                let w = body["w"] as? Double ?? 0, h = body["h"] as? Double ?? 0
-                let duration = body["duration"] as? Double ?? 0
-                let easing = (body["easing"] as? String).flatMap(MotionEasing.init(rawValue:))
+                let (id, frame, duration, easing) = parseFrameWrite(body)
                 DispatchQueue.main.async { [weak bridge] in
                     let probe: (Bool) -> Void = { ok in
-                        WindowsByID.settleProbe(windowID: id, ok: ok, x: x, y: y, w: w, h: h) { result in
+                        WindowsByID.settleProbe(
+                            windowID: id, ok: ok,
+                            x: frame.origin.x, y: frame.origin.y,
+                            w: frame.size.width, h: frame.size.height
+                        ) { result in
                             bridge?.respond(requestId: requestId, value: result)
                         }
                     }
-                    guard duration > 0 || easing == .spring else {
-                        WindowMotionEngine.shared.instantWriteWins(windowID: id)
-                        probe(WindowsByID.setFrame(windowID: id, x: x, y: y, w: w, h: h))
-                        return
-                    }
-                    WindowMotionEngine.shared.animate(
-                        windowID: id, to: CGRect(x: x, y: y, width: w, height: h),
-                        duration: duration, easing: easing ?? .easeOutCubic
-                    ) { settled in
-                        // Superseded animations skip the probe — a newer
-                        // write owns the window now; verifying against a
-                        // stale target would poison the retry budget.
-                        if settled {
+                    WindowMotionEngine.shared.performFrameWrite(
+                        windowID: id, frame: frame, duration: duration, easing: easing
+                    ) { outcome in
+                        switch outcome {
+                        case .instant(let ok):
+                            // Probe even on ok=false — the old contract
+                            // reported the live frame regardless.
+                            probe(ok)
+                        case .animated(true):
                             probe(true)
-                        } else {
+                        case .animated(false):
+                            // Superseded animations skip the probe — a
+                            // newer write owns the window now; verifying
+                            // against a stale target would poison the
+                            // retry budget.
                             bridge?.respond(requestId: requestId, value: [
                                 "ok": false, "actual": NSNull(), "refused": false
                             ] as [String: Any])

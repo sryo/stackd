@@ -418,6 +418,43 @@ final class WindowMotionEngine {
     // everywhere else in Windows.swift); the final write re-resolves.
     private var elements: [CGWindowID: AXUIElement] = [:]
 
+    /// How a routed frame write ended. Instant and animated failures mean
+    /// different things to callers: a failed instant write may still be
+    /// worth probing (the app might have applied part of it), while a
+    /// superseded animation must NOT be verified against its stale target.
+    enum FrameWriteOutcome {
+        case instant(ok: Bool)
+        case animated(settled: Bool)
+    }
+
+    /// The one instant-vs-animated routing decision, shared by every
+    /// bridge entry: no options → instant AX write, cancelling any
+    /// in-flight animation first so its next tick can't clobber the
+    /// instant frame; duration or spring → the engine, easing defaulting
+    /// to easeOutCubic. Keeping the predicate here means setFrame and
+    /// setFrameProbed can't drift into animating under different
+    /// conditions.
+    func performFrameWrite(
+        windowID: CGWindowID,
+        frame: CGRect,
+        duration: Double,
+        easing: MotionEasing?,
+        completion: @escaping (FrameWriteOutcome) -> Void
+    ) {
+        guard duration > 0 || easing == .spring else {
+            instantWriteWins(windowID: windowID)
+            completion(.instant(ok: WindowsByID.setFrame(
+                windowID: windowID,
+                x: frame.origin.x, y: frame.origin.y,
+                w: frame.size.width, h: frame.size.height)))
+            return
+        }
+        animate(windowID: windowID, to: frame, duration: duration,
+                easing: easing ?? .easeOutCubic) { settled in
+            completion(.animated(settled: settled))
+        }
+    }
+
     func animate(
         windowID: CGWindowID,
         to: CGRect,
