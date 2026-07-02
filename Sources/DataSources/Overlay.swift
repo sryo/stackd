@@ -286,12 +286,19 @@ enum OverlayGeometry {
         target.insetBy(dx: -outset, dy: -outset)
     }
 
-    /// The per-tick JS push, in PANEL coordinates: the target's top-left
-    /// sits at (outset, outset) inside the panel. Outset 0 reproduces the
-    /// legacy `{x:0,y:0,w,h}` payload plus the new `outset` field.
-    static func targetPayloadJS(targetFrame: CGRect, outset: CGFloat) -> String {
+    /// The {x,y,w,h,outset} object literal in PANEL coordinates — the one
+    /// spelling of the payload shape shared by the per-tick push and the
+    /// attach-time bootstrap seed (adding a field means editing exactly
+    /// here). The target's top-left sits at (outset, outset).
+    static func targetObjectJS(targetFrame: CGRect, outset: CGFloat) -> String {
         let o = Int(outset)
-        return "window.sd=window.sd||{};window.sd.target={x:\(o),y:\(o),w:\(Int(targetFrame.width)),h:\(Int(targetFrame.height)),outset:\(o)};window.dispatchEvent(new CustomEvent('sd:target',{detail:window.sd.target}));"
+        return "{x:\(o),y:\(o),w:\(Int(targetFrame.width)),h:\(Int(targetFrame.height)),outset:\(o)}"
+    }
+
+    /// The per-tick JS push. Outset 0 reproduces the legacy `{x:0,y:0,w,h}`
+    /// payload plus the new `outset` field.
+    static func targetPayloadJS(targetFrame: CGRect, outset: CGFloat) -> String {
+        "window.sd=window.sd||{};window.sd.target=\(targetObjectJS(targetFrame: targetFrame, outset: outset));window.dispatchEvent(new CustomEvent('sd:target',{detail:window.sd.target}));"
     }
 }
 
@@ -446,7 +453,6 @@ enum Overlay {
         panel.hidesOnDeactivate = false
         panel.contentView = webView
 
-        let saneOutset = Int(OverlayGeometry.sanitizeOutset(outset))
         let doc = """
         <!doctype html><html><head><meta charset="utf-8">
         <style>
@@ -461,7 +467,7 @@ enum Overlay {
           // scripts can read either the global or the event payload.
           // Panel coords: the target's top-left is at (outset, outset).
           window.sd = window.sd || {};
-          window.sd.target = { x: \(saneOutset), y: \(saneOutset), w: 0, h: 0, outset: \(saneOutset) };
+          window.sd.target = \(OverlayGeometry.targetObjectJS(targetFrame: .zero, outset: OverlayGeometry.sanitizeOutset(outset)));
         </script>
         <script>
           \(js)
