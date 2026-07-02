@@ -4,10 +4,11 @@ import CoreGraphics
 import Foundation
 
 // SLSTransaction* — atomic batch of window geometry/order mutations committed
-// to WindowServer in one round-trip. Used internally by sd.windows.batch
-// (Bridge sets the batchSink and an opaque tx ref; WindowsByID.setFrame
-// enqueues position moves into the tx instead of dispatching directly through
-// AX) and consumed externally by Overlay.swift's per-tick reshape+order.
+// to WindowServer in one round-trip. Consumed by Overlay.swift's per-tick
+// reshape+order. (sd.windows.batch no longer uses it: the batch path queues
+// full frames and applies them all-AX at commit — see the batchSink doc
+// comment in WindowsByID for the channel-split race that killed the
+// SLS-position/AX-size design on 2026-06-10.)
 //
 // Lives here (not in Sources/Private/SkyLight.swift) because the primary
 // domain is windows; Overlay imports as `Windows.Transaction.*`. Mirrors
@@ -16,14 +17,7 @@ import Foundation
 // Signatures verified against yabai/src/misc/extern.h and JankyBorders/
 // src/misc/extern.h (SLSTransactionMoveWindowWithGroup: (CFTypeRef, uint32_t,
 // CGPoint), point = absolute CGS top-left global origin — same space as
-// AX/CG, no flip). Position moves go through SLSTransactionMoveWindowWithGroup;
-// size has to stay on AX (no SLSTransactionSetWindowSize exists) which is
-// what actually constrains the window's frame anyway. The SLS move is a
-// visual pre-snap only: the owning app's NSWindow frame cache never learns
-// about server-side moves, so commitBatch re-asserts the position via AX —
-// both reference users of this SPI only ever move windows their OWN process
-// owns, and yabai likewise applies the real frame via AX after SLS proxy
-// animations.
+// AX/CG, no flip).
 // Permanent diagnostic switch for window lifecycle plumbing.
 // STACKD_WIN_DEBUG=1 turns on stderr logs at every gate in the
 // source → bang → JS fan-out chain so a "events never arrived" symptom
@@ -40,13 +34,11 @@ enum WindowDebug {
 enum WindowTransaction {
     typealias CreateFn          = @convention(c) (Int32) -> Unmanaged<CFTypeRef>?
     typealias CommitFn          = @convention(c) (CFTypeRef, Int32) -> Int32
-    typealias MoveWithGroupFn   = @convention(c) (CFTypeRef, UInt32, CGPoint) -> Int32
     typealias OrderWindowFn     = @convention(c) (CFTypeRef, UInt32, Int32, UInt32) -> Int32
     typealias SetWindowLevelFn  = @convention(c) (CFTypeRef, UInt32, Int32) -> Int32
 
     static let create:         CreateFn?         = SkyLight.sym("SLSTransactionCreate")
     static let commit:         CommitFn?         = SkyLight.sym("SLSTransactionCommit")
-    static let moveWithGroup:  MoveWithGroupFn?  = SkyLight.sym("SLSTransactionMoveWindowWithGroup")
     static let orderWindow:    OrderWindowFn?    = SkyLight.sym("SLSTransactionOrderWindow")
     static let setWindowLevel: SetWindowLevelFn? = SkyLight.sym("SLSTransactionSetWindowLevel")
 }
@@ -485,112 +477,80 @@ enum AXShim {
 // MARK: - WindowsByID: per-window actions targeting a CGWindowID
 
 enum WindowsByID {
-    // Batch-mode mutation enum. When sd.windows.batch is active Bridge installs
-    // a sink that funnels these into a live SLSTransaction; setFrame/raise on a
-    // specific id route here instead of taking the direct AX path. Process-wide
-    // because the sink + tx ref live on the static var below (one batch at a
-    // time, serialized by Bridge.batch.begin refusing if one is already open).
-    enum WindowMutation {
-        case moveWithGroup(id: CGWindowID, point: CGPoint)
-        case orderAbove(id: CGWindowID, relativeTo: CGWindowID)
-    }
+    // Batch sink. When sd.windows.batch is active, setFrame on a specific id
+    // queues the FULL frame here instead of writing AX; commit applies every
+    // queued frame through the normal setFrame dance in one main-thread
+    // burst. Process-wide because one batch runs at a time (begin refuses to
+    // nest, matching the JS-side single-await model).
+    //
+    // Why no SLSTransaction any more: the original design split one window's
+    // geometry across two unsynchronized channels — size via AX at setFrame
+    // time, position via SLS at commit. AX writes propagate asynchronously
+    // to the target app, and an app processing a size set performs a full
+    // -[NSWindow setFrame:] (origin + size) with the origin read from its
+    // own frame cache — which a server-side SLS move does NOT update. Each
+    // app's late resize re-asserted its STALE origin over the committed SLS
+    // position (2026-06-10: windows stacked at old origins / offscreen).
+    // Queueing full frames and applying them all on the single AX channel
+    // can't hit that race, and it drops the SkyLight symbol dependency that
+    // made begin fail outright on some daemon states. The cost is the
+    // single-compositor-flip aesthetic the SLS commit theoretically bought —
+    // which never actually worked. WindowTransaction (the SLS enum above)
+    // stays: Overlay.swift's per-tick reshape+order still consumes it.
+    static var batchSink: ((CGWindowID, CGRect) -> Void)?
 
-    static var batchSink: ((WindowMutation) -> Void)?
-    private static var activeTransaction: CFTypeRef?
-
-    // Pending AX position re-asserts for the open batch. Last-write-wins per
-    // window id (matches the SLS transaction's own semantics), first-seen
-    // order preserved. Extracted as a pure struct so the bookkeeping is
-    // testable without opening a live SLSTransaction.
-    struct BatchMoveLedger {
-        private var entries: [(id: CGWindowID, point: CGPoint)] = []
-        mutating func record(id: CGWindowID, point: CGPoint) {
+    // Pending frames for the open batch. Last-write-wins per window id,
+    // first-seen order preserved. Pure struct so the bookkeeping is testable
+    // without any window server.
+    struct BatchFrameLedger {
+        private var entries: [(id: CGWindowID, frame: CGRect)] = []
+        mutating func record(id: CGWindowID, frame: CGRect) {
             if let i = entries.firstIndex(where: { $0.id == id }) {
-                entries[i].point = point
+                entries[i].frame = frame
             } else {
-                entries.append((id: id, point: point))
+                entries.append((id: id, frame: frame))
             }
         }
-        mutating func drain() -> [(id: CGWindowID, point: CGPoint)] {
+        mutating func drain() -> [(id: CGWindowID, frame: CGRect)] {
             let out = entries
             entries = []
             return out
         }
     }
-    private static var pendingMoves = BatchMoveLedger()
+    private static var pendingFrames = BatchFrameLedger()
 
-    // Opens a fresh SLSTransaction and installs a sink that funnels mutations
-    // into it. Process-global — returns false if a batch is already open. Must
-    // run on the WindowServer/main thread (same as AX). Pairs with commitBatch.
+    // Opens a batch and installs the queueing sink. Returns false only when
+    // a batch is already open. Main-thread, like every batch entry point.
     @discardableResult
     static func beginBatch() -> Bool {
         if batchSink != nil { return false }
-        guard let create = WindowTransaction.create,
-              let move = WindowTransaction.moveWithGroup,
-              let txRef = create(SkyLight.cid)?.takeRetainedValue() else {
-            return false
-        }
-        activeTransaction = txRef
-        pendingMoves = BatchMoveLedger()
-        batchSink = { mutation in
-            switch mutation {
-            case .moveWithGroup(let id, let point):
-                _ = move(txRef, UInt32(id), point)
-                pendingMoves.record(id: id, point: point)
-            case .orderAbove(let id, let rel):
-                _ = WindowTransaction.orderWindow?(txRef, UInt32(id), 1, UInt32(rel))
-            }
-        }
+        pendingFrames = BatchFrameLedger()
+        batchSink = { id, frame in pendingFrames.record(id: id, frame: frame) }
         return true
     }
 
-    // Commits the open transaction, then re-asserts every queued position
-    // through AX (kAXPositionAttribute).
-    //
-    // The AX re-assert is load-bearing, not belt-and-suspenders. Root cause
-    // of the 2026-06-10 "batch puts windows at wrong positions" bug: the
-    // batch path splits one window's geometry across two unsynchronized
-    // channels — size via AX at setFrame time, position via SLS at commit.
-    // AX writes propagate asynchronously to the target app, and an app
-    // processing a size set performs a full -[NSWindow setFrame:] (origin +
-    // size) with the origin read from its own frame cache — which a
-    // server-side SLS move does NOT update. Commit fires ~1-2ms after the
-    // batch closure, so the order was: SLS moves every window to its target,
-    // then each app's late resize re-asserts its STALE origin and clobbers
-    // the committed position (windows stacked at old origins / offscreen).
-    // The non-batch path never hits this because size and position ride the
-    // same AX channel and serialize in the app's event queue.
-    //
-    // Re-asserting the position via AX after SLSTransactionCommit makes both
-    // channels carry the same destination: AX messages to one app are
-    // delivered in send order, so the position (sent after the size) is the
-    // app's final word and converges on the target no matter how the app's
-    // processing interleaves with the commit. It also syncs the app's frame
-    // cache, which the SLS-only move left permanently stale (same reason
-    // yabai applies the real frame via AX after its SLS proxy animations).
-    // The SLS commit is kept for the feature it provides: all positions
-    // still flip on a single compositor transaction at commit.
-    //
-    // `applyPosition` is injectable for tests (default: real AX write).
+    // Applies every queued frame in one burst and closes the batch. The
+    // sink is cleared BEFORE applying so the setFrame calls take the direct
+    // AX path (and record into the FrameLedger like any other write).
+    // `applyFrame` is injectable for tests (default: real setFrame dance).
     @discardableResult
     static func commitBatch(
-        applyPosition: (CGWindowID, CGPoint) -> Void = applyAXPosition
+        applyFrame: (CGWindowID, CGRect) -> Void = applyBatchFrame
     ) -> Bool {
-        guard let tx = activeTransaction else { return false }
-        _ = WindowTransaction.commit?(tx, 0)
+        guard batchSink != nil else { return false }
         batchSink = nil
-        activeTransaction = nil
-        for m in pendingMoves.drain() { applyPosition(m.id, m.point) }
+        for entry in pendingFrames.drain() { applyFrame(entry.id, entry.frame) }
         return true
     }
 
-    // Default position applier for commitBatch. Same write the non-batch
-    // setFrame path issues; no-ops when the window vanished mid-batch.
-    static func applyAXPosition(_ windowID: CGWindowID, _ point: CGPoint) {
-        guard let el = elementFor(windowID: windowID) else { return }
-        var p = point
-        guard let posVal = AXValueCreate(.cgPoint, &p) else { return }
-        _ = AXUIElementSetAttributeValue(el, kAXPositionAttribute as CFString, posVal)
+    // Default frame applier for commitBatch — the same size→pos→size write
+    // the non-batch path issues; no-ops when the window vanished mid-batch.
+    static func applyBatchFrame(_ windowID: CGWindowID, _ frame: CGRect) {
+        _ = setFrame(
+            windowID: windowID,
+            x: frame.origin.x, y: frame.origin.y,
+            w: frame.size.width, h: frame.size.height
+        )
     }
 
     // pid → (CGWindowID → AXUIElement). Repopulated lazily on lookup miss.
@@ -685,20 +645,12 @@ enum WindowsByID {
 
     @discardableResult
     static func setFrame(windowID: CGWindowID, x: Double, y: Double, w: Double, h: Double) -> Bool {
-        // Batch mode: AX still owns size (no SLS size symbol exists), but the
-        // visible position pop is deferred until SLSTransactionCommit so every
-        // window queued in this batch snaps to its new origin on a single
-        // compositor flip. Size changes still cascade per-app (apps repaint at
-        // their own pace) — that's the v1 tradeoff documented in the plan.
-        // The queued position is ALSO re-asserted via AX at commit — see the
-        // commitBatch doc comment for the stale-origin clobber race that
-        // makes the SLS move alone land windows at wrong positions.
+        // Batch mode: queue the full frame; nothing touches AX until commit
+        // applies every queued frame in one burst (single channel — see the
+        // batchSink doc comment for the 2026-06-10 channel-split race the
+        // old SLS-position/AX-size design hit). True = queued.
         if let sink = batchSink {
-            guard let el = elementFor(windowID: windowID) else { return false }
-            var sz = CGSize(width: w, height: h)
-            guard let szVal = AXValueCreate(.cgSize, &sz) else { return false }
-            _ = AXUIElementSetAttributeValue(el, kAXSizeAttribute as CFString, szVal)
-            sink(.moveWithGroup(id: windowID, point: CGPoint(x: x, y: y)))
+            sink(windowID, CGRect(x: x, y: y, width: w, height: h))
             return true
         }
         guard let el = elementFor(windowID: windowID) else { return false }
