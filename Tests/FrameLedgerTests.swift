@@ -70,6 +70,21 @@ func registerFrameLedgerTests() {
         try expectEqual(l.verify(windowID: 7, target: target, observed: rect(0, 0, 300, 300)), .retry)
     }
 
+    test("write generation bumps per write, per window, and resets on clear") {
+        // The probe's stale-retry guard: a deferred verification captures
+        // the generation after its own write and must see it unchanged
+        // before re-applying — any newer write means its target is stale.
+        let l = FrameLedger()
+        try expectEqual(l.generation(windowID: 9), 0)
+        l.recordWrite(windowID: 9, frame: rect(0, 0, 1, 1), now: 0)
+        let g1 = l.generation(windowID: 9)
+        l.recordWrite(windowID: 9, frame: rect(5, 5, 1, 1), now: 0.01)
+        try expect(l.generation(windowID: 9) > g1, "second write must bump")
+        try expectEqual(l.generation(windowID: 10), 0, "windows must not couple")
+        l.clear(windowID: 9)
+        try expectEqual(l.generation(windowID: 9), 0, "clear resets")
+    }
+
     test("clear drops all per-window state") {
         let l = FrameLedger()
         l.recordWrite(windowID: 8, frame: rect(1, 1, 2, 2), now: 0)
