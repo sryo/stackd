@@ -293,31 +293,49 @@ func registerWindowsTests() {
         try expect(result == nil, "info(0) returned non-nil: \(String(describing: result))")
     }
 
-    // MARK: - WindowsByID.setFrameProbed — return-shape contract
+    // MARK: - WindowsByID.settleProbe — return-shape contract
+    //
+    // settleProbe completes via DispatchQueue.main.asyncAfter (the 60ms
+    // app-propagation wait), so the tests pump the main runloop until the
+    // completion lands.
+    func awaitProbe(_ start: (@escaping ([String: Any]) -> Void) -> Void) -> [String: Any]? {
+        var result: [String: Any]?
+        start { result = $0 }
+        let deadline = Date().addingTimeInterval(1.0)
+        while result == nil && Date() < deadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+        }
+        return result
+    }
 
-    test("WindowsByID.setFrameProbed for an unaddressable windowID returns ok:false, actual:NSNull") {
-        // Probed variant must always return a dict with both keys so the JS
-        // shape stays stable. When the underlying element isn't reachable
-        // (windowID never existed, app quit), ok is false and actual is
-        // NSNull — not missing. JS-side destructuring of
-        //   const { ok, actual } = await sd.windows.setFrameProbed(id, frame)
+    test("WindowsByID.settleProbe for an unaddressable windowID keeps ok, actual:NSNull, refused:false") {
+        // The probe must always complete with all three keys so the JS
+        // shape stays stable. When the window isn't reachable (windowID
+        // never existed, app quit), actual is NSNull — not missing — and
+        // refusal is unknowable, so false. JS-side destructuring of
+        //   const { ok, actual, refused } = await sd.windows.setFrameProbed(...)
         // would otherwise blow up with `actual is undefined`.
-        let r = WindowsByID.setFrameProbed(windowID: 0, x: 0, y: 0, w: 100, h: 100)
+        guard let r = awaitProbe({ done in
+            WindowsByID.settleProbe(windowID: 0, ok: false, x: 0, y: 0, w: 100, h: 100, completion: done)
+        }) else { throw Expectation(message: "probe never completed") }
         try expect(r["ok"] != nil, "ok key missing")
         try expect(r["actual"] != nil, "actual key missing (must be NSNull, not absent)")
+        try expect(r["refused"] != nil, "refused key missing")
         try expectEqual(r["ok"] as? Bool, false)
         try expect(r["actual"] is NSNull,
                    "actual should be NSNull for an unaddressable id, got \(type(of: r["actual"]!))")
+        try expectEqual(r["refused"] as? Bool, false)
     }
 
-    test("WindowsByID.setFrameProbed actual frame, when present, exposes the x/y/w/h key set") {
-        // Shape contract: when AX yields back a frame, it MUST contain all
+    test("WindowsByID.settleProbe actual frame, when present, exposes the x/y/w/h key set") {
+        // Shape contract: when CG yields back a frame, it MUST contain all
         // four keys with Double values (matches sd.windows.frame's contract).
         // We can't force a real window in tests; skip the body if no window
         // is reachable. The unaddressable-id test above covers the failure
         // branch.
-        let r = WindowsByID.setFrameProbed(windowID: 0, x: 0, y: 0, w: 100, h: 100)
-        guard let actual = r["actual"] as? [String: Any] else { return }
+        guard let r = awaitProbe({ done in
+            WindowsByID.settleProbe(windowID: 0, ok: false, x: 0, y: 0, w: 100, h: 100, completion: done)
+        }), let actual = r["actual"] as? [String: Any] else { return }
         try expect(actual["x"] is Double, "x should be Double, got \(type(of: actual["x"] ?? "nil"))")
         try expect(actual["y"] is Double, "y should be Double")
         try expect(actual["w"] is Double, "w should be Double")

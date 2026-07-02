@@ -62,14 +62,29 @@ sd.windows = {
     // Actions with no id operate on the AX focused window of the frontmost app.
     // Pass an id (CGWindowID from sd.windows.all / sd.windows.focused) to
     // target a specific window via the _AXUIElementGetWindow SPI.
-    setFrame(arg1, arg2) {
+    //
+    // Animated form (hs.window:setFrame(rect, duration) parity, id form only):
+    //   sd.windows.setFrame(id, frame, { duration: 0.18, easing: "easeOutCubic" })
+    // Easings: "easeOutCubic" (default when duration > 0), "linear", "spring"
+    // (spring derives its own settle time; duration is ignored). The daemon
+    // ticks every animating window on ONE display-link clock, so a
+    // multi-window pass moves in lockstep — no per-window rAF stagger. The
+    // promise resolves at settle: true = reached target, false = superseded
+    // by a later setFrame / cancelAnimation on the same window.
+    setFrame(arg1, arg2, arg3) {
       if (typeof arg1 === "number") {
         const f = arg2 || {};
-        return request({ type: "windows.byId.setFrame", id: arg1, x: f.x, y: f.y, w: f.w, h: f.h });
+        const o = arg3 || {};
+        return request({ type: "windows.byId.setFrame", id: arg1, x: f.x, y: f.y, w: f.w, h: f.h,
+                         duration: o.duration, easing: o.easing });
       }
       const f = arg1 || {};
       return request({ type: "windows.setFrame", x: f.x, y: f.y, w: f.w, h: f.h });
     },
+    isAnimating(id)     { return request({ type: "windows.byId.isAnimating", id }); },
+    // Stops the animation where it is (the in-flight setFrame promise
+    // resolves false). The window stays at the last-ticked frame.
+    cancelAnimation(id) { return request({ type: "windows.byId.cancelAnimation", id }); },
     // Probed setFrame: applies the geometry then reads back what AX actually
     // accepted, so callers can detect apps that refused part of the resize
     // (Calculator, fixed-size panels, Browser at its min width). Returns

@@ -717,53 +717,84 @@ enum WindowsByID {
         _ = AXUIElementSetAttributeValue(el, kAXSizeAttribute     as CFString, szVal)
         let pOK = AXUIElementSetAttributeValue(el, kAXPositionAttribute as CFString, posVal)
         let sOK = AXUIElementSetAttributeValue(el, kAXSizeAttribute     as CFString, szVal)
+        if pOK == .success && sOK == .success {
+            FrameLedger.shared.recordWrite(
+                windowID: windowID,
+                frame: CGRect(x: x, y: y, width: w, height: h)
+            )
+        }
         return pOK == .success && sOK == .success
     }
 
-    /// Probed variant of setFrame: applies the requested geometry then reads
-    /// back what AX/CG actually accepted, so callers (windowscape's tiler /
-    /// drag-resize) can detect apps that refuse to honor the requested size.
-    ///
-    /// The read-back goes through CGWindowList, NOT AX. Reading AX
-    /// (kAXPositionAttribute + kAXSizeAttribute) immediately after a write
-    /// returns the JUST-WRITTEN value rather than the app-clamped actual —
-    /// AX writes propagate asynchronously to the target app's NSWindow, and
-    /// AX reads inside the same runloop tick return the cached requested
-    /// value. CG bounds reflect what's actually on the framebuffer.
-    ///
-    /// Returns the post-set live frame; ok=false (with actual=null) means
-    /// the element wasn't reachable. ok=true with actual ≠ requested means
-    /// AX accepted the call but the app clamped the size (e.g. Calculator,
-    /// fixed-size dialogs, Finder column widths).
-    static func setFrameProbed(windowID: CGWindowID, x: Double, y: Double, w: Double, h: Double) -> [String: Any] {
-        let ok = setFrame(windowID: windowID, x: x, y: y, w: w, h: h)
-        // App propagation wait: AX writes hit the target app's runloop
-        // asynchronously, then the app draws and CG updates. Reading
-        // CGWindowList immediately catches an intermediate state where CG
-        // shows the requested size before the app's layout pass clamps it.
-        // 60ms is enough for most apps (Finder column rounding, Calculator
-        // fixed size, browser min-width snap-backs) to settle. The cost is
-        // tile-pass latency: 6 windows × 60ms = ~360ms per tile pass, which
-        // is acceptable for a UX where tiles already animate at ~100ms.
-        Thread.sleep(forTimeInterval: 0.06)
-        // Read back via CGWindowList — ground truth, no AX cache race.
+    /// Live window bounds via CGWindowList — ground truth for probe
+    /// read-backs. Reading AX (kAXPositionAttribute + kAXSizeAttribute)
+    /// immediately after a write returns the JUST-WRITTEN value rather
+    /// than the app-clamped actual — AX writes propagate asynchronously to
+    /// the target app's NSWindow, and AX reads inside the same runloop
+    /// tick return the cached requested value. CG bounds reflect what's
+    /// actually on the framebuffer.
+    static func cgBounds(windowID: CGWindowID) -> CGRect? {
         let target = Int(windowID)
-        guard let raw = CGWindowListCopyWindowInfo(
-            [.optionIncludingWindow], CGWindowID(windowID)
-        ),
-        let list = raw as? [[String: Any]],
-        let info = list.first(where: { ($0[kCGWindowNumber as String] as? Int) == target }),
-        let bounds = info[kCGWindowBounds as String] as? [String: CGFloat]
-        else {
-            return ["ok": ok, "actual": NSNull()]
+        guard let raw = CGWindowListCopyWindowInfo([.optionIncludingWindow], windowID),
+              let list = raw as? [[String: Any]],
+              let info = list.first(where: { ($0[kCGWindowNumber as String] as? Int) == target }),
+              let bounds = info[kCGWindowBounds as String] as? [String: CGFloat]
+        else { return nil }
+        return CGRect(
+            x: Double(bounds["X"] ?? 0), y: Double(bounds["Y"] ?? 0),
+            width: Double(bounds["Width"] ?? 0), height: Double(bounds["Height"] ?? 0)
+        )
+    }
+
+    /// Probed variant of setFrame: after the write settles, reads back what
+    /// the app actually accepted and runs it through the FrameLedger's
+    /// verify: one automatic re-apply on mismatch, quantum learning for
+    /// grid-snapping apps (Terminal cell rounding is convergence, not
+    /// refusal), and a terminal `refused` verdict for apps that clamp the
+    /// major geometry (Calculator, fixed-size dialogs). Async because the
+    /// app-propagation wait is 60ms per read-back — the old synchronous
+    /// shape slept the main thread for it; asyncAfter keeps main live.
+    ///
+    /// completion payload: { ok, actual: {x,y,w,h} | null, refused }.
+    /// ok=false means the element wasn't reachable / the write failed;
+    /// refusal is only meaningful when ok=true.
+    static func settleProbe(
+        windowID: CGWindowID,
+        ok: Bool,
+        x: Double, y: Double, w: Double, h: Double,
+        completion: @escaping ([String: Any]) -> Void
+    ) {
+        let targetFrame = CGRect(x: x, y: y, width: w, height: h)
+        func readBack(retriesLeft: Int) {
+            // 60ms app-propagation wait: reading CGWindowList immediately
+            // catches an intermediate state where CG shows the requested
+            // size before the app's layout pass clamps it.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.06) {
+                guard let actual = cgBounds(windowID: windowID) else {
+                    completion(["ok": ok, "actual": NSNull(), "refused": false])
+                    return
+                }
+                let verdict = FrameLedger.shared.verify(
+                    windowID: windowID, target: targetFrame, observed: actual)
+                if verdict == .retry, retriesLeft > 0 {
+                    _ = setFrame(windowID: windowID, x: x, y: y, w: w, h: h)
+                    readBack(retriesLeft: retriesLeft - 1)
+                    return
+                }
+                completion([
+                    "ok": ok,
+                    "actual": [
+                        "x": Double(actual.origin.x), "y": Double(actual.origin.y),
+                        "w": Double(actual.size.width), "h": Double(actual.size.height)
+                    ] as [String: Any],
+                    // A verdict still on .retry with no retries left counts
+                    // as refused — the write was re-applied and still didn't
+                    // stick.
+                    "refused": verdict == .refused || verdict == .retry
+                ])
+            }
         }
-        return [
-            "ok": ok,
-            "actual": [
-                "x": Double(bounds["X"] ?? 0), "y": Double(bounds["Y"] ?? 0),
-                "w": Double(bounds["Width"] ?? 0), "h": Double(bounds["Height"] ?? 0)
-            ] as [String: Any]
-        ]
+        readBack(retriesLeft: 1)
     }
 
     @discardableResult
@@ -2461,6 +2492,8 @@ final class WindowsAXObserver {
         entry?.tokens.forEach { $0.cancel() }
         let title = lastTitle[pid]?.removeValue(forKey: wid) ?? ""
         lastAxFire[wid] = Date().timeIntervalSince1970
+        WindowMotionEngine.shared.cancel(windowID: wid)
+        FrameLedger.shared.clear(windowID: wid)
         WindowDebug.log("ax: window destroyed pid=\(pid) wid=\(wid)")
         let snap = WindowsLifecycleObserver.Snap(
             id: Int(wid), pid: Int(pid), app: app, title: title, frame: .zero
@@ -2502,24 +2535,37 @@ final class WindowsAXObserver {
     }
 
     private func onMoved(pid: pid_t, wid: CGWindowID, window: AXUIElement) {
-        let frame = axWindowFrame(window) ?? .zero
-        lastAxFire[wid] = Date().timeIntervalSince1970
-        WindowDebug.log("ax: window moved pid=\(pid) wid=\(wid)")
-        AppDelegate.shared?.host?.bang(name: "sd.window.moved", detail: [
-            "id": Int(wid),
-            "frame": [
-                "x": Int(frame.origin.x), "y": Int(frame.origin.y),
-                "w": Int(frame.size.width), "h": Int(frame.size.height)
-            ]
-        ])
+        fireFrameBang("sd.window.moved", pid: pid, wid: wid, window: window)
     }
 
     private func onResized(pid: pid_t, wid: CGWindowID, window: AXUIElement) {
+        fireFrameBang("sd.window.resized", pid: pid, wid: wid, window: window)
+    }
+
+    /// Shared moved/resized dispatch with self-echo classification.
+    ///
+    /// While the motion engine is animating a window, its per-tick AX
+    /// notifications are swallowed outright — they are our own writes by
+    /// construction, and fanning 60–120 bangs/s/window through JSON →
+    /// every-stack evaluateJavaScript is pure cost. The settle frame's
+    /// trailing echoes arrive after the animation ends (AX lags writes by
+    /// up to ~1s) and are delivered with `self: true` via the ledger, so
+    /// stacks still observe the final geometry.
+    private func fireFrameBang(_ name: String, pid: pid_t, wid: CGWindowID, window: AXUIElement) {
         let frame = axWindowFrame(window) ?? .zero
         lastAxFire[wid] = Date().timeIntervalSince1970
-        WindowDebug.log("ax: window resized pid=\(pid) wid=\(wid)")
-        AppDelegate.shared?.host?.bang(name: "sd.window.resized", detail: [
+        if WindowMotionEngine.shared.isAnimating(windowID: wid) {
+            WindowDebug.log("ax: \(name) swallowed (animating) pid=\(pid) wid=\(wid)")
+            return
+        }
+        let isSelf = FrameLedger.shared.isSelf(
+            windowID: wid, observed: frame,
+            now: CFAbsoluteTimeGetCurrent(), animating: false
+        )
+        WindowDebug.log("ax: \(name.split(separator: ".").last ?? "") pid=\(pid) wid=\(wid) self=\(isSelf)")
+        AppDelegate.shared?.host?.bang(name: name, detail: [
             "id": Int(wid),
+            "self": isSelf,
             "frame": [
                 "x": Int(frame.origin.x), "y": Int(frame.origin.y),
                 "w": Int(frame.size.width), "h": Int(frame.size.height)

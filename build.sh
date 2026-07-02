@@ -58,6 +58,7 @@ SWIFT_SOURCES=(
   Sources/DataSources/Calendar.swift
 
   Sources/DataSources/Windows.swift
+  Sources/DataSources/WindowMotion.swift
 
   Sources/DataSources/Input.swift
   Sources/DataSources/Location.swift
