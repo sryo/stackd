@@ -309,15 +309,29 @@ final class FrameLedger {
     private var lastApplied: [CGWindowID: Applied] = [:]
     private var sizeQuantum: [CGWindowID: CGSize] = [:]
     private var retryUsed: Set<CGWindowID> = []
+    private var writeGeneration: [CGWindowID: UInt64] = [:]
 
     func recordWrite(windowID: CGWindowID, frame: CGRect, now: Double = CFAbsoluteTimeGetCurrent()) {
         lastApplied[windowID] = Applied(frame: frame, at: now)
+        writeGeneration[windowID, default: 0] += 1
+    }
+
+    /// Monotonic per-window write counter. A deferred verification (the
+    /// probe's 60ms read-back + retry) captures the generation after its
+    /// own write and aborts its RE-APPLY if any newer write arrived in the
+    /// gap — without this, a probe retry during a rapid write stream
+    /// (gesture resize, animated tile pass) re-applies a STALE frame
+    /// 60-120ms after newer frames already landed, and the window fights
+    /// backwards.
+    func generation(windowID: CGWindowID) -> UInt64 {
+        writeGeneration[windowID] ?? 0
     }
 
     func clear(windowID: CGWindowID) {
         lastApplied[windowID] = nil
         sizeQuantum[windowID] = nil
         retryUsed.remove(windowID)
+        writeGeneration[windowID] = nil
     }
 
     func isSelf(windowID: CGWindowID, observed: CGRect, now: Double, animating: Bool) -> Bool {
