@@ -470,6 +470,23 @@ func registerWindowsTests() {
         try expectEqual(p.isStandard, false)
     }
 
+    test("WindowAddressabilityCache.standardVerdict — minimized ⇒ standard regardless of subrole reading") {
+        // Regression: Terminal's minimized windows report AXSubrole ==
+        // AXDialog (macOS 26). A window first probed while it sat in the
+        // Dock got sticky-cached non-standard, filtered out of
+        // Windows.all(), and apptimeout read Terminal as windowless and
+        // killed it (2026-07-04).
+        try expectEqual(WindowAddressabilityCache.standardVerdict(subrole: "AXDialog", isMinimized: true), true)
+        try expectEqual(WindowAddressabilityCache.standardVerdict(subrole: nil, isMinimized: true), true)
+        try expectEqual(WindowAddressabilityCache.standardVerdict(subrole: "AXStandardWindow", isMinimized: true), true)
+    }
+
+    test("WindowAddressabilityCache.standardVerdict — un-minimized readings are trusted as-is") {
+        try expectEqual(WindowAddressabilityCache.standardVerdict(subrole: "AXStandardWindow", isMinimized: false), true)
+        try expectEqual(WindowAddressabilityCache.standardVerdict(subrole: "AXDialog", isMinimized: false), false)
+        try expectEqual(WindowAddressabilityCache.standardVerdict(subrole: nil, isMinimized: false), false)
+    }
+
     // (TahoeSynthPoll + WindowEvents.tahoeMinimizeBang removed 2026-06-05:
     //  WindowsAXObserver now registers kAXWindowMiniaturizedNotification per
     //  window, which only fires on real Cmd+M — no tab-switch ambiguity to

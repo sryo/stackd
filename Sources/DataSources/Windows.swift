@@ -360,16 +360,14 @@ enum WindowAddressabilityCache {
         var isStd = false
         var isMin = false
         if let e = el {
-            var subroleRef: AnyObject?
-            if AXUIElementCopyAttributeValue(e, kAXSubroleAttribute as CFString, &subroleRef) == .success,
-               let s = subroleRef as? String {
-                isStd = (s == (kAXStandardWindowSubrole as String))
-            }
             var minRef: AnyObject?
             if AXUIElementCopyAttributeValue(e, kAXMinimizedAttribute as CFString, &minRef) == .success,
                let b = minRef as? Bool {
                 isMin = b
             }
+            var subroleRef: AnyObject?
+            _ = AXUIElementCopyAttributeValue(e, kAXSubroleAttribute as CFString, &subroleRef)
+            isStd = standardVerdict(subrole: subroleRef as? String, isMinimized: isMin)
         }
         lock.lock()
         let existing = cache[key]
@@ -381,9 +379,10 @@ enum WindowAddressabilityCache {
             shouldCache = true
         } else if let e = existing, e.addressable {
             // Sticky-success: established-true never flips to false on a
-            // transient miss. Keep addressable+isStandard, refresh isMinimized
-            // (changes while window is alive — Cmd+M, dock click).
-            probe = Probe(addressable: true, isStandard: e.isStandard, isMinimized: isMin, ts: now)
+            // transient miss. Keep the whole cached verdict — this branch
+            // means the probe FAILED (el is nil), so isMin carries no real
+            // reading; live minimize flips arrive via setMinimized().
+            probe = Probe(addressable: true, isStandard: e.isStandard, isMinimized: e.isMinimized, ts: now)
             shouldCache = true
         } else {
             // No success yet. Time-based optimism: report addressable: true
@@ -459,6 +458,18 @@ enum WindowAddressabilityCache {
         lock.lock(); defer { lock.unlock() }
         guard let p = cache[key], p.addressable else { return }
         cache[key] = Probe(addressable: true, isStandard: p.isStandard, isMinimized: value, ts: now)
+    }
+
+    /// Subrole reading → isStandard verdict, minimize-aware. A minimized
+    /// window's AXSubrole is unreliable — Terminal's minimized windows
+    /// report AXDialog (macOS 26) — so a window whose first successful
+    /// probe happened while it sat in the Dock got sticky-cached as
+    /// non-standard, filtered out of Windows.all(), and consumers read
+    /// the app as windowless (apptimeout killed Terminal over exactly
+    /// this). Only real user windows can be minimized to the Dock, so
+    /// minimized ⇒ standard regardless of the reading.
+    static func standardVerdict(subrole: String?, isMinimized: Bool) -> Bool {
+        isMinimized || subrole == (kAXStandardWindowSubrole as String)
     }
 }
 
@@ -2772,9 +2783,15 @@ final class WindowsAXObserver {
         // conflated with "definitely not standard" — kAXWindowCreated won't
         // re-fire, so a wrong drop here is permanent. Unknown → bounded
         // retry before giving up.
+        let isMin = axWindowBool(window, kAXMinimizedAttribute as String) ?? false
         switch axSubroleVerdict(window) {
         case .nonStandard:
-            return
+            // Minimized windows misreport their subrole (see
+            // WindowAddressabilityCache.standardVerdict) — a Dock-parked
+            // window reading AXDialog is still a real user window. Dropping
+            // it here would skip its observers AND its cache seed, leaving
+            // the probe to sticky-cache the same bogus non-standard verdict.
+            if !isMin { return }
         case .unknown:
             if let next = subroleRetries.first {
                 let rest = Array(subroleRetries.dropFirst())
@@ -2796,7 +2813,6 @@ final class WindowsAXObserver {
         // in the optimism grace (isStandard: false) whenever AX is busy —
         // filtering the window out of the exact snapshot AppDelegate pumps
         // in response to this create.
-        let isMin = axWindowBool(window, kAXMinimizedAttribute as String) ?? false
         WindowAddressabilityCache.confirm(pid: pid, windowID: wid, isStandard: true, isMinimized: isMin)
 
         let title = axWindowString(window, kAXTitleAttribute as String) ?? ""
