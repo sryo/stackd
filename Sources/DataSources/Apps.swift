@@ -66,6 +66,14 @@ enum Apps {
                 "hidden":           app.isHidden,
                 "activationPolicy": policy
             ]
+            // Bundle path lets consumers tell real `.app` apps from XPC service
+            // helpers (`.xpc` bundles inside frameworks). Those services flip to
+            // .regular while presenting a panel (Open/Save, Quick Look), so the
+            // policy field alone can't filter them — AppTimeout keys off the
+            // `.app` suffix to avoid monitoring/killing them.
+            if let burl = app.bundleURL {
+                entry["bundleURL"] = burl.path
+            }
             if let date = app.launchDate {
                 entry["launchedAt"] = date.timeIntervalSince1970
             }

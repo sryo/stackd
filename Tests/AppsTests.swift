@@ -154,6 +154,28 @@ func registerAppsTests() {
         }
     }
 
+    test("running exposes bundleURL so consumers can tell .app apps from .xpc helpers") {
+        // AppTimeout keys off the `.app` suffix to skip XPC service helpers
+        // (openAndSavePanelService, QuickLookUIService) that transiently flip
+        // to .regular while presenting a panel. The test process is itself a
+        // bundled executable; assert the field is a String path when present,
+        // and that every emitted bundleURL is an absolute path.
+        let entries = Apps.running()
+        var sawBundleURL = false
+        for entry in entries {
+            guard let path = entry["bundleURL"] else { continue }
+            guard let p = path as? String else {
+                throw Expectation(message: "bundleURL should be String, got \(type(of: path))")
+            }
+            sawBundleURL = true
+            try expect(p.hasPrefix("/"), "bundleURL should be an absolute path, got '\(p)'")
+        }
+        // On a live host at least one running app (Finder, Dock, the test
+        // runner) carries a bundleURL — the field must actually be populated,
+        // not silently absent everywhere.
+        try expect(sawBundleURL, "no entry carried a bundleURL — field is missing from the payload")
+    }
+
     test("running pids are unique (one row per NSRunningApplication)") {
         // `runningApplications` is keyed by pid in AppKit; if we ever
         // duplicate the same pid in our output the JS dock/launcher stacks
