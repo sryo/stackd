@@ -2014,6 +2014,13 @@ private enum SkyLightSpaces {
     typealias GetActiveSpaceFn       = @convention(c) (Int32) -> UInt64
     typealias CopySpacesForWindowsFn = @convention(c) (Int32, UInt32, CFArray) -> Unmanaged<CFArray>?
 
+    // uint64 SLSManagedDisplayGetCurrentSpace(int cid, CFStringRef displayIdent)
+    // — signature per Hammerspoon's hs.spaces. Takes the raw "Display
+    // Identifier" string from the managed-displays snapshot (the literal
+    // "Main" included) and returns the space id live from the window server,
+    // where the snapshot's embedded "Current Space" can lag mid-switch.
+    typealias DisplayGetCurrentSpaceFn = @convention(c) (Int32, CFString) -> UInt64
+
     // SLSRegisterConnectionNotifyProc(cid, callback, eventType, context). Used
     // for kCGSEvent space-life notifs that NSWorkspace doesn't surface. Yabai's
     // src/yabai.c is the reference for the exact signature.
@@ -2032,6 +2039,7 @@ private enum SkyLightSpaces {
     static let copyManagedSpaces:    CopyManagedSpacesFn?    = SkyLight.sym("SLSCopyManagedDisplaySpaces")
     static let spaceGetType:         SpaceGetTypeFn?         = SkyLight.sym("SLSSpaceGetType")
     static let getActiveSpace:       GetActiveSpaceFn?       = SkyLight.sym("SLSGetActiveSpace")
+    static let displayGetCurrentSpace: DisplayGetCurrentSpaceFn? = SkyLight.sym("SLSManagedDisplayGetCurrentSpace")
     static let copySpacesForWindows: CopySpacesForWindowsFn? = SkyLight.sym("SLSCopySpacesForWindows")
     static let registerNotifyProc:   RegisterNotifyProcFn?   = SkyLight.sym("SLSRegisterConnectionNotifyProc")
     static let moveWindowsToManagedSpace: MoveWindowsToManagedSpaceFn? = SkyLight.sym("SLSMoveWindowsToManagedSpace")
@@ -2073,9 +2081,32 @@ enum Spaces {
             }
         }
 
+        return entries(
+            displays: displays,
+            mainScreenUUID: mainScreenUUID,
+            displayIDByUUID: displayIDByUUID,
+            currentSpace: { ident in
+                SkyLightSpaces.displayGetCurrentSpace.map { $0(cid, ident as CFString) }
+            },
+            spaceType: { sid in getType(cid, sid) }
+        )
+    }
+
+    /// Pure mapping from the SLSCopyManagedDisplaySpaces displays array to
+    /// the per-UUID payload. `currentSpace` is queried with the RAW display
+    /// identifier (before the "Main" remap — that's what the SLS call takes)
+    /// and wins over the snapshot's embedded "Current Space" when it returns
+    /// a nonzero id; the embedded value is the fallback for a missing symbol
+    /// or a zero result.
+    static func entries(displays: [[String: Any]],
+                        mainScreenUUID: String?,
+                        displayIDByUUID: [String: Int],
+                        currentSpace: (String) -> UInt64?,
+                        spaceType: (UInt64) -> Int32?) -> [String: Any] {
         var out: [String: Any] = [:]
         for disp in displays {
-            var ident = (disp["Display Identifier"] as? String) ?? ""
+            let rawIdent = (disp["Display Identifier"] as? String) ?? ""
+            var ident = rawIdent
             if ident == "Main", let main = mainScreenUUID { ident = main }
             let spacesArr = (disp["Spaces"] as? [[String: Any]]) ?? []
 
@@ -2085,13 +2116,16 @@ enum Spaces {
                     ids.append(n.uint64Value)
                 }
             }
-            let activeID = (disp["Current Space"] as? [String: Any])?["ManagedSpaceID"] as? NSNumber
-            let active = activeID?.uint64Value
+            var active = currentSpace(rawIdent).flatMap { $0 == 0 ? nil : $0 }
+            if active == nil {
+                let embedded = (disp["Current Space"] as? [String: Any])?["ManagedSpaceID"] as? NSNumber
+                active = embedded?.uint64Value
+            }
 
             // SLSSpaceGetType: 0 = user, 4 = fullscreen/tiled. Mirror hs.spaces.
             var isFullscreen = false
             if let a = active {
-                isFullscreen = getType(cid, a) == 4
+                isFullscreen = spaceType(a) == 4
             }
 
             var entry: [String: Any] = [
@@ -2214,6 +2248,9 @@ enum Spaces {
 // which IDs are live on shipping macOS:
 //   1327 — space created
 //   1328 — space destroyed
+//   1401 — space switched (fires AFTER the window server commits the change,
+//          unlike NSWorkspace's activeSpaceDidChange which can arrive while
+//          the managed-displays snapshot still holds the old space)
 //   1204 — Mission Control entered (proxy for the user-driven space re-order
 //          interaction that NSWorkspace's activeSpaceDidChange doesn't fire on
 //          when no active-space change happens)
@@ -2226,6 +2263,7 @@ enum Spaces {
 // empty subs dict).
 private let kCGSEventSpaceCreated:        UInt32 = 1327
 private let kCGSEventSpaceDestroyed:      UInt32 = 1328
+private let kCGSEventSpaceDidChange:      UInt32 = 1401
 private let kCGSEventMissionControlEnter: UInt32 = 1204
 
 private let spacesCGSCallback: SkyLightSpaces.CGSConnectionCallback = { eventType, _, _, _, _ in
@@ -2258,6 +2296,7 @@ final class SpacesObserver: RefCountedObserver {
             let cid = SkyLight.cid
             _ = reg(cid, spacesCGSCallback, kCGSEventSpaceCreated,        nil)
             _ = reg(cid, spacesCGSCallback, kCGSEventSpaceDestroyed,      nil)
+            _ = reg(cid, spacesCGSCallback, kCGSEventSpaceDidChange,      nil)
             _ = reg(cid, spacesCGSCallback, kCGSEventMissionControlEnter, nil)
             SpacesObserver.cgsRegistered = true
         }
