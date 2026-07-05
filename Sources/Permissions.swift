@@ -52,7 +52,7 @@ enum Permissions {
         "broadcasts", "ax", "spotlight", "speech", "vision", "nlp",
         "bonjour", "httpserver", "sqlite", "update", "cursor", "overlay",
         "shortcuts", "sound", "icons", "thumbnails", "events", "menu",
-        "bluetooth", "disks", "hotkey", "urlhandler",
+        "bluetooth", "disks", "hotkey", "urlhandler", "symbol",
 
         // --- Composite permissions (don't auto-infer; explicit only) ------
         // Composites carry stricter side-effects than their base namespace

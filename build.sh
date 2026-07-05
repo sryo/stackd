@@ -76,6 +76,7 @@ SWIFT_SOURCES=(
   Sources/DataSources/Storage.swift
   Sources/DataSources/Proc.swift
   Sources/DataSources/Apps.swift
+  Sources/DataSources/Symbols.swift
   Sources/DataSources/AX.swift
   Sources/DataSources/Overlay.swift
   Sources/DataSources/HTTPServer.swift

@@ -1060,6 +1060,15 @@ final class Bridge: NSObject, WKScriptMessageHandler {
             Icons.forFile(path: body["path"] as? String ?? "", size: body["size"] as? Int ?? 64)
         },
 
+        // SF Symbol → template PNG data-URL for WKWebView consumers (the bar
+        // masks it with currentColor). Returns { dataURL, width, height } or nil.
+        .sync("symbol", permission: "symbol") { body in
+            Symbols.render(name:      body["name"]   as? String ?? "",
+                           pointSize: body["size"]   as? Int    ?? 15,
+                           weight:    body["weight"] as? String ?? "regular",
+                           scale:     body["scale"]  as? String ?? "medium")
+        },
+
         // Spaces — returns array; pre-refactor returned `[]` on deny.
         .sync("spaces.windowSpaces", permission: "spaces", denyValue: [NSNumber]()) { body in
             Spaces.windowSpaces(windowID: UInt32((body["id"] as? Int) ?? 0)).map { NSNumber(value: $0) }

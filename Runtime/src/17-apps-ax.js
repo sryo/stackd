@@ -60,6 +60,18 @@ sd.icons = {
     app(bundleId, opts) { return request({ type: "icons.app",  bundleId, size: (opts && opts.size) || 64 }); },
     file(path, opts)    { return request({ type: "icons.file", path,     size: (opts && opts.size) || 64 }); }
   };
+sd.symbol = {
+    // Render an SF Symbol to a template PNG data-URL for use as a CSS mask
+    // (tint it with `background: currentColor`). Resolves to
+    // { dataURL, width, height } (points, natural aspect), or null if the
+    // symbol name doesn't resolve. opts: { size, weight, scale }.
+    render(name, opts = {}) {
+      return request({ type: "symbol", name,
+                       size:   opts.size   || 15,
+                       weight: opts.weight || "regular",
+                       scale:  opts.scale  || "medium" });
+    }
+  };
 sd.ax = {
     // Back-compat: focused UI element of the frontmost app as a dict
     // { app, pid, role, roleDescription?, value?, selectedText?,
