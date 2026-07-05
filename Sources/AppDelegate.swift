@@ -140,6 +140,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // sheets, etc.) caused the AX-window-to-CGWindowID mapping
             // for the app's MAIN window to oscillate between rebuilds.
             WindowsByID.invalidateCache(pid: pid_t(info.pid), windowID: CGWindowID(info.id))
+            // Also drop this one window's addressability verdict. Retained-
+            // but-closed windows (Preview keeps closed docs in the Window-
+            // Server) otherwise ride their sticky isStandard:true into
+            // sd.windows.all forever. Single-key — sibling windows keep
+            // their verdicts, unlike the pid-wide app-quit invalidation.
+            WindowAddressabilityCache.invalidate(pid: pid_t(info.pid), windowID: CGWindowID(info.id))
             host?.bang(name: "sd.window.destroyed", detail: WindowsLifecycleObserver.detail(info))
             // Destroy bangs fire immediately (stacks eagerly drop the id),
             // but the pumped snapshot can still CONTAIN the dead wid for a

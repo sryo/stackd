@@ -430,6 +430,22 @@ enum WindowAddressabilityCache {
         firstSeenAt = firstSeenAt.filter { !$0.key.hasPrefix(prefix) }
     }
 
+    /// Single-window invalidation for the AX window-destroyed path. Document
+    /// apps (Preview) keep closed windows alive in the WindowServer, so the
+    /// id stays in CGWindowList while AX drops it — a sticky isStandard:true
+    /// entry then feeds the ghost into sd.windows.all all session (apptimeout
+    /// counted Preview's 4 closed windows and never saw it as windowless).
+    /// One key only: the pid's OTHER windows keep their sticky verdicts
+    /// (the reason destroy events must not use the pid-wide overload above).
+    /// A falsely-reported destroy self-heals — the next probe re-establishes
+    /// sticky success.
+    static func invalidate(pid: pid_t, windowID: CGWindowID) {
+        let key = "\(pid)|\(windowID)"
+        lock.lock(); defer { lock.unlock() }
+        cache.removeValue(forKey: key)
+        firstSeenAt.removeValue(forKey: key)
+    }
+
     /// AX-confirmed verdict, bypassing the probe machinery. WindowsAXObserver
     /// already holds the window element at create time and read its subrole —
     /// re-deriving the same answer through `probe()` is not just wasteful but

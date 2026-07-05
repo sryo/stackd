@@ -470,6 +470,27 @@ func registerWindowsTests() {
         try expectEqual(p.isStandard, false)
     }
 
+    test("WindowAddressabilityCache.invalidate(pid:windowID:) drops one key, keeps siblings") {
+        // The AX window-destroyed hook. A retained-but-closed window (Preview
+        // keeps closed docs in the WindowServer) must lose its sticky
+        // isStandard:true so the next probe re-evaluates and drops the ghost
+        // from Windows.all() — while the pid's OTHER windows keep their
+        // verdicts (per-window destroys must not behave like app-quit).
+        let pid: pid_t = 7_777_707
+        defer { WindowAddressabilityCache.invalidate(pid: pid) }
+        WindowAddressabilityCache.confirm(pid: pid, windowID: 1, isStandard: true, isMinimized: false, now: 1000.0)
+        WindowAddressabilityCache.confirm(pid: pid, windowID: 2, isStandard: true, isMinimized: false, now: 1000.0)
+        WindowAddressabilityCache.invalidate(pid: pid, windowID: 1)
+        // wid 1: no cache entry left → fake pid probes go down the unseeded
+        // path (grace optimism: addressable true but isStandard FALSE).
+        let ghost = WindowAddressabilityCache.probe(pid: pid, windowID: 1, now: 1000.1)
+        try expectEqual(ghost.isStandard, false,
+                        "invalidated window must lose its sticky isStandard verdict")
+        // wid 2: untouched sticky success survives.
+        let sibling = WindowAddressabilityCache.probe(pid: pid, windowID: 2, now: 1000.1)
+        try expectEqual(sibling.isStandard, true, "sibling window's verdict must survive")
+    }
+
     test("WindowAddressabilityCache.standardVerdict — minimized ⇒ standard regardless of subrole reading") {
         // Regression: Terminal's minimized windows report AXSubrole ==
         // AXDialog (macOS 26). A window first probed while it sat in the
