@@ -1295,6 +1295,11 @@ final class HotkeyRegistry {
     private var nextId: UInt32 = 1
     private var eventHandler: EventHandlerRef?
 
+    // Ref-counting for identical keyCode+mods combos so N per-display stack
+    // instances share one process-global Carbon registration (see bind()).
+    private var hotkeyIdByCombo: [UInt64: UInt32] = [:]
+    private var comboRefCounts: [UInt64: Int] = [:]
+
     // Active mode. skhd's "modal keymap" model: while a non-default mode is
     // active, only bindings declared for that mode (mode == currentMode) fire.
     // Bindings with mode == nil are mode-agnostic and always fire — useful
@@ -1336,6 +1341,22 @@ final class HotkeyRegistry {
             return nil
         }
 
+        // Carbon registers hot keys process-globally (GetApplicationEventTarget),
+        // so one keyCode+mods combo can be live only once. A stack rendered on
+        // N displays spawns N Bridge instances that each bind the manifest's
+        // hotkeys; the 2nd..Nth RegisterEventHotKey then returned
+        // eventHotKeyExistsErr (-9878) and left the chord owned by whichever
+        // instance won the race (fragile under display hot-plug). Ref-count
+        // identical combos: the first bind owns the Carbon registration and the
+        // dispatch Binding, later binds share it, and only the last release
+        // unregisters.
+        let combo = (UInt64(keyCode) << 32) | UInt64(mods)
+        if let ownerId = hotkeyIdByCombo[combo] {
+            comboRefCounts[combo, default: 0] += 1
+            FileHandle.standardError.write(Data("stackd: hotkey bound \(spec) id=\(ownerId) (shared refs=\(comboRefCounts[combo]!))\n".utf8))
+            return Token { [weak self] in self?.releaseCombo(combo) }
+        }
+
         let id = nextId
         nextId += 1
         bindings[id] = Binding(callback: callback, mode: mode, apps: apps, excludeApps: excludeApps)
@@ -1349,8 +1370,10 @@ final class HotkeyRegistry {
             return nil
         }
         refs[id] = ref
+        hotkeyIdByCombo[combo] = id
+        comboRefCounts[combo] = 1
         FileHandle.standardError.write(Data("stackd: hotkey bound \(spec) id=\(id)\(mode.map { " mode=\($0)" } ?? "")\(apps.map { " apps=\($0)" } ?? "")\n".utf8))
-        return Token { [weak self] in self?.unbind(id: id) }
+        return Token { [weak self] in self?.releaseCombo(combo) }
     }
 
     /// Enter a named mode. While active, only bindings with the matching
@@ -1373,6 +1396,20 @@ final class HotkeyRegistry {
             UnregisterEventHotKey(ref)
         }
         bindings.removeValue(forKey: id)
+    }
+
+    // Decrement a combo's ref-count; the last release tears down the shared
+    // Carbon registration. Every Token minted by bind() routes here.
+    private func releaseCombo(_ combo: UInt64) {
+        guard let n = comboRefCounts[combo] else { return }
+        if n > 1 {
+            comboRefCounts[combo] = n - 1
+            return
+        }
+        comboRefCounts.removeValue(forKey: combo)
+        if let id = hotkeyIdByCombo.removeValue(forKey: combo) {
+            unbind(id: id)
+        }
     }
 
     fileprivate func dispatch(id: UInt32) {
