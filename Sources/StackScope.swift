@@ -18,6 +18,13 @@ final class Token {
 final class StackScope {
     private var tokens: [Token] = []
 
+    /// Latches true once `drain()` runs. A stack's scope drains exactly once
+    /// at unload, after which the Bridge is discarded — so an async resource
+    /// creation (e.g. overlay.region.create) that lands AFTER the drain must
+    /// bail rather than register a handle the one-shot teardown already ran
+    /// past and can never reclaim. Overlay create paths gate on this.
+    private(set) var isDrained = false
+
     func adopt(_ token: Token) { tokens.append(token) }
 
     /// Convenience for the common `scope.adopt(maybeToken)` pattern.
@@ -31,6 +38,7 @@ final class StackScope {
     /// (e.g. an AXObserver added to a per-pid AXAppObserver — tear down the
     /// notification before the observer's CFRunLoopSource).
     func drain() {
+        isDrained = true
         for t in tokens.reversed() { t.cancel() }
         tokens.removeAll()
     }

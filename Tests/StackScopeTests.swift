@@ -60,6 +60,19 @@ func registerStackScopeTests() {
         try expectEqual(bFired, 1)
     }
 
+    test("isDrained latches true after drain — gates post-teardown overlay creates") {
+        // The overlay.region.create / overlay.attach async blocks read
+        // bridge.scope.isDrained to bail if the stack unloaded while their
+        // create was queued (otherwise the panel orphans past the one-shot
+        // scope-drain teardown). Fresh scope: not drained. After drain: drained.
+        let scope = StackScope()
+        try expectEqual(scope.isDrained, false)
+        scope.adopt(Token { })
+        try expectEqual(scope.isDrained, false)
+        scope.drain()
+        try expectEqual(scope.isDrained, true)
+    }
+
     test("adopt after drain — newly adopted tokens still fire on next drain") {
         // StackScope is a reusable container; drain() clears the list but
         // does not invalidate the scope itself.

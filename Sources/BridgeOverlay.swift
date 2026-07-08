@@ -54,6 +54,12 @@ extension Bridge {
                           let wid = body["targetId"] as? Int else {
                         bridge?.respond(requestId: requestId, value: NSNull()); return
                     }
+                    // Scope already drained (stack unloaded/reloaded while this
+                    // async create was queued): creating now orphans the panel,
+                    // since the one-shot scope-drain teardown already passed.
+                    guard !bridge.scope.isDrained else {
+                        bridge.respond(requestId: requestId, value: NSNull()); return
+                    }
                     let html = body["html"] as? String ?? ""
                     let css  = body["css"]  as? String ?? ""
                     let js   = body["js"]   as? String ?? ""
@@ -196,6 +202,13 @@ extension Bridge {
                           let w = (r["w"] as? NSNumber)?.doubleValue,
                           let h = (r["h"] as? NSNumber)?.doubleValue else {
                         bridge?.respond(requestId: requestId, value: NSNull()); return
+                    }
+                    // Scope already drained (stack unloaded/reloaded while this
+                    // async create was queued): creating now orphans the panel,
+                    // since the one-shot scope-drain teardown already passed —
+                    // this is the region-overlay (snapshot rail) leak fix.
+                    guard !bridge.scope.isDrained else {
+                        bridge.respond(requestId: requestId, value: NSNull()); return
                     }
                     let html = body["html"] as? String ?? ""
                     let css  = body["css"]  as? String ?? ""
