@@ -18,7 +18,7 @@ struct StackManifest: Decodable {
     /// bottom-right corner. Manifest fields that would override those
     /// (anchor, size, material, cornerRadius, clickThrough) are ignored
     /// and StackDoctor warns. Replaces the manual 1×1 + clickThrough
-    /// boilerplate every "no-UI" stack used to repeat.
+    /// boilerplate each "no-UI" stack would otherwise repeat.
     let headless: Bool?
     // Mutable so StackHost can merge auto-inferred channel permissions
     // (scanned from the stack's source) before passing to Bridge.start.
@@ -396,8 +396,8 @@ final class StackHost {
             //     height. With "display": "all" + multi-monitor (notched
             //     MacBook + external), each instance is sized per-display
             //     (~39px notched, ~24px standard, ~57px "More Space" mode).
-            //   size.h > 0 → max(h, menuBarHeight) — legacy behavior, keeps
-            //     stacks that want a guaranteed minimum unaffected.
+            //   size.h > 0 → max(h, menuBarHeight) — keeps stacks that want a
+            //     guaranteed minimum unaffected.
             let full = screen.frame
             let menuBarHeight = StackHost.menubarHeight(frame: full, visibleFrame: screen.visibleFrame)
             let height = h > 0 ? max(h, menuBarHeight) : menuBarHeight
@@ -428,8 +428,8 @@ final class StackHost {
     /// `frame.height - visibleFrame.height`. The latter sums every reserved
     /// inset including the dock when the dock sits on the same display,
     /// which inflates the bar's height by the dock height and pushes the
-    /// bar window dock-height below the actual menubar (the regression
-    /// fixed here). The top inset is unambiguously the menubar.
+    /// bar window dock-height below the actual menubar. The top inset is
+    /// unambiguously the menubar.
     ///
     /// Returns 0 when no menubar (e.g. external display with "Displays
     /// have separate Spaces" off). The caller's `h > 0 ? max(h, …) : …`

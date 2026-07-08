@@ -675,8 +675,8 @@ final class Bridge: NSObject, WKScriptMessageHandler {
             // folder; this tells the author exactly what to add.
             log("\(type) denied — add \"\(perm)\" to permissions in stack.json")
             // Per-primitive denial value (false for void/Bool-returning, NSNull
-            // for nullable readers). Matches the pre-refactor handler-per-type
-            // shape so existing stacks see the same shape they always did.
+            // for nullable readers) so a denied call returns the same shape a
+            // granted one would.
             respond(requestId: requestId, value: primitive.denyValue)
             return
         }
@@ -1033,9 +1033,9 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         .sync("cursor.position", permission: "cursor") { _ in Cursor.position() },
 
         // Curated AX surface for the system-wide focused text element.
-        // Replaces the five-call sd.ax.{focused,attribute,parameterizedAttribute,
-        // release} dance muse / palette / text-expander stacks used to do for
-        // every transformation tick. `.ax` (main-hop) because AX traffic
+        // Collapses the five-call sd.ax.{focused,attribute,parameterizedAttribute,
+        // release} dance into one call for per-tick text transformations.
+        // `.ax` (main-hop) because AX traffic
         // deadlocks under cross-thread access — same constraint that put
         // apps.menu behind `.ax`. Reader returns nil when no AX-text element
         // has focus; setters return false on the same condition.
@@ -1069,7 +1069,7 @@ final class Bridge: NSObject, WKScriptMessageHandler {
                            scale:     body["scale"]  as? String ?? "medium")
         },
 
-        // Spaces — returns array; pre-refactor returned `[]` on deny.
+        // Spaces — returns array; denies to an empty array.
         .sync("spaces.windowSpaces", permission: "spaces", denyValue: [NSNumber]()) { body in
             Spaces.windowSpaces(windowID: UInt32((body["id"] as? Int) ?? 0)).map { NSNumber(value: $0) }
         },

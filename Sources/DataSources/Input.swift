@@ -190,9 +190,9 @@ enum InputAX {
 // MARK: Mouse — pointer location + warp (read side)
 // MARK: ============================================================
 
-/// Fires on every CGEvent mouse move. Replaces the 33 Hz `mouseTimer` poll
-/// in Bridge — idle CPU drops to zero, active movement updates faster than
-/// the old 30 Hz ceiling.
+/// Fires on every CGEvent mouse move — event-driven, not polled, so idle
+/// CPU is zero and active movement updates at the event rate rather than a
+/// fixed poll ceiling.
 ///
 /// Lazy: the CGEventTap handler is installed on first subscribe and removed
 /// when the last unsubscribes (after the 5s debounce). The shared eventtap
@@ -798,8 +798,7 @@ final class EventTapRegistry {
 // MARK: EventsSynth — synthesize keys/clicks/scrolls (write side)
 // MARK: ============================================================
 
-// Write side of the input-events stream. Originally split out of Events.swift
-// to mirror the Camera.swift vs CameraCapture.swift separation pattern.
+// Write side of the input-events stream.
 //
 // EventsSynth — type a string, fire a key combo, scroll, click. Posts
 // CGEvents to the session tap so they target the user's foreground app.

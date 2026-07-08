@@ -77,7 +77,7 @@ final class ScreenshotHider {
     /// Detection is event-driven: KVO on `NSWorkspace.runningApplications`
     /// (documented KVO-compliant), diffed for the screencaptureui bundle id.
     /// screencaptureui is a launchd-spawned LSUIElement agent that is NOT
-    /// resident at idle (verified macOS 26.5.1, 2026-07-01) — it appears on
+    /// resident at idle (verified macOS 26.5.1) — it appears on
     /// Cmd-Shift-4/5 and exits with the session, so presence maps 1:1 to
     /// "picker is up". KVO chosen over didLaunch/didTerminate notifications
     /// because those have historically been unreliable for UIElement agents;

@@ -2,8 +2,7 @@ import Foundation
 
 /// Single source of truth for every channel the daemon vends.
 ///
-/// Two parallel hardcoded tables used to drift apart because they weren't
-/// derived from the same list:
+/// Two parallel tables both derive from this one list so they can't drift:
 ///
 ///   1. `Bridge.replayTable` (Swift) — `(permission, channel)` tuples
 ///      driving the "ready" RPC's snapshot replay. For each tuple where the
@@ -15,10 +14,10 @@ import Foundation
 ///      matches each `sd.<path>` against the longest-first sorted key set
 ///      to subscribe placeholder expressions to the right channels.
 ///
-/// Both now derive from `Channels.all` below. Adding a new channel is a
+/// Both derive from `Channels.all` below. Adding a new channel is a
 /// single-place edit: drop a `Channel(…)` entry in this file. Both the
 /// Swift replay path and the JS template-engine path pick it up — no
-/// chance of half-wiring it like before.
+/// chance of half-wiring it.
 ///
 /// The `jsPath` is optional because a few channels exist daemon-side
 /// without a templatable JS surface (e.g. `menubarItems` / `menubarChanged`
@@ -112,9 +111,9 @@ enum Channels {
         Channel(name: "hostLoad",        jsPath: "host.load",          permission: "host"),
         Channel(name: "touchdevice",     jsPath: "touchdevice",        permission: "touchdevice"),
         Channel(name: "displayLink",     jsPath: "displayLink",        permission: "displayLink"),
-        // F15: granular per-event-type channels split out of the legacy
-        // focusedWindow / frontApp pumps. Same permissions as the union
-        // channels so stacks declaring "app" / "windows" pick them up.
+        // Granular per-event-type channels. Same permissions as the union
+        // focusedWindow / frontApp channels so stacks declaring "app" /
+        // "windows" pick them up.
         Channel(name: "appActivated",    jsPath: "app.activated",         permission: "app"),
         Channel(name: "focusedChanged",  jsPath: "windows.focusedChanged",permission: "windows"),
         Channel(name: "titleChanged",    jsPath: "windows.titleChanged",  permission: "windows"),

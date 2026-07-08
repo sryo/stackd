@@ -90,8 +90,8 @@ class RefCountedObserver {
         nextId += 1
         subs[id] = cb
 
-        // Match the legacy pattern: subscribers expect to be primed immediately
-        // so stacks render correct initial state before the first system event.
+        // Subscribers expect to be primed immediately so stacks render correct
+        // initial state before the first system event.
         cb()
 
         return Token { [weak self] in self?.unsubscribe(id) }

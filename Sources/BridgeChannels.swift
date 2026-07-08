@@ -17,7 +17,7 @@ extension Bridge {
     /// `startWorkspace` and are handled separately). The same-commit guard
     /// is ChannelStartersTests: every replayable channel in `Channels.all`
     /// must have its permission here (or be workspace-served) — a new
-    /// `Channel(...)` without a starter used to compile fine and silently
+    /// `Channel(...)` without a starter would compile fine but silently
     /// never replay.
     static let channelStarters: [(permission: String, start: (Bridge) -> Void)] = [
         ("battery",     { $0.startBattery() }),

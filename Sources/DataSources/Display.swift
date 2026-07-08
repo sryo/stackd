@@ -166,11 +166,10 @@ final class DisplayObserver: RefCountedObserver {
         // the safety-net poll below; on a typical Mac, F1/F2 + System
         // Settings cover ~all user-driven brightness changes, so the live
         // path handles the cases the user actually notices.
-        // Verified on this user's macOS (2026-06-02): the three bezel DN
-        // names below never fire during F1/F2 keypress or System Settings
-        // slider movement. Keeping them in case a future macOS adds them or
-        // a third-party tool posts them — they're cheap. The 1s safety
-        // poll is what actually catches brightness changes today.
+        // The three bezel DN names below never fire during F1/F2 keypress
+        // or System Settings slider movement. Kept in case a future macOS
+        // adds them or a third-party tool posts them — they're cheap. The
+        // 1s safety poll is what actually catches brightness changes today.
         let dn = DistributedNotificationCenter.default()
         let brightnessTokens: [(NSObjectProtocol)] = [
             "com.apple.BezelUI.BSBrightnessNotification",

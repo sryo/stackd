@@ -22,10 +22,9 @@ final class StackWindow: NSPanel, WKNavigationDelegate {
 
     // First-paint gate. The panel is held at alphaValue=0 from `orderFront`
     // until WKWebView's `didFinishNavigation` callback fires, then revealed
-    // in one runloop tick. This replaces the old 50ms `asyncAfter` band-aid
-    // that papered over the race between orderFront and first WebKit paint —
-    // visible as a "flash" of empty material (especially with `.glass` /
-    // `.vibrancy`) before the HTML rendered.
+    // in one runloop tick. This closes the race between orderFront and first
+    // WebKit paint — otherwise a "flash" of empty material (especially with
+    // `.glass` / `.vibrancy`) shows before the HTML renders.
     //
     // Subsequent loads inside the same window (sd.window.load, JS navigation)
     // don't re-hide/re-reveal — `gate.state` stays `.revealed` after the first
@@ -338,9 +337,8 @@ final class StackWindow: NSPanel, WKNavigationDelegate {
     /// the project rule is "stackd is never the frontmost app." The window's
     /// `.nonactivatingPanel` style mask + `canBecomeKey = true` lets this
     /// panel receive key events while the user's previous app stays visually
-    /// and behaviorally frontmost. NSApp.activate(ignoringOtherApps:) was
-    /// previously called here under the assumption it was necessary for key
-    /// state; it's not — nonactivatingPanel is specifically designed for
+    /// and behaviorally frontmost. NSApp.activate(ignoringOtherApps:) is not
+    /// needed for key state — nonactivatingPanel is specifically designed for
     /// this case.
     func invoke() {
         makeKeyAndOrderFront(nil)

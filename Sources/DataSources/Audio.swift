@@ -319,9 +319,9 @@ enum Audio {
 
     // Back-compat statics for AudioObserver's listener-block remove path,
     // which compares property-address selector+scope at unbind time. Kept
-    // as `static var` (rather than recomputed inline) because the old code
-    // passed `&Audio.mainVolumeAddress` directly to CoreAudio and we want
-    // to preserve the same call shape for the output observer.
+    // as `static var` (rather than recomputed inline) so
+    // `&Audio.mainVolumeAddress` can be passed directly to CoreAudio,
+    // preserving the same call shape for the output observer.
     static var mainVolumeAddress = AudioObjectPropertyAddress(
         mSelector: kAudioHardwareServiceDeviceProperty_VirtualMainVolume,
         mScope:    kAudioDevicePropertyScopeOutput,

@@ -2,8 +2,8 @@ import Foundation
 
 /// Canonical list of every permission stackd vends.
 ///
-/// Before this consolidation, three parallel hardcoded lists drifted apart
-/// when a primitive landed without all three being touched:
+/// Three consumers derive from this one list instead of keeping separate
+/// hardcoded copies that drift when a primitive lands without all being touched:
 ///
 ///   1. `StackDoctor.known` (Sources/StackTemplates.swift) — the allowlist
 ///      for `permissions:` entries in `stack.json`. Drift here means the
@@ -16,13 +16,7 @@ import Foundation
 ///
 ///   3. `Bridge.primitives` (Sources/Bridge.swift) — each `.sync(...)`,
 ///      `.custom(...)`, `.ax(...)`, `.syncBridge(...)` registration carries
-///      a `permission:` gate string. There was no central enumeration —
-///      the source of truth was buried in the registrations themselves.
-///
-/// Drift caught after this refactor landed: `bluetooth`, `disks`, `hotkey`,
-/// `urlhandler` (vended by `Bridge.primitives` but missing from the doctor
-/// allowlist), and `sensors` (auto-inferred but missing from the doctor
-/// allowlist). All consolidated into `Permissions.all` below.
+///      a `permission:` gate string.
 ///
 /// Same-commit guard: `PermissionsRegistryTests` walks `Bridge.primitivePermissions`
 /// and asserts every entry is in `Permissions.all`. Ship a new primitive

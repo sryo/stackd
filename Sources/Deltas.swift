@@ -14,8 +14,8 @@ extension Bridge {
     /// `changed`); the loop below is identical. Returns the new
     /// key-indexed cache so callers don't re-walk the snapshot.
     ///
-    /// Rows whose `identity` returns nil are dropped — matches what the
-    /// per-channel adapters used to do (missing `id` / `displayID`).
+    /// Rows whose `identity` returns nil are dropped (e.g. missing `id` /
+    /// `displayID`).
     static func computeDelta<K: Hashable>(
         snapshot: [[String: Any]],
         previous: [K: [String: Any]],

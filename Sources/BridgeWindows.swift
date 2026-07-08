@@ -35,9 +35,9 @@ import Foundation
 ///     `begin` installs `WindowsByID.batchSink` (setFrame calls queue
 ///     full frames instead of writing); `commit` applies every queued
 ///     frame through the normal AX setFrame dance in one main-thread
-///     burst and clears the sink. All-AX by design — the old
-///     SLS-position/AX-size split raced each app's stale frame cache
-///     (see `WindowsByID.batchSink` for the 2026-06-10 post-mortem).
+///     burst and clears the sink. All-AX by design — a mixed
+///     SLS-position/AX-size split races each app's stale frame cache
+///     (see `WindowsByID.batchSink` for the full reasoning).
 ///     Process-global — if a batch is already open, begin refuses
 ///     rather than nest, matching the JS-side single-await model.
 ///     Both hop to main because AX wants the main thread.
@@ -141,8 +141,8 @@ extension Bridge {
                     ) { outcome in
                         switch outcome {
                         case .instant(let ok):
-                            // Probe even on ok=false — the old contract
-                            // reported the live frame regardless.
+                            // Probe even on ok=false — report the live
+                            // frame regardless of write success.
                             probe(ok)
                         case .animated(true):
                             probe(true)

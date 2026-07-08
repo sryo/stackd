@@ -10,7 +10,7 @@ import CoreGraphics
 // and sets geometry.
 //
 // Why NSPanel + WKWebView instead of an SLS-owned sibling window (the
-// JankyBorders pattern this file used to implement):
+// JankyBorders pattern):
 // - WebKit wants its own CALayer hosting tree; SLWindowContextCreate-bound
 //   CGContexts don't compose with WKWebView's layers.
 // - NSPanel already gives us borderless + transparent + click-through +
@@ -310,10 +310,9 @@ enum OverlayGeometry {
 /// explicit repins (CGS 808 "window reordered" for the target wid, routed
 /// via `Overlay.notifyWindowReordered`). The tick cadence is a SAFETY
 /// CEILING, not the mechanism: 808 is registered per-connection in
-/// WindowEvents and is yabai's canonical reorder source, but per the
-/// audio-processes precedent (2026-06-05: a CoreAudio listener that
-/// registered fine and never fired) we don't trust an unverified listener
-/// alone for a user-visible invariant. One SLSTransactionOrderWindow per
+/// WindowEvents and is yabai's canonical reorder source, but a listener
+/// that registers fine can silently never fire, so we don't trust an
+/// unverified listener alone for a user-visible invariant. One SLSTransactionOrderWindow per
 /// ~cadence is a single WindowServer transaction — imperceptible cost
 /// against "border silently behind its own target until the next move."
 enum OverlayRepinPolicy {

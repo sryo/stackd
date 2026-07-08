@@ -219,8 +219,7 @@ final class FSWatch {
             // raw `UnsafePointer<UnsafePointer<CChar>?>` and the NSArray
             // bridge would interpret the first 8 bytes of a path string
             // as an object pointer → EXC_BAD_ACCESS on the next message
-            // send. (Real crash logged 2026-06-03, fault addr decoded as
-            // path-string bytes.)
+            // send.
             let cfPaths = Unmanaged<CFArray>.fromOpaque(evPaths).takeUnretainedValue()
             let paths = (cfPaths as NSArray) as? [String] ?? []
             let flagsBuf = UnsafeBufferPointer(start: evFlags, count: numEvents)

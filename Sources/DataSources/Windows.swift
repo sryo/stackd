@@ -5,10 +5,10 @@ import Foundation
 
 // SLSTransaction* — atomic batch of window geometry/order mutations committed
 // to WindowServer in one round-trip. Consumed by Overlay.swift's per-tick
-// reshape+order. (sd.windows.batch no longer uses it: the batch path queues
+// reshape+order. (sd.windows.batch does not use it: the batch path queues
 // full frames and applies them all-AX at commit — see the batchSink doc
-// comment in WindowsByID for the channel-split race that killed the
-// SLS-position/AX-size design on 2026-06-10.)
+// comment in WindowsByID for the channel-split race that rules out the
+// SLS-position/AX-size split.)
 //
 // Lives here (not in Sources/Private/SkyLight.swift) because the primary
 // domain is windows; Overlay imports as `Windows.Transaction.*`. Mirrors
@@ -315,8 +315,8 @@ enum Windows {
 // WindowsLifecycleObserver on window-destroyed events).
 //
 // Why on the daemon side: lets every stack consume sd.windows.all without
-// each one re-implementing per-pass probing (the previous design had
-// windowscape doing 2N AX calls per tile pass — costly and racy).
+// each one re-implementing per-pass probing — otherwise a tiler does
+// 2N AX calls per tile pass, costly and racy.
 enum WindowAddressabilityCache {
     struct Probe { let addressable: Bool; let isStandard: Bool; let isMinimized: Bool; let ts: TimeInterval }
     private static var cache: [String: Probe] = [:]
@@ -333,8 +333,8 @@ enum WindowAddressabilityCache {
     // AX's 100ms messaging timeout drops queries under load (spotlight
     // indexing, brightness poll, rapid tile passes); a once-addressable
     // window doesn't randomly become un-addressable while its pid is
-    // alive. Re-probing on TTL expiry kept causing Terminal to lose its
-    // verdict to a transient AX timeout.
+    // alive. Re-probing on TTL expiry would let a transient AX timeout
+    // drop a once-established verdict.
     // Failed probes are re-checked aggressively so an app that JUST opened
     // a window gets re-evaluated within a beat.
     private static let failTtl: TimeInterval = 0.5
@@ -433,8 +433,8 @@ enum WindowAddressabilityCache {
     /// Single-window invalidation for the AX window-destroyed path. Document
     /// apps (Preview) keep closed windows alive in the WindowServer, so the
     /// id stays in CGWindowList while AX drops it — a sticky isStandard:true
-    /// entry then feeds the ghost into sd.windows.all all session (apptimeout
-    /// counted Preview's 4 closed windows and never saw it as windowless).
+    /// entry then feeds the ghost into sd.windows.all all session, so a
+    /// consumer counts closed windows and never sees the app as windowless.
     /// One key only: the pid's OTHER windows keep their sticky verdicts
     /// (the reason destroy events must not use the pid-wide overload above).
     /// A falsely-reported destroy self-heals — the next probe re-establishes
@@ -479,11 +479,10 @@ enum WindowAddressabilityCache {
     /// Subrole reading → isStandard verdict, minimize-aware. A minimized
     /// window's AXSubrole is unreliable — Terminal's minimized windows
     /// report AXDialog (macOS 26) — so a window whose first successful
-    /// probe happened while it sat in the Dock got sticky-cached as
-    /// non-standard, filtered out of Windows.all(), and consumers read
-    /// the app as windowless (apptimeout killed Terminal over exactly
-    /// this). Only real user windows can be minimized to the Dock, so
-    /// minimized ⇒ standard regardless of the reading.
+    /// probe happened while it sat in the Dock would get sticky-cached as
+    /// non-standard and filtered out of Windows.all(), leaving consumers to
+    /// read the app as windowless. Only real user windows can be minimized
+    /// to the Dock, so minimized ⇒ standard regardless of the reading.
     static func standardVerdict(subrole: String?, isMinimized: Bool) -> Bool {
         isMinimized || subrole == (kAXStandardWindowSubrole as String)
     }
@@ -514,20 +513,19 @@ enum WindowsByID {
     // burst. Process-wide because one batch runs at a time (begin refuses to
     // nest, matching the JS-side single-await model).
     //
-    // Why no SLSTransaction any more: the original design split one window's
-    // geometry across two unsynchronized channels — size via AX at setFrame
-    // time, position via SLS at commit. AX writes propagate asynchronously
-    // to the target app, and an app processing a size set performs a full
-    // -[NSWindow setFrame:] (origin + size) with the origin read from its
-    // own frame cache — which a server-side SLS move does NOT update. Each
-    // app's late resize re-asserted its STALE origin over the committed SLS
-    // position (2026-06-10: windows stacked at old origins / offscreen).
+    // Why all-AX (no SLSTransaction): splitting one window's geometry across
+    // two unsynchronized channels — size via AX at setFrame time, position
+    // via SLS at commit — races each app's frame cache. AX writes propagate
+    // asynchronously to the target app, and an app processing a size set
+    // performs a full -[NSWindow setFrame:] (origin + size) with the origin
+    // read from its own frame cache — which a server-side SLS move does NOT
+    // update. The app's late resize re-asserts its STALE origin over the
+    // committed SLS position, stacking windows at old origins / offscreen.
     // Queueing full frames and applying them all on the single AX channel
     // can't hit that race, and it drops the SkyLight symbol dependency that
-    // made begin fail outright on some daemon states. The cost is the
-    // single-compositor-flip aesthetic the SLS commit theoretically bought —
-    // which never actually worked. WindowTransaction (the SLS enum above)
-    // stays: Overlay.swift's per-tick reshape+order still consumes it.
+    // made begin fail outright on some daemon states.
+    // WindowTransaction (the SLS enum above) stays: Overlay.swift's per-tick
+    // reshape+order still consumes it.
     static var batchSink: ((CGWindowID, CGRect) -> Void)?
 
     // Pending frames for the open batch. Last-write-wins per window id,
@@ -678,8 +676,8 @@ enum WindowsByID {
     static func setFrame(windowID: CGWindowID, x: Double, y: Double, w: Double, h: Double) -> Bool {
         // Batch mode: queue the full frame; nothing touches AX until commit
         // applies every queued frame in one burst (single channel — see the
-        // batchSink doc comment for the 2026-06-10 channel-split race the
-        // old SLS-position/AX-size design hit). True = queued.
+        // batchSink doc comment for the channel-split race that rules out a
+        // mixed SLS-position/AX-size split). True = queued.
         if let sink = batchSink {
             sink(windowID, CGRect(x: x, y: y, width: w, height: h))
             return true
@@ -742,8 +740,8 @@ enum WindowsByID {
     /// grid-snapping apps (Terminal cell rounding is convergence, not
     /// refusal), and a terminal `refused` verdict for apps that clamp the
     /// major geometry (Calculator, fixed-size dialogs). Async because the
-    /// app-propagation wait is 60ms per read-back — the old synchronous
-    /// shape slept the main thread for it; asyncAfter keeps main live.
+    /// app-propagation wait is 60ms per read-back; asyncAfter keeps the main
+    /// thread live instead of sleeping it.
     ///
     /// completion payload: { ok, actual: {x,y,w,h} | null, refused }.
     /// ok=false means the element wasn't reachable / the write failed;
@@ -974,9 +972,9 @@ enum WindowsByID {
     }
 
     /// Curated `kAXSubrole == kAXStandardWindow` check. The single most common
-    /// AX gate tilers and overlays make ("should I touch this window?"). Stacks
-    /// previously baked the subrole comparison into JS; this one-liner makes
-    /// it discoverable alongside `subrole(id)`. Matches `hs.window:isStandard()`.
+    /// AX gate tilers and overlays make ("should I touch this window?"). Spares
+    /// stacks from baking the subrole comparison into JS, and keeps it
+    /// discoverable alongside `subrole(id)`. Matches `hs.window:isStandard()`.
     /// One spelling of "is this a standard window" for every consumer —
     /// nil (unreadable subrole) collapses to false.
     static func isStandardSubrole(_ subrole: String?) -> Bool {
@@ -1153,14 +1151,12 @@ enum WindowsByID {
 
 // Low-frequency CGWindowList diff that runs alongside `WindowsAXObserver`.
 //
-// Role after the AX-primary rework (Slice 2): NOT the primary source. AX
+// Role: NOT the primary source. AX
 // fires create / destroy / title within ~1s of the action. This poll is
 // the **drift sensor** per CLAUDE.md ("low-frequency safety timer
 // alongside listeners is fine — pure polling for state … could push you
 // on is a bug"). When the poll catches a create / destroy / title-change
-// that AX didn't fire for in the last 12s, we log `poll missed-by-ax …`
-// — same diagnostic shape as the CoreAudio listener-silently-fails
-// incident the audio-processes bar hit on 2026-06-05.
+// that AX didn't fire for in the last 12s, we log `poll missed-by-ax …`.
 //
 // 10s tick is the chosen ceiling: long enough that idle cost is
 // negligible (1 CGWindowList call per 10s = ~1ms work / 10000ms idle),
@@ -1400,10 +1396,9 @@ enum WindowsPumpRetry {
 /// Check-and-mark ledger for create announcements. Pure so the dedup
 /// contract is headless-testable; owned by WindowLifecycleFanout — the ONE
 /// point all three announcers (AX create, CGS 1325 fast path, 10s poll)
-/// already funnel through. Scattered per-announcer check+mark is how the
-/// 2026-07-02 dropped-creates regression happened (one announcer consulted
-/// a map another path polluted), and a fourth announcer added later can't
-/// forget a protocol the funnel owns.
+/// already funnel through. Scattered per-announcer check+mark drops creates
+/// (one announcer consults a map another path polluted), and a fourth
+/// announcer added later can't forget a protocol the funnel owns.
 struct CreateAnnouncementLedger {
     /// One tick of the safety poll + margin — same window the poll's
     /// missed-by-ax gate uses.
@@ -1473,15 +1468,14 @@ enum WindowLifecycleFanout {
 // MARK: - FrontmostWindowObserver: event-driven focus/title changes
 
 /// Singleton that maintains an AXAppObserver bound to whichever app is
-/// currently frontmost. Replaces the 1s `workspaceTimer` poll in Bridge —
-/// within-app focused-window / title changes fire the moment AX reports
-/// them, with no polling lag.
+/// currently frontmost. Event-driven, not polled — within-app focused-window
+/// / title changes fire the moment AX reports them, with no polling lag.
 ///
 /// Subscribers get a no-arg callback ("something focus-related changed,
 /// re-query"). Bridge.startWorkspace already does the diff + push, so this
 /// observer just needs to nudge.
 ///
-/// Per-event-type fan-out (F15): in addition to the union `fire()` that
+/// Per-event-type fan-out: in addition to the union `fire()` that
 /// drives the legacy `sd.windows.focused` channel, this observer exposes
 /// separate `onAppActivated` / `onFocusedChanged` / `onTitleChanged`
 /// closures. Bridge sets them once and they pump the granular channels
@@ -1629,7 +1623,7 @@ final class FrontmostWindowObserver: RefCountedObserver {
 }
 
 // =====================================================================
-// MARK: - CGS window events (formerly Sources/DataSources/WindowEvents.swift)
+// MARK: - CGS window events
 // =====================================================================
 
 // Window-level CGS notifications via SkyLight private SPI. AX stays
@@ -1640,9 +1634,9 @@ final class FrontmostWindowObserver: RefCountedObserver {
 //   - 804 — window destroyed. Belt-and-suspenders with AX's
 //           kAXUIElementDestroyedNotification (yabai registers it on Tahoe).
 //   - 1325/1326 — window added/removed on a space. Fire WITHOUT any
-//           interest list (verified live 2026-07-02). 1325 is the FAST
-//           create trigger (fires before slow AX trees publish) and the
-//           space-move signal for known windows.
+//           interest list. 1325 is the FAST create trigger (fires before
+//           slow AX trees publish) and the space-move signal for known
+//           windows.
 //   - 1508 — frontmost app changed. Distinct from AX's
 //            kAXFocusedWindowChangedNotification because 1508 fires on
 //            user-driven app activation specifically (mouse click,
@@ -1653,9 +1647,9 @@ final class FrontmostWindowObserver: RefCountedObserver {
 //
 // 806/807 (moved/resized) and 1322 (title) are deliberately NOT registered:
 // they only fire with an `SLSRequestNotificationsForWindows` interest list,
-// and subscribing one SILENCES 808 on this build (verified live 2026-07-02:
-// 22 raises → zero 808 callbacks while 806/807 flowed) — which killed the
-// overlay border's z-order repair ("outline behind the window"). 808 is
+// and subscribing one SILENCES 808 on this build (22 raises → zero 808
+// callbacks while 806/807 flowed) — which kills the overlay border's z-order
+// repair ("outline behind the window"). 808 is
 // load-bearing; window-server-latency moved/resized is not (the AX
 // notifications + the frame-bang coalescer cover that signal). If CGS
 // frames are ever wanted, they need a SECOND SLS connection so the
@@ -1884,8 +1878,8 @@ enum WindowEvents {
     /// the SAME rule installPerWindow's three-way subrole gate enforces
     /// for AX creates. nil (unreadable: app still constructing its AX
     /// tree, timeout under load) is NOT announceable: announcing unknowns
-    /// tiled Arc's tab-creation hint (2026-07-02). Unreadable windows
-    /// defer to the AX create path, which retries and gates properly.
+    /// would tile non-window hints (Arc's tab-creation hint). Unreadable
+    /// windows defer to the AX create path, which retries and gates properly.
     static func fastCreateAnnounceable(subrole: String?) -> Bool {
         WindowsByID.isStandardSubrole(subrole)
     }
@@ -1937,7 +1931,7 @@ enum WindowEvents {
 }
 
 // =====================================================================
-// MARK: - Per-window snapshot via SkyLight (formerly Sources/DataSources/WindowsSnapshot.swift)
+// MARK: - Per-window snapshot via SkyLight
 // =====================================================================
 
 // Per-window snapshot via SkyLight private SPI. Synchronous, no TCC prompt,
@@ -2028,7 +2022,7 @@ extension WindowsByID {
 }
 
 // =====================================================================
-// MARK: - Spaces (formerly Sources/DataSources/Spaces.swift)
+// MARK: - Spaces
 // =====================================================================
 
 // Per-display Spaces info via SkyLight private SPI. Same family of symbols
@@ -2220,8 +2214,7 @@ enum Spaces {
     }
 
     /// Move a window to another user space — hs.spaces.moveWindowToSpace
-    /// parity, closing windowscape's space-move gap (2026-06-10 QA round).
-    /// Fullscreen/tiled target spaces (SLSSpaceGetType == 4) are refused,
+    /// parity. Fullscreen/tiled target spaces (SLSSpaceGetType == 4) are refused,
     /// mirroring hs.spaces.
     ///
     /// Two routes, each verified via windowSpaces (the same SLS query
@@ -2333,7 +2326,7 @@ final class SpacesObserver: RefCountedObserver {
 }
 
 // =====================================================================
-// MARK: - Mission Control AX bangs (formerly Sources/DataSources/MissionControl.swift)
+// MARK: - Mission Control AX bangs
 // =====================================================================
 
 // Mission Control state bangs.
@@ -2517,7 +2510,7 @@ struct FrameBangCoalescer {
 // Coexistence: still feeds the existing `WindowsLifecycleObserver.shared`
 // callbacks set up in `AppDelegate.applicationDidFinishLaunching`, so the
 // bang fan-out shape stays unchanged. The poll itself stays alive as a
-// low-frequency safety backstop (Slice 4) with a drift-sensor log when it
+// low-frequency safety backstop with a drift-sensor log when it
 // catches an event AX missed.
 final class WindowsAXObserver {
     static let shared = WindowsAXObserver()
@@ -2534,7 +2527,7 @@ final class WindowsAXObserver {
     // `sd.window.titleChanged` bang shape includes `oldTitle`, so stack
     // authors get the same payload from AX as from the polling fallback.
     private var lastTitle: [pid_t: [CGWindowID: String]] = [:]
-    // Per-(pid, wid) last AX fire timestamp. The Slice 4 safety poll
+    // Per-(pid, wid) last AX fire timestamp. The safety poll
     // cross-references this so it only logs "missed by AX" when AX has
     // genuinely been silent for the affected window.
     private(set) var lastAxFire: [CGWindowID: TimeInterval] = [:]
@@ -2573,8 +2566,8 @@ final class WindowsAXObserver {
         // Retried, not one-shot: AX is slammed at daemon boot (every stack
         // probing at once) and AXObserverCreate / AXObserverAddNotification
         // can fail transiently for apps that would succeed seconds later. A
-        // single silent failure here used to mean EVERY event for that app
-        // waited on the 10s safety poll for the daemon's lifetime.
+        // single silent failure here would mean EVERY event for that app
+        // waits on the 10s safety poll for the daemon's lifetime.
         // fireForExisting stays false on retries too — a retry success
         // can't distinguish pre-daemon windows from during-retry ones, and
         // spurious creates for ancient windows are worse than the poll

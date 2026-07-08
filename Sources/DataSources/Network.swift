@@ -99,9 +99,8 @@ enum NetPath {
 enum NetThroughput {
     /// Walks getifaddrs() once, sums `if_data.ifi_ibytes` / `ifi_obytes`
     /// across every non-loopback link-level (AF_LINK) entry. Loopback is
-    /// skipped to match the netstat-ib parser that the bar/items/throughput
-    /// stack previously implemented in JS — without that skip, a single
-    /// localhost-heavy app (Docker, dev proxy) would dominate the rate.
+    /// skipped because otherwise a single localhost-heavy app (Docker, dev
+    /// proxy) would dominate the rate.
     static func interfaceTotals() -> (rx: UInt64, tx: UInt64) {
         var addrs: UnsafeMutablePointer<ifaddrs>?
         guard getifaddrs(&addrs) == 0, let first = addrs else { return (0, 0) }

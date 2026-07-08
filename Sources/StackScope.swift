@@ -5,9 +5,8 @@ import Foundation
 // returns a bool/id from a registration call should return a Token instead;
 // callers adopt it into a StackScope, and stack unload drains the scope.
 //
-// Dropping a Token without adopting it does NOT cancel — that matches the
-// pre-refactor behavior of "_ = HotkeyRegistry.bind(...)" leaking. The
-// contract is: adopt or explicitly cancel.
+// Dropping a Token without adopting it does NOT cancel. The contract is:
+// adopt or explicitly cancel.
 final class Token {
     let cancel: () -> Void
     init(_ cancel: @escaping () -> Void) { self.cancel = cancel }

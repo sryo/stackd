@@ -1,10 +1,9 @@
 import WebKit
 
-/// Self-panel window primitive group — extracted from Bridge.swift in the
-/// A8 breakup round. These are the window.* entries that act on the stack's
-/// OWN StackWindow (the panel hosting this Bridge's WKWebView), as opposed
-/// to BridgeWindows.swift's windows.* primitives that act on OTHER apps'
-/// windows via AX/SkyLight. All five hop to main for AppKit.
+/// Self-panel window primitive group. These are the window.* entries that act
+/// on the stack's OWN StackWindow (the panel hosting this Bridge's WKWebView),
+/// as opposed to BridgeWindows.swift's windows.* primitives that act on OTHER
+/// apps' windows via AX/SkyLight. All five hop to main for AppKit.
 extension Bridge {
     /// Self-panel window primitives — concatenated into `Bridge.primitives`
     /// alongside the rest of the group builders. Pure builder; no side

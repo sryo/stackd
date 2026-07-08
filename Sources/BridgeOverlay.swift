@@ -171,10 +171,10 @@ extension Bridge {
                 if let token = b.overlayTokens.removeValue(forKey: id) { token.cancel() }
                 if let handle = b.overlayHandles.removeValue(forKey: id) {
                     // Synchronous teardown — the JS-side await must not resolve
-                    // until the NSPanel is actually gone. The old async path
-                    // returned success while the panel was still onscreen, so
-                    // a follow-up attach (focus change, hot-reload) produced
-                    // two overlays visible at the same time. handle.detach is
+                    // until the NSPanel is actually gone. If it resolved while
+                    // the panel was still onscreen, a follow-up attach (focus
+                    // change, hot-reload) would produce two overlays visible at
+                    // the same time. handle.detach is
                     // already main-thread-safe (it sync-hops if needed); we
                     // sync-hop here too rather than fire-and-forget.
                     if Thread.isMainThread {

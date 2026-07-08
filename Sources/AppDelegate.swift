@@ -160,9 +160,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // verdict for the app's MAIN window. Only do it when the pid really
         // is gone — NSWorkspace fires this once per app termination.
         // Workspace notifications post to NSWorkspace's OWN notification
-        // center, not NotificationCenter.default — the observer was
-        // previously registered on .default and never fired (stale cache
-        // entries just aged out via AX misses instead).
+        // center, not NotificationCenter.default — an observer on .default
+        // never fires.
         NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didTerminateApplicationNotification,
             object: NSWorkspace.shared, queue: .main

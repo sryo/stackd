@@ -227,9 +227,9 @@ enum Apps {
     }
 
     /// Count every titled leaf in the walked tree so the stderr log can
-    /// quantify what the AX walk produced — invaluable when "palette only
-    /// shows a few items" reports come in and we need to know whether the
-    /// problem is at the Swift/AX boundary or in the JS flattener.
+    /// quantify what the AX walk produced — when a palette shows only a few
+    /// items, this tells us whether the problem is at the Swift/AX boundary
+    /// or in the JS flattener.
     private static func countLeaves(_ node: [String: Any]) -> Int {
         if let kids = node["children"] as? [[String: Any]], !kids.isEmpty {
             return kids.reduce(0) { $0 + countLeaves($1) }
@@ -268,11 +268,10 @@ enum Apps {
             AXUIElementSetAttributeValue(appEl, "AXEnhancedUserInterface" as CFString, restore)
         }
         let tree = walkMenu(bar)
-        // Telemetry: log the walk size to stderr. If the user reports
-        // "palette only shows a few menu items", this tells us up-front
-        // whether the AX walk produced 200 items (problem is downstream)
-        // or 5 (problem is here — likely the app didn't respond to the
-        // AXEnhancedUserInterface hint).
+        // Telemetry: log the walk size to stderr. When a palette shows only
+        // a few menu items, this tells us up-front whether the AX walk
+        // produced 200 items (problem is downstream) or 5 (problem is here —
+        // likely the app didn't respond to the AXEnhancedUserInterface hint).
         log("apps.menu(pid:\(pid)) — walked \(countLeaves(tree)) leaf(s)")
         return tree
     }

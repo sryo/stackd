@@ -13,8 +13,7 @@ import Foundation
 ///     to this Bridge's `StackSettings`. Lazy-initialized inside Bridge
 ///     when the manifest declares the "settings" permission; the
 ///     primitives below deny-default to `null` (get) / `false`
-///     (set/delete) / `[:]` (all) when the store isn't attached, matching
-///     the pre-refactor handler returns.
+///     (set/delete) / `[:]` (all) when the store isn't attached.
 ///
 ///   - `pasteboard.{get,set}` — global NSPasteboard string slot. The
 ///     watch side is event-driven and lives elsewhere (StackHost emits
@@ -39,8 +38,7 @@ extension Bridge {
             },
 
             // Per-stack settings (k/v scoped to this stack's id). Write-style ops
-            // (set/delete) deny → false; get → null; all → empty dict (matches
-            // pre-refactor handler returns).
+            // (set/delete) deny → false; get → null; all → empty dict.
             .syncBridge("settings.get",    permission: "settings") { b, body in b.settings?.get(body["key"] as? String ?? "") as Any? },
             .syncBridge("settings.set",    permission: "settings", denyValue: false) { b, body in b.settings?.set(body["key"] as? String ?? "", body["value"]); return true },
             .syncBridge("settings.delete", permission: "settings", denyValue: false) { b, body in b.settings?.delete(body["key"] as? String ?? ""); return true },

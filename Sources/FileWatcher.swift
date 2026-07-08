@@ -11,8 +11,7 @@ final class FileWatcher {
     // (SQLite WALs from sd.sqlite, plists from sd.settings, .pid/.lock/.log
     // from stack-side code) must not cycle the whole host — a stack writing
     // to its own data dir would otherwise tear down every other stack on
-    // every commit. See digup.db-wal regression: 17 spurious reloads in one
-    // idle session of a stack using SQLite.
+    // every commit.
     private static let reloadExtensions: Set<String> = [
         "js", "mjs", "html", "htm", "css", "json", "svg", "wasm"
     ]
