@@ -527,22 +527,9 @@ final class MenubarItemsObserver: RefCountedObserver {
     }
 
     override func install() -> Token {
-        let t = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
-            guard let self = self else { return }
-            // Lazy fire: when no menubar items change between ticks (the
-            // common case — most apps don't churn the right-side icons),
-            // skip per-stack jsonify + evaluateJavaScript. The AX walk in
-            // `snapshot()` still runs (we need the data to hash), but the
-            // jsonify+push fan-out is the dominant cost when many stacks
-            // subscribe.
-            let snap = self.snapshot()
-            if let data = try? JSONSerialization.data(withJSONObject: snap, options: [.sortedKeys]) {
-                self.fireIfChanged("menubar.items", hash: data.hashValue)
-            } else {
-                self.fire()
-            }
-        }
-        RunLoop.main.add(t, forMode: .common)
-        return Token { t.invalidate() }
+        // No broadcast for menubar-item churn; poll at 2s. Lazy fire skips the
+        // per-stack push when the icon set is unchanged (the common case — the
+        // AX walk in snapshot() still runs to hash, but the fan-out is gated).
+        return installPollingTimer(key: "menubar.items") { [weak self] in self?.snapshot() ?? [] }
     }
 }

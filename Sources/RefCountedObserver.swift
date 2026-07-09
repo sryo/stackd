@@ -153,3 +153,36 @@ extension RefCountedObserver {
         }
     }
 }
+
+// MARK: - Polling-timer install/teardown sugar
+
+extension RefCountedObserver {
+    /// Install a repeating main-runloop timer that snapshots each tick, hashes
+    /// the snapshot's JSON-stable form (`.sortedKeys` so dict ordering can't
+    /// false-diff), and fans out via `fireIfChanged(key:)` — so an idle tick
+    /// with an unchanged snapshot skips the per-stack jsonify + evaluateJavaScript
+    /// push. Falls back to `fire()` if the snapshot isn't JSON-serializable.
+    /// Returns a Token that invalidates the timer on cancel.
+    ///
+    /// The polling counterpart to `installNotifications`: this exact
+    /// timer + sorted-keys-hash + fireIfChanged shape recurs verbatim across
+    /// the poll-only observers (sensors, privacy, menubar items) — see each
+    /// subclass's doc for why no native event source exists.
+    func installPollingTimer(
+        interval: TimeInterval = 2.0,
+        key: String,
+        snapshot: @escaping () -> Any
+    ) -> Token {
+        let t = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
+            guard let self = self else { return }
+            let snap = snapshot()
+            if let data = try? JSONSerialization.data(withJSONObject: snap, options: [.sortedKeys]) {
+                self.fireIfChanged(key, hash: data.hashValue)
+            } else {
+                self.fire()
+            }
+        }
+        RunLoop.main.add(t, forMode: .common)
+        return Token { t.invalidate() }
+    }
+}

@@ -164,22 +164,10 @@ final class SensorsObserver: RefCountedObserver {
     private override init() { super.init() }
 
     override func install() -> Token {
-        let t = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
-            guard let self = self else { return }
-            // Lazy fire: temps/fans are rounded to 2 decimals at query time
-            // (Sensors.swift:98), so a system that's sitting idle hashes the
-            // same every tick — the per-stack push gets skipped. Active
-            // workloads will see the hash change every tick, identical to
-            // the previous always-fire behavior.
-            let snap = Sensors.snapshot()
-            if let data = try? JSONSerialization.data(withJSONObject: snap, options: [.sortedKeys]) {
-                self.fireIfChanged("sensors", hash: data.hashValue)
-            } else {
-                self.fire()
-            }
-        }
-        RunLoop.main.add(t, forMode: .common)
-        return Token { t.invalidate() }
+        // No native event source for temps/fans; poll at 2s. Lazy fire skips
+        // the per-stack push when an idle system hashes the same each tick
+        // (temps/fans are rounded to 2 decimals at query time, Sensors.swift:98).
+        return installPollingTimer(key: "sensors") { Sensors.snapshot() }
     }
 }
 
