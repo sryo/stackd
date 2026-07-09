@@ -56,8 +56,10 @@ enum StackTemplates {
         body[data-theme="light"] { color: #1d1d1f; }
         .card {
           padding: 10px 14px;
-          background: color-mix(in oklab, var(--sd-accent) 18%, transparent);
-          backdrop-filter: blur(20px);
+          /* No CSS backdrop-filter — the daemon owns chrome via the manifest
+             `material:` field (see the glass template). A flat translucent
+             tint keeps this minimal template within the "daemon owns chrome" rule. */
+          background: color-mix(in oklab, var(--sd-accent) 40%, transparent);
           border-radius: 10px;
         }
         .title { font-size: 11px; opacity: 0.7; text-transform: uppercase; letter-spacing: 0.05em; }
