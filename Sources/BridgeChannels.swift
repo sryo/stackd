@@ -344,54 +344,20 @@ extension Bridge {
             let json = Bridge.jsonify(snapshot)
             if json == self.lastState["apps"] { return }
 
-            // Compute delta vs last snapshot before updating cache. Consumers
-            // that only care about transitions (apptimeout, notunes) subscribe
-            // to "appsChanged" instead of iterating the full list every tick.
-            // WebKit GPU + Networking helpers share their bundleId across
-            // every WKWebView (one process per stack). Dictionary(uniqueKeysWithValues:)
-            // crashes on duplicate keys, so accept last-wins — the delta cares
-            // about transitions, not which specific PID landed.
-            var nowByBundle: [String: [String: Any]] = [:]
-            for app in snapshot {
-                if let bid = app["bundleId"] as? String { nowByBundle[bid] = app }
-            }
-            var added:   [[String: Any]] = []
-            var removed: [[String: Any]] = []
-            var changed: [[String: Any]] = []
-            for (bid, app) in nowByBundle {
-                if let prev = self.lastAppsByBundle[bid] {
-                    // Compare only the mutable fields. NSRunningApplication
-                    // surfaces active/hidden as the only things that flip
-                    // during a process's lifetime; name occasionally changes
-                    // on localization switches. Avoid jsonify() comparison
-                    // because Swift dict-key ordering is non-deterministic
-                    // and would fire "changed" on every poll for free.
-                    let a1 = (prev["active"] as? Bool) ?? false
-                    let a2 = (app["active"]  as? Bool) ?? false
-                    let h1 = (prev["hidden"] as? Bool) ?? false
-                    let h2 = (app["hidden"]  as? Bool) ?? false
-                    let n1 = (prev["name"]   as? String) ?? ""
-                    let n2 = (app["name"]    as? String) ?? ""
-                    if a1 != a2 || h1 != h2 || n1 != n2 {
-                        changed.append(app)
-                    }
-                } else {
-                    added.append(app)
-                }
-            }
-            for (bid, app) in self.lastAppsByBundle where nowByBundle[bid] == nil {
-                removed.append(app)
-            }
-            self.lastAppsByBundle = nowByBundle
+            // Delta vs last snapshot before updating the cache. Consumers that
+            // only care about transitions (apptimeout, notunes) subscribe to
+            // "appsChanged" instead of iterating the full list every tick.
+            let d = Bridge.appsDelta(snapshot: snapshot, previous: self.lastAppsByBundle)
+            self.lastAppsByBundle = d.nowByBundle
             self.lastState["apps"] = json
             self.push(channel: "apps", json: json)
             // Only emit a non-empty delta — first-tick "every app added" is
             // noise (consumers already get the same data on sd.apps.running).
-            if !added.isEmpty || !removed.isEmpty || !changed.isEmpty {
+            if !d.added.isEmpty || !d.removed.isEmpty || !d.changed.isEmpty {
                 let delta: [String: Any] = [
-                    "added":   added,
-                    "removed": removed,
-                    "changed": changed
+                    "added":   d.added,
+                    "removed": d.removed,
+                    "changed": d.changed
                 ]
                 self.push(channel: "appsChanged", json: Bridge.jsonify(delta))
             }

@@ -123,4 +123,27 @@ extension Bridge {
         )
         return (d.added, d.removed, d.changed, d.nowByKey)
     }
+
+    /// Pure delta computation between two running-apps snapshots. Identity is
+    /// bundleId; the "changed" detector compares active / hidden / name — the
+    /// only fields NSRunningApplication flips during a process's lifetime, so a
+    /// jsonify round-trip can't false-fire on Swift dict key-order noise.
+    /// WebKit GPU + Networking helpers share a bundleId across every WKWebView
+    /// (one process per stack), so keying is last-wins — the delta cares about
+    /// transitions, not which specific PID landed.
+    static func appsDelta(snapshot: [[String: Any]], previous: [String: [String: Any]])
+        -> (added: [[String: Any]], removed: [[String: Any]], changed: [[String: Any]], nowByBundle: [String: [String: Any]])
+    {
+        let d = computeDelta(
+            snapshot: snapshot,
+            previous: previous,
+            identity: { $0["bundleId"] as? String },
+            equal: { prev, now in
+                ((prev["active"] as? Bool)   ?? false) == ((now["active"] as? Bool)   ?? false) &&
+                ((prev["hidden"] as? Bool)   ?? false) == ((now["hidden"] as? Bool)   ?? false) &&
+                ((prev["name"]   as? String) ?? "")    == ((now["name"]   as? String) ?? "")
+            }
+        )
+        return (d.added, d.removed, d.changed, d.nowByKey)
+    }
 }
