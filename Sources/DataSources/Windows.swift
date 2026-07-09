@@ -39,46 +39,10 @@ enum WindowTransaction {
     typealias CreateFn          = @convention(c) (Int32) -> Unmanaged<CFTypeRef>?
     typealias CommitFn          = @convention(c) (CFTypeRef, Int32) -> Int32
     typealias OrderWindowFn     = @convention(c) (CFTypeRef, UInt32, Int32, UInt32) -> Int32
-    typealias SetWindowLevelFn  = @convention(c) (CFTypeRef, UInt32, Int32) -> Int32
 
     static let create:         CreateFn?         = SkyLight.sym("SLSTransactionCreate")
     static let commit:         CommitFn?         = SkyLight.sym("SLSTransactionCommit")
     static let orderWindow:    OrderWindowFn?    = SkyLight.sym("SLSTransactionOrderWindow")
-    static let setWindowLevel: SetWindowLevelFn? = SkyLight.sym("SLSTransactionSetWindowLevel")
-}
-
-// SLSCopyWindowsWithOptionsAndTags — yabai's authoritative window enumeration.
-// CGWindowListCopyWindowInfo([.optionOnScreenOnly]) misses minimized + other-space
-// + offscreen windows; this SLS call returns the full inventory and we then ask
-// CGWindowListCreateDescriptionFromArray (public) for the attribute dicts.
-// 6-arg signature matches shipping macOS (verified against yabai/window_manager.c).
-// Falls back to CGWindowListCopyWindowInfo(.optionAll) if the symbol is missing.
-private enum SkyLightWindowsEnum {
-    typealias CopyWindowsFn = @convention(c) (
-        Int32,                                // cid
-        UInt32,                               // owner (0 = all owners)
-        CFArray?,                             // spaces (nil = all spaces)
-        UInt32,                               // options (0x2 includes minimized/offscreen)
-        UnsafeMutablePointer<UInt64>,         // set_tags filter (0 = no filter)
-        UnsafeMutablePointer<UInt64>          // clear_tags filter (0 = no filter)
-    ) -> Unmanaged<CFArray>?
-
-    static let copyWindows: CopyWindowsFn? = SkyLight.sym("SLSCopyWindowsWithOptionsAndTags")
-
-    /// Authoritative window-id enumeration. Returns every window known to
-    /// WindowServer matching `options` (0x2 = include minimized + offscreen).
-    /// Returns nil if the SPI is unavailable so callers can take their own
-    /// public-API fallback path.
-    static func allWindowIDs(options: UInt32 = 0x2) -> [CGWindowID]? {
-        guard let fn = copyWindows else { return nil }
-        var setTags: UInt64 = 0
-        var clearTags: UInt64 = 0
-        guard let cfRef = fn(SkyLight.cid, 0, nil, options, &setTags, &clearTags)?.takeRetainedValue() else {
-            return nil
-        }
-        let nums = (cfRef as? [NSNumber]) ?? []
-        return nums.map { CGWindowID($0.uint32Value) }
-    }
 }
 
 // Everything window-related, by source-of-truth:
@@ -2032,7 +1996,6 @@ extension WindowsByID {
 private enum SkyLightSpaces {
     typealias CopyManagedSpacesFn    = @convention(c) (Int32) -> Unmanaged<CFArray>?
     typealias SpaceGetTypeFn         = @convention(c) (Int32, UInt64) -> Int32
-    typealias GetActiveSpaceFn       = @convention(c) (Int32) -> UInt64
     typealias CopySpacesForWindowsFn = @convention(c) (Int32, UInt32, CFArray) -> Unmanaged<CFArray>?
 
     // uint64 SLSManagedDisplayGetCurrentSpace(int cid, CFStringRef displayIdent)
@@ -2059,7 +2022,6 @@ private enum SkyLightSpaces {
 
     static let copyManagedSpaces:    CopyManagedSpacesFn?    = SkyLight.sym("SLSCopyManagedDisplaySpaces")
     static let spaceGetType:         SpaceGetTypeFn?         = SkyLight.sym("SLSSpaceGetType")
-    static let getActiveSpace:       GetActiveSpaceFn?       = SkyLight.sym("SLSGetActiveSpace")
     static let displayGetCurrentSpace: DisplayGetCurrentSpaceFn? = SkyLight.sym("SLSManagedDisplayGetCurrentSpace")
     static let copySpacesForWindows: CopySpacesForWindowsFn? = SkyLight.sym("SLSCopySpacesForWindows")
     static let registerNotifyProc:   RegisterNotifyProcFn?   = SkyLight.sym("SLSRegisterConnectionNotifyProc")

@@ -698,14 +698,6 @@ enum AudioProcesses {
         return lastApp
     }
 
-    /// Just the AudioObjectIDs — `AudioProcessesObserver` uses this to
-    /// know which per-process IsRunningOutput listeners to bind/unbind.
-    /// Doesn't filter pid==0 or dedupe; the observer cares about every
-    /// object that can fire a listener.
-    static func enumerateForListening() -> [AudioObjectID] {
-        return enumerateProcessObjects()
-    }
-
     // MARK: - CoreAudio plumbing (private)
 
     private static func enumerateProcessObjects() -> [AudioObjectID] {
