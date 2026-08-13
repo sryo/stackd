@@ -209,4 +209,79 @@ func registerRefCountedObserverTests() {
         obs.fireIfChanged("b", hash: 1)  // b's last was 1, suppressed
         try expectEqual(callCount, 3, "duplicates under each key remain suppressed")
     }
+
+    // MARK: - Off-main trampoline
+    //
+    // Native callbacks (CoreAudio HAL listeners, IOKit, FSEvents) arrive on
+    // arbitrary queues. fire()/fireIfChanged() must confine `subs` /
+    // `lastHashByKey` access to the main thread — an off-main call is
+    // trampolined, never executed in place.
+
+    test("fire: off-main call is delivered on the main thread") {
+        let obs = StubObserver()
+        var fires = 0
+        var offMainDelivery = false
+        let t = obs.subscribe {
+            fires += 1
+            if !Thread.isMainThread { offMainDelivery = true }
+        }
+        defer { t.cancel(); spinRunLoop(0.05) }
+        try expectEqual(fires, 1, "subscribe primes once")
+
+        let sem = DispatchSemaphore(value: 0)
+        DispatchQueue.global(qos: .utility).async {
+            obs.fire()
+            sem.signal()
+        }
+        sem.wait()
+        try expectEqual(fires, 1, "off-main fire must not deliver synchronously")
+
+        spinRunLoop(0.1)
+        try expectEqual(fires, 2, "trampolined fire delivered after runloop spin")
+        try expect(!offMainDelivery, "subscriber must only ever run on main")
+    }
+
+    test("fireIfChanged: off-main call dedupes after the trampoline") {
+        let obs = StubObserver()
+        var fires = 0
+        var offMainDelivery = false
+        let t = obs.subscribe {
+            fires += 1
+            if !Thread.isMainThread { offMainDelivery = true }
+        }
+        defer { t.cancel(); spinRunLoop(0.05) }
+        try expectEqual(fires, 1)
+
+        let sem = DispatchSemaphore(value: 0)
+        DispatchQueue.global(qos: .utility).async {
+            obs.fireIfChanged("k", hash: 7)
+            obs.fireIfChanged("k", hash: 7)   // duplicate — must be suppressed on main
+            sem.signal()
+        }
+        sem.wait()
+        spinRunLoop(0.1)
+        try expectEqual(fires, 2, "prime + exactly one deduped fire")
+        try expect(!offMainDelivery, "subscriber must only ever run on main")
+    }
+
+    test("fireIfChanged: concurrent off-main burst neither crashes nor double-fires") {
+        // The regression this fences: a poll timer on main and a native
+        // listener on a background queue calling fireIfChanged at once,
+        // racing on the unlocked hash dictionary.
+        let obs = StubObserver()
+        var fires = 0
+        let t = obs.subscribe { fires += 1 }
+        defer { t.cancel(); spinRunLoop(0.05) }
+        try expectEqual(fires, 1)
+
+        let group = DispatchGroup()
+        for _ in 0..<50 {
+            DispatchQueue.global(qos: .utility).async(group: group) {
+                obs.fireIfChanged("burst", hash: 99)
+            }
+        }
+        group.wait()
+        spinRunLoop(0.15)
+        try expectEqual(fires, 2, "50 same-hash calls collapse to a single fire")
+    }
 }

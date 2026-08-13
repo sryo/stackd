@@ -44,11 +44,23 @@ class RefCountedObserver {
     /// Subclasses call this from their native callback to notify every subscriber.
     /// Safe to call before any subscribers exist (no-op).
     ///
+    /// Main-thread confined: `subs` and `lastHashByKey` are plain (unlocked)
+    /// containers mutated by subscribe/unsubscribe on main, and subscriber
+    /// callbacks fan out into Bridge → WKWebView, which is main-only. Native
+    /// callbacks arrive on arbitrary queues (CoreAudio HAL listeners, IOKit,
+    /// FSEvents), so off-main calls trampoline to main instead of touching
+    /// state — calling straight through from a listener queue is a data race
+    /// that segfaults inside Dictionary/refcount plumbing.
+    ///
     /// Snapshots `subs.values` into an Array before iterating so a callback
     /// that synchronously unsubscribes (or unloads a stack, which drains a
     /// scope whose Tokens remove from this dict) doesn't mutate the
     /// Dictionary mid-iteration — that would be undefined behavior in Swift.
     func fire() {
+        if !Thread.isMainThread {
+            DispatchQueue.main.async { [weak self] in self?.fire() }
+            return
+        }
         for cb in Array(subs.values) { cb() }
     }
 
@@ -66,6 +78,11 @@ class RefCountedObserver {
     /// the caller's choice — `Hasher.combine`-derived ints are standard.
     private var lastHashByKey: [String: Int] = [:]
     func fireIfChanged(_ key: String, hash: Int) {
+        // Same main-thread confinement as fire() — see its doc comment.
+        if !Thread.isMainThread {
+            DispatchQueue.main.async { [weak self] in self?.fireIfChanged(key, hash: hash) }
+            return
+        }
         if lastHashByKey[key] == hash { return }
         lastHashByKey[key] = hash
         fire()
