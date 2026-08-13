@@ -523,11 +523,21 @@ enum DisplaySnapshot {
 // MARK: - Appearance
 
 enum Appearance {
+    /// macOS writes exactly "Dark" to AppleInterfaceStyle while dark mode is
+    /// active and deletes the key for light — absent means light.
+    static func isDark(interfaceStyle: String?) -> Bool {
+        interfaceStyle == "Dark"
+    }
+
     static func current() -> [String: Any] {
-        var isDark = false
-        if let app = NSApp {
-            isDark = app.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-        }
+        // Not NSApp.effectiveAppearance: in an accessory app it captures the
+        // theme at launch and never tracks the scheduled light/dark
+        // auto-switch (no key window drives the refresh), so a daemon
+        // started at night would report dark all day. The global default is
+        // ground truth (cfprefsd keeps reads live) and is the same source
+        // hs.host.interfaceStyle consults.
+        let isDark = isDark(interfaceStyle:
+            UserDefaults.standard.string(forKey: "AppleInterfaceStyle"))
         let accent = NSColor.controlAccentColor.usingColorSpace(.sRGB)
         let r = Int(((accent?.redComponent   ?? 0) * 255).rounded())
         let g = Int(((accent?.greenComponent ?? 0) * 255).rounded())

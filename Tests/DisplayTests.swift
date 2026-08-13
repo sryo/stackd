@@ -151,6 +151,15 @@ func registerDisplayTests() {
         }
     }
 
+    test("Appearance.isDark maps the AppleInterfaceStyle default") {
+        // macOS writes exactly "Dark" while dark mode is active (manually
+        // chosen or scheduled auto-switch) and deletes the key for light —
+        // so absent means light, and no other value is ever written.
+        try expect(Appearance.isDark(interfaceStyle: "Dark"), "\"Dark\" should be dark")
+        try expect(!Appearance.isDark(interfaceStyle: nil), "absent key should be light")
+        try expect(!Appearance.isDark(interfaceStyle: "Light"), "unknown value should be light")
+    }
+
     // MARK: - DisplayObserver subscriber-gating
     //
     // 2026-06-02: DisplayObserver added distributed-notification observers
