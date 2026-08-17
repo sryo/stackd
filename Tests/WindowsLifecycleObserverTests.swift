@@ -219,4 +219,43 @@ func registerWindowsLifecycleObserverTests() {
         try expect(total <= 2.0,
                    "cumulative retry budget \(total)s drifts toward poll-as-primary; keep it tight")
     }
+
+    // MARK: - pollCreateActions — suppressed creates still owe a channel pump
+    //
+    // The gates rightly suppress duplicate BANGS, but the wid still just
+    // entered the poll snapshot — full heal-path story in the
+    // pollCreateActions doc comment (Windows.swift).
+
+    test("pollCreateActions: nothing suppressed → announce all, no pump nudge") {
+        let created = [snap(id: 1, title: "A"), snap(id: 2, title: "B")]
+        let r = WindowsLifecycleObserver.pollCreateActions(
+            created: created, axCovered: { _ in false }, announced: { _ in false })
+        try expectEqual(r.announce.map(\.id), [1, 2])
+        try expectEqual(r.pumpNudge, false,
+                        "fully-announced creates already pump via the fanout — no extra nudge")
+    }
+
+    test("pollCreateActions: ax-covered create is suppressed but still owed a pump nudge") {
+        let created = [snap(id: 1, title: "A"), snap(id: 2, title: "B")]
+        let r = WindowsLifecycleObserver.pollCreateActions(
+            created: created, axCovered: { $0 == 2 }, announced: { _ in false })
+        try expectEqual(r.announce.map(\.id), [1])
+        try expectEqual(r.pumpNudge, true,
+                        "the suppressed wid entered Windows.all() — the channel must still push")
+    }
+
+    test("pollCreateActions: already-announced create is suppressed but still owed a pump nudge") {
+        let created = [snap(id: 7, title: "A")]
+        let r = WindowsLifecycleObserver.pollCreateActions(
+            created: created, axCovered: { _ in false }, announced: { $0 == 7 })
+        try expect(r.announce.isEmpty)
+        try expectEqual(r.pumpNudge, true)
+    }
+
+    test("pollCreateActions: empty diff → no announce, no nudge") {
+        let r = WindowsLifecycleObserver.pollCreateActions(
+            created: [], axCovered: { _ in true }, announced: { _ in true })
+        try expect(r.announce.isEmpty)
+        try expectEqual(r.pumpNudge, false, "an empty diff must not trigger pump churn every tick")
+    }
 }

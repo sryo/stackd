@@ -444,11 +444,11 @@ func registerWindowsTests() {
         defer { WindowAddressabilityCache.invalidate(pid: pid) }
         WindowAddressabilityCache.confirm(pid: pid, windowID: 7_777_705,
                                           isStandard: true, isMinimized: false, now: 1000.0)
-        WindowAddressabilityCache.setMinimized(pid: pid, windowID: 7_777_705, true, now: 1001.0)
+        WindowAddressabilityCache.setMinimized(pid: pid, windowID: 7_777_705, true)
         let minimized = WindowAddressabilityCache.probe(pid: pid, windowID: 7_777_705, now: 1001.1)
         try expectEqual(minimized.isMinimized, true)
         try expectEqual(minimized.isStandard, true, "setMinimized must not disturb isStandard")
-        WindowAddressabilityCache.setMinimized(pid: pid, windowID: 7_777_705, false, now: 1002.0)
+        WindowAddressabilityCache.setMinimized(pid: pid, windowID: 7_777_705, false)
         let restored = WindowAddressabilityCache.probe(pid: pid, windowID: 7_777_705, now: 1002.1)
         try expectEqual(restored.isMinimized, false)
         try expectEqual(restored.addressable, true)
@@ -461,7 +461,7 @@ func registerWindowsTests() {
         // live value — and don't crash.
         let pid: pid_t = 7_777_706
         defer { WindowAddressabilityCache.invalidate(pid: pid) }
-        WindowAddressabilityCache.setMinimized(pid: pid, windowID: 7_777_706, true, now: 1000.0)
+        WindowAddressabilityCache.setMinimized(pid: pid, windowID: 7_777_706, true)
         // Probe goes down the normal (unseeded) path: fake pid → grace
         // optimism with isStandard false, NOT a synthesized minimized entry.
         let p = WindowAddressabilityCache.probe(pid: pid, windowID: 7_777_706, now: 1000.1)
@@ -506,6 +506,71 @@ func registerWindowsTests() {
         try expectEqual(WindowAddressabilityCache.standardVerdict(subrole: "AXStandardWindow", isMinimized: false), true)
         try expectEqual(WindowAddressabilityCache.standardVerdict(subrole: "AXDialog", isMinimized: false), false)
         try expectEqual(WindowAddressabilityCache.standardVerdict(subrole: nil, isMinimized: false), false)
+    }
+
+    test("WindowAddressabilityCache.cacheVerdictUsable — expiry rules per verdict class") {
+        typealias P = WindowAddressabilityCache.Probe
+        let ttl = WindowAddressabilityCache.nonStandardTtl
+        // Positive verdicts (addressable + standard) never expire.
+        try expectEqual(WindowAddressabilityCache.cacheVerdictUsable(
+            P(addressable: true, isStandard: true, isMinimized: false, ts: 0), now: 1e9), true)
+        // Negative isStandard: usable while fresh, must re-probe once the
+        // TTL elapses — the permanent-poison guard.
+        let neg = P(addressable: true, isStandard: false, isMinimized: false, ts: 1000.0)
+        try expectEqual(WindowAddressabilityCache.cacheVerdictUsable(neg, now: 1000.0 + ttl - 0.1), true)
+        try expectEqual(WindowAddressabilityCache.cacheVerdictUsable(neg, now: 1000.0 + ttl), false)
+        // Unaddressable: the aggressive failTtl cadence (0.5s), unchanged.
+        let fail = P(addressable: false, isStandard: false, isMinimized: false, ts: 1000.0)
+        try expectEqual(WindowAddressabilityCache.cacheVerdictUsable(fail, now: 1000.4), true)
+        try expectEqual(WindowAddressabilityCache.cacheVerdictUsable(fail, now: 1000.6), false)
+    }
+
+    test("WindowAddressabilityCache — negative isStandard verdict expires after nonStandardTtl") {
+        // Pins the permanent-poison guard: positive verdicts stay sticky,
+        // negative isStandard verdicts re-probe once nonStandardTtl has
+        // elapsed. Full transition-race story: the nonStandardTtl comment
+        // in WindowAddressabilityCache.
+        let pid: pid_t = 7_777_708
+        defer { WindowAddressabilityCache.invalidate(pid: pid) }
+        WindowAddressabilityCache.confirm(pid: pid, windowID: 7_777_708,
+                                          isStandard: false, isMinimized: false, now: 1000.0)
+        // Within TTL: cached entry returned untouched (same ts).
+        let cached = WindowAddressabilityCache.probe(pid: pid, windowID: 7_777_708, now: 1001.0)
+        try expectEqual(cached.isStandard, false)
+        try expectEqual(cached.ts, 1000.0,
+                        "within nonStandardTtl the cached entry must be returned as-is")
+        // Past TTL: a live re-probe must happen. AX fails for the fake pid,
+        // so the sticky-preserve branch keeps the verdict but stamps ts=now
+        // — the observable proof a re-probe was attempted.
+        let reprobed = WindowAddressabilityCache.probe(pid: pid, windowID: 7_777_708, now: 1004.0)
+        try expectEqual(reprobed.addressable, true)
+        try expectEqual(reprobed.isStandard, false)
+        try expectEqual(reprobed.ts, 1004.0,
+                        "past nonStandardTtl the probe must re-read AX (sticky-preserve stamps ts)")
+        // One-TTL-per-failure pacing: the failed re-probe buys one more TTL
+        // of patience — not a permanent verdict, not a hot loop.
+        let paced = WindowAddressabilityCache.probe(pid: pid, windowID: 7_777_708, now: 1005.0)
+        try expectEqual(paced.ts, 1004.0,
+                        "failed re-probe must hold for one more TTL, not re-probe every call")
+    }
+
+    test("WindowAddressabilityCache.setMinimized preserves the entry's ts (no TTL extension)") {
+        // ts schedules a negative verdict's re-probe; re-stamping it here
+        // would let minimize churn extend the heal deadline indefinitely.
+        let pid: pid_t = 7_777_709
+        defer { WindowAddressabilityCache.invalidate(pid: pid) }
+        WindowAddressabilityCache.confirm(pid: pid, windowID: 7_777_709,
+                                          isStandard: false, isMinimized: false, now: 1000.0)
+        WindowAddressabilityCache.setMinimized(pid: pid, windowID: 7_777_709, true)
+        // With ts preserved at 1000.0 the TTL is expired by 1004.0 →
+        // re-probe → sticky-preserve stamps ts=now. Had setMinimized
+        // stamped ts=1002.5, the entry would still read as fresh and come
+        // back untouched.
+        let p = WindowAddressabilityCache.probe(pid: pid, windowID: 7_777_709, now: 1004.0)
+        try expectEqual(p.ts, 1004.0,
+                        "setMinimized must not reset the negative-verdict re-probe clock")
+        try expectEqual(p.isMinimized, true,
+                        "the minimized flip itself must survive the re-probe")
     }
 
     // (TahoeSynthPoll + WindowEvents.tahoeMinimizeBang removed 2026-06-05:

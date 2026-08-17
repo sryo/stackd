@@ -153,6 +153,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // so the channel converges instead of resurrecting the window.
             host?.pumpWindowsListForAllStacks(until: .absent(info.id))
         }
+        // Channel-only refresh for poll-detected creates whose announcement
+        // the missed-by-ax / already-announced gates suppress (see
+        // WindowsLifecycleObserver.pollCreateActions). The bangs would be
+        // duplicates; the sd.windows.all push is not.
+        WindowsLifecycleObserver.shared.onPumpNudge = { [weak host] in
+            host?.pumpWindowsListForAllStacks()
+        }
 
         // Drop the AX-addressability cache when an app fully quits. Per-window
         // destroy events fire too aggressively (Terminal alone spawns + reaps

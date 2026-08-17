@@ -292,30 +292,44 @@ enum WindowAddressabilityCache {
     private static var firstSeenAt: [String: TimeInterval] = [:]
     private static let optimisticGraceMs: TimeInterval = 5.0
     private static let lock = NSLock()
-    // Successful probes are cached PERMANENTLY (until pid death — see the
-    // NSWorkspace.didTerminateApplication observer in install()). Reasoning:
-    // AX's 100ms messaging timeout drops queries under load (spotlight
-    // indexing, brightness poll, rapid tile passes); a once-addressable
-    // window doesn't randomly become un-addressable while its pid is
-    // alive. Re-probing on TTL expiry would let a transient AX timeout
-    // drop a once-established verdict.
+    // Positive probes (addressable AND standard) are cached PERMANENTLY
+    // (until pid death — see the NSWorkspace.didTerminateApplication
+    // observer in install()). Reasoning: AX's 100ms messaging timeout drops
+    // queries under load (spotlight indexing, brightness poll, rapid tile
+    // passes); a once-addressable standard window doesn't randomly stop
+    // being one while its pid is alive. Re-probing on TTL expiry would let
+    // a transient AX timeout drop a once-established verdict.
+    // Negative isStandard verdicts are NOT permanent: a probe racing a
+    // minimize/deminimize/space-restore transition can read a bogus subrole
+    // (Terminal reports AXDialog mid-transition while AXMinimized already
+    // reads false), and a permanent false verdict silently drops a real
+    // window out of Windows.all() with no heal path — no poll, rescan, or
+    // event ever re-probes it. nonStandardTtl bounds the damage: a genuine
+    // dialog/sheet just re-confirms once per TTL (≤1 AX read per layer-0
+    // non-standard window), a poisoned real window heals on the first
+    // re-probe after the transition settles — worst case nonStandardTtl
+    // plus one 10s poll tick on an otherwise idle system.
     // Failed probes are re-checked aggressively so an app that JUST opened
     // a window gets re-evaluated within a beat.
     private static let failTtl: TimeInterval = 0.5
+    static let nonStandardTtl: TimeInterval = 3.0
+
+    /// Whether a cached probe may be returned as-is or must be re-read
+    /// live. Pure so the expiry rules above are unit-testable.
+    static func cacheVerdictUsable(_ p: Probe, now: TimeInterval) -> Bool {
+        if p.addressable {
+            return p.isStandard || (now - p.ts) < nonStandardTtl
+        }
+        return (now - p.ts) < failTtl
+    }
 
     static func probe(pid: pid_t, windowID: CGWindowID,
                       now: TimeInterval = Date().timeIntervalSince1970) -> Probe {
         let key = "\(pid)|\(windowID)"
         lock.lock()
-        if let p = cache[key] {
-            if p.addressable {
-                lock.unlock()
-                return p   // sticky success — never re-probe
-            }
-            if (now - p.ts) < failTtl {
-                lock.unlock()
-                return p
-            }
+        if let p = cache[key], cacheVerdictUsable(p, now: now) {
+            lock.unlock()
+            return p
         }
         lock.unlock()
         // Probe outside the lock — AX calls hop to main thread internally.
@@ -346,6 +360,9 @@ enum WindowAddressabilityCache {
             // transient miss. Keep the whole cached verdict — this branch
             // means the probe FAILED (el is nil), so isMin carries no real
             // reading; live minimize flips arrive via setMinimized().
+            // ts=now also paces an expired negative-isStandard entry: each
+            // failed re-probe buys one more nonStandardTtl of patience
+            // instead of hammering AX on every Windows.all() pass.
             probe = Probe(addressable: true, isStandard: e.isStandard, isMinimized: e.isMinimized, ts: now)
             shouldCache = true
         } else {
@@ -432,12 +449,15 @@ enum WindowAddressabilityCache {
     /// freezes at whatever the first successful probe saw. No-op when the
     /// (pid, wid) has no established-success entry — the next real probe
     /// reads the live value anyway.
-    static func setMinimized(pid: pid_t, windowID: CGWindowID, _ value: Bool,
-                             now: TimeInterval = Date().timeIntervalSince1970) {
+    /// The entry's ts is preserved: ts schedules a negative isStandard
+    /// verdict's re-probe, and minimize events arrive exactly during the
+    /// transitions that produce bogus negative verdicts — re-stamping here
+    /// would let minimize churn push the heal deadline out indefinitely.
+    static func setMinimized(pid: pid_t, windowID: CGWindowID, _ value: Bool) {
         let key = "\(pid)|\(windowID)"
         lock.lock(); defer { lock.unlock() }
         guard let p = cache[key], p.addressable else { return }
-        cache[key] = Probe(addressable: true, isStandard: p.isStandard, isMinimized: value, ts: now)
+        cache[key] = Probe(addressable: true, isStandard: p.isStandard, isMinimized: value, ts: p.ts)
     }
 
     /// Subrole reading → isStandard verdict, minimize-aware. A minimized
@@ -1152,6 +1172,7 @@ final class WindowsLifecycleObserver {
     var onCreate:       ((Snap) -> Void)?
     var onDestroy:      ((Snap) -> Void)?
     var onTitleChange:  ((Snap, String) -> Void)?  // (new, oldTitle)
+    var onPumpNudge:    (() -> Void)?              // channel-only push, no bangs
 
     private var snapshot: [Int: Snap] = [:]
     private var timer: Timer?
@@ -1193,13 +1214,14 @@ final class WindowsLifecycleObserver {
         // missing entirely, AX missed the event — fire the callback so
         // userland sees it, AND log `poll missed-by-ax` as the drift
         // sensor per CLAUDE.md.
-        var missedCreated = 0, missedDestroyed = 0, missedTitled = 0
-        for snap in diff.created
-        where !axCoveredRecently(wid: CGWindowID(snap.id))
-            && !WindowLifecycleFanout.announcedRecently(id: snap.id) {
-            onCreate?(snap)
-            missedCreated += 1
-        }
+        var missedDestroyed = 0, missedTitled = 0
+        let creates = Self.pollCreateActions(
+            created: diff.created,
+            axCovered: { self.axCoveredRecently(wid: CGWindowID($0)) },
+            announced: { WindowLifecycleFanout.announcedRecently(id: $0) })
+        let missedCreated = creates.announce.count
+        for snap in creates.announce { onCreate?(snap) }
+        if creates.pumpNudge { onPumpNudge?() }
         for snap in diff.destroyed where !axCoveredRecently(wid: CGWindowID(snap.id)) {
             onDestroy?(snap)
             missedDestroyed += 1
@@ -1231,6 +1253,26 @@ final class WindowsLifecycleObserver {
         WindowsAXObserver.shared.pruneAxFireLog(olderThan: 60)
 
         snapshot = now
+    }
+
+    /// Pure classification for the poll's created diffs — which snaps get
+    /// the full announcement (bang + fanout pump via onCreate) and whether
+    /// a channel-only pump nudge is owed for the suppressed rest.
+    /// Suppression means AX or a prior announcement already covered the
+    /// wid, so re-announcing would double-fire bangs — but a wid ENTERING
+    /// the poll snapshot still means Windows.all() gained a window stacks
+    /// may not have seen (a healed addressability verdict resurfaces
+    /// exactly this way, inside the ax-covered window of the very
+    /// minimize/deminimize events that poisoned it). tick() absorbs the
+    /// diff into its snapshot either way, so a suppressed create fires
+    /// exactly once — without the nudge the reappearance would wait on the
+    /// next ambient pump, unbounded on an idle system. pushFn's JSON dedup
+    /// makes the nudge a no-op when stacks are already current.
+    static func pollCreateActions(created: [Snap],
+                                  axCovered: (Int) -> Bool,
+                                  announced: (Int) -> Bool) -> (announce: [Snap], pumpNudge: Bool) {
+        let announce = created.filter { !axCovered($0.id) && !announced($0.id) }
+        return (announce, announce.count < created.count)
     }
 
     /// Pure diff for testability — given two snapshots, return the
@@ -2752,31 +2794,42 @@ final class WindowsAXObserver {
         // Three-way verdict, not a bool: a subrole read that ERRORS (app
         // still constructing the window, AX timeout under load) must not be
         // conflated with "definitely not standard" — kAXWindowCreated won't
-        // re-fire, so a wrong drop here is permanent. Unknown → bounded
-        // retry before giving up.
+        // re-fire, so a wrong drop here is permanent. Unknown AND
+        // un-minimized non-standard both get a bounded recheck before
+        // giving up.
         let isMin = axWindowBool(window, kAXMinimizedAttribute as String) ?? false
-        switch axSubroleVerdict(window) {
-        case .nonStandard:
+        let verdict = axSubroleVerdict(window)
+        switch verdict {
+        case .standard:
+            break
+        case .nonStandard where isMin:
             // Minimized windows misreport their subrole (see
             // WindowAddressabilityCache.standardVerdict) — a Dock-parked
             // window reading AXDialog is still a real user window. Dropping
             // it here would skip its observers AND its cache seed, leaving
             // the probe to sticky-cache the same bogus non-standard verdict.
-            if !isMin { return }
-        case .unknown:
+            break
+        case .nonStandard, .unknown:
+            // Neither reading is final. An errored read may be an app still
+            // constructing the window or an AX timeout under load; an
+            // un-minimized non-standard reading can be transitional (mid
+            // minimize/deminimize the subrole still reads AXDialog while
+            // AXMinimized has already flipped false). Recheck on the bounded
+            // ladder — re-entry re-reads both subrole and AXMinimized; a
+            // reading still non-standard once the ladder runs dry is a real
+            // dialog/sheet and drops for good.
+            let reading = verdict == .unknown ? "unreadable" : "non-standard"
             if let next = subroleRetries.first {
                 let rest = Array(subroleRetries.dropFirst())
-                WindowDebug.log("ax: subrole unreadable pid=\(pid) wid=\(wid) — retry in \(Int(next * 1000))ms")
+                WindowDebug.log("ax: subrole \(reading) pid=\(pid) wid=\(wid) — recheck in \(Int(next * 1000))ms")
                 DispatchQueue.main.asyncAfter(deadline: .now() + next) { [weak self] in
                     guard let self = self, self.windows[pid]?[wid] == nil else { return }
                     self.installPerWindow(pid: pid, app: app, window: window, firing: firing, subroleRetries: rest)
                 }
             } else {
-                WindowDebug.log("ax: subrole unreadable pid=\(pid) wid=\(wid) — dropped after retries (10s poll is the backstop)")
+                WindowDebug.log("ax: subrole stayed \(reading) pid=\(pid) wid=\(wid) — dropped after rechecks (10s poll is the backstop)")
             }
             return
-        case .standard:
-            break
         }
 
         // Seed the addressability cache with the AX-confirmed verdict.
@@ -2992,6 +3045,9 @@ final class WindowsAXObserver {
     /// `Windows.all()`, but with the read-error case kept distinct so
     /// `installPerWindow` can retry instead of permanently dropping a
     /// window whose subrole read merely timed out.
+    /// `.nonStandard` is a single-sample reading, not a final verdict: mid
+    /// minimize/deminimize a real window reads AXDialog, so callers must
+    /// recheck (or consult isMinimized) before dropping a window on it.
     private enum SubroleVerdict { case standard, nonStandard, unknown }
 
     private func axSubroleVerdict(_ el: AXUIElement) -> SubroleVerdict {
