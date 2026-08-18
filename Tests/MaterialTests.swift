@@ -362,6 +362,26 @@ func registerMaterialTests() {
             MaterialAttachment.mode(material: .glass(.tinted(color)), cornerRadius: nil, supportsGlass: true),
             .embeddedInGlass)
     }
+    test("glassEdgeInset: tangent curvature gets the bleed inset, others zero") {
+        // Circle: radius == min/2 → inset (the SDF bleed would clip flat at
+        // all four cardinal edges otherwise).
+        try expectEqual(
+            StackShape.glassEdgeInset(outerRadius: 40, frame: CGSize(width: 80, height: 80)),
+            StackShape.tangentBleedInset)
+        // Capsule: radius == min(h)/2 on a wide pill → inset.
+        try expectEqual(
+            StackShape.glassEdgeInset(outerRadius: 24, frame: CGSize(width: 420, height: 48)),
+            StackShape.tangentBleedInset)
+        // Ordinary rounded rect: radius well under tangent → no inset.
+        try expectEqual(
+            StackShape.glassEdgeInset(outerRadius: 12, frame: CGSize(width: 420, height: 48)), 0)
+        try expectEqual(
+            StackShape.glassEdgeInset(outerRadius: 24, frame: CGSize(width: 800, height: 470)), 0)
+        // No radius at all → no inset.
+        try expectEqual(
+            StackShape.glassEdgeInset(outerRadius: 0, frame: CGSize(width: 80, height: 80)), 0)
+    }
+
     test("attachment: .glass(.tinted) pre-Tahoe → siblingInContainer (fallback)") {
         let color = NSColor(srgbRed: 1, green: 0, blue: 0, alpha: 1)
         try expectEqual(

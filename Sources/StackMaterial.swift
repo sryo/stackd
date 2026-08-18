@@ -174,6 +174,21 @@ enum StackShape: String {
             return Double(min(frame.width, frame.height)) / 2.0
         }
     }
+
+    /// Inset for the glass view inside its panel when the shape's curvature
+    /// is tangent to the window bounds (radius == min(w,h)/2 — circles and
+    /// capsule ends). NSGlassEffectView renders its SDF boundary a couple
+    /// of points OUTSIDE its nominal bounds, and a window surface cannot be
+    /// painted past — a tangent circle therefore clips flat at all four
+    /// cardinal edges (an octagon). Insetting the glass view (and shrinking
+    /// its radius to stay concentric) keeps the whole rendered shape inside
+    /// the surface. Zero for non-tangent shapes: on straight tangent edges
+    /// the clipped bleed trims evenly and is invisible.
+    static let tangentBleedInset: Double = 3.0
+    static func glassEdgeInset(outerRadius: Double, frame: CGSize) -> Double {
+        let tangent = Double(min(frame.width, frame.height)) / 2.0
+        return outerRadius >= tangent - 0.5 ? tangentBleedInset : 0
+    }
 }
 
 /// Inner inset between the material edge and the WebView, in points.

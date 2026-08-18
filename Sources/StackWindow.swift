@@ -139,7 +139,14 @@ final class StackWindow: NSPanel, WKNavigationDelegate {
             // supportsGlass is true. The `#available` here satisfies the
             // compiler and is a no-op at runtime.
             if #available(macOS 26.0, *), case .glass(let variant) = material {
-                let glass = NSGlassEffectView(frame: NSRect(origin: .zero, size: frame.size))
+                // Tangent-curvature shapes get inset so the SDF bleed stays
+                // inside the window surface — see StackShape.glassEdgeInset.
+                let edgeInset = CGFloat(StackShape.glassEdgeInset(outerRadius: outerRadius, frame: frame.size))
+                let glassRadius = max(0, CGFloat(outerRadius) - edgeInset)
+                let glass = NSGlassEffectView(frame: NSRect(
+                    x: edgeInset, y: edgeInset,
+                    width: frame.size.width - edgeInset * 2,
+                    height: frame.size.height - edgeInset * 2))
                 glass.autoresizingMask = [.width, .height]
                 switch variant {
                 case .regular:
@@ -150,19 +157,28 @@ final class StackWindow: NSPanel, WKNavigationDelegate {
                     glass.style = .regular
                     glass.tintColor = color
                 }
-                if outerRadius > 0 {
-                    glass.cornerRadius = CGFloat(outerRadius)
+                if glassRadius > 0 {
+                    glass.cornerRadius = glassRadius
                 }
                 webView.frame = glass.bounds
                 webView.autoresizingMask = [.width, .height]
-                if outerRadius > 0 {
+                if glassRadius > 0 {
                     webView.wantsLayer = true
-                    webView.layer?.cornerRadius = CGFloat(outerRadius)
+                    webView.layer?.cornerRadius = glassRadius
                     webView.layer?.cornerCurve = .continuous
                     webView.layer?.masksToBounds = true
                 }
                 glass.contentView = webView
-                self.contentView = glass
+                if edgeInset > 0 {
+                    // AppKit force-fits contentView to the window, so an
+                    // inset glass view needs a plain full-size container.
+                    let container = NSView(frame: NSRect(origin: .zero, size: frame.size))
+                    container.autoresizingMask = [.width, .height]
+                    container.addSubview(glass)
+                    self.contentView = container
+                } else {
+                    self.contentView = glass
+                }
             } else {
                 self.contentView = webView  // defensive; unreachable per mode()
             }
