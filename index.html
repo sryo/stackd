@@ -1,0 +1,446 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>stackd - Make Your Computer Feel Like Yours</title>
+  <meta name="description" content="Drop a folder of HTML into ~/stackd/stacks and it becomes a live piece of your macOS desktop.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;700;900&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg-primary: #ffffff;
+      --bg-secondary: #f5f5f5;
+      --text-primary: #222;
+      --text-secondary: #666;
+      --accent: #0a84ff;
+      --border: #e0e0e0;
+    }
+
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg-primary: #1e1e1e;
+        --bg-secondary: #2a2a2a;
+        --text-primary: #f0f0f0;
+        --text-secondary: #a0a0a0;
+        --border: #3a3a3a;
+      }
+    }
+
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Roboto, sans-serif;
+      background: var(--bg-primary);
+      color: var(--text-primary);
+      line-height: 1.6;
+    }
+
+    .container { max-width: 720px; margin: 0 auto; padding: 0 1.5rem; }
+
+    /* Hero */
+    .hero { padding: 140px 2rem 40px; text-align: center; }
+    .hero h1 {
+      font-size: 3.5rem;
+      font-weight: 900;
+      letter-spacing: -0.04em;
+      line-height: 1.1;
+      animation: fadeInUp 0.8s ease;
+    }
+    .hero h2 {
+      font-size: 1.35rem;
+      font-weight: 500;
+      color: var(--text-secondary);
+      margin-bottom: 1.5rem;
+      line-height: 1.7;
+    }
+    .hero__cta a {
+      color: var(--accent);
+      text-decoration: none;
+      font-weight: 500;
+      font-size: 0.95rem;
+    }
+    .hero__cta a:hover { text-decoration: underline; }
+
+    @keyframes fadeInUp {
+      from { opacity: 0; transform: translateY(20px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    /* Demo: a real stack, running. */
+    .desktop {
+      position: relative;
+      height: 180px;
+      border-radius: 16px;
+      margin: 3rem 0 0.9rem;
+      overflow: hidden;
+      background: linear-gradient(150deg, #1b2a4a 0%, #4a3b6b 55%, #8c5a72 100%);
+    }
+
+    /* A bar in the menubar region, styled from stackd-stacks/bar. */
+    .bar {
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
+      height: 26px;
+      background: #000;
+      color: rgba(235, 235, 235, 0.92);
+      font: 13px -apple-system, system-ui, sans-serif;
+      -webkit-font-smoothing: antialiased;
+      user-select: none;
+    }
+    .zone {
+      position: absolute;
+      top: 0;
+      bottom: 0;
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      white-space: nowrap;
+    }
+    .zone[data-side="left"] { left: 12px; }
+    .zone[data-side="right"] { right: 12px; }
+    .zone .bold { font-weight: 600; }
+    .zone span:empty { display: none; }
+
+    .item {
+      cursor: pointer;
+      padding: 2px 6px;
+      margin: 0 -2px;
+      border-radius: 5px;
+    }
+    .item:hover { background: rgba(255, 255, 255, 0.14); }
+    .item.is-on { background: rgba(255, 255, 255, 0.24); }
+
+    .hint { font-size: 0.85rem; color: var(--text-secondary); margin: 0.9rem 0 1.6rem; }
+
+    .block { display: none; }
+    .block.is-on { display: block; }
+
+    /* The panel is anchored the way stack.json says: top-right, inset 16,
+       clearing the bar above it. */
+    .stack {
+      position: absolute;
+      top: 42px;
+      right: 16px;
+      width: 200px;
+      border-radius: 24px;
+      padding: 10px 14px;
+      color: #f5f5f7;
+      background: rgba(255, 255, 255, 0.14);
+      backdrop-filter: blur(20px);
+      -webkit-backdrop-filter: blur(20px);
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.25);
+      font-family: -apple-system, 'SF Pro Text', system-ui, sans-serif;
+    }
+    .stack .title { font-size: 11px; opacity: 0.7; text-transform: uppercase; letter-spacing: 0.05em; }
+    .stack .value { font-size: 22px; font-weight: 600; margin-top: 2px; }
+
+    .caption { color: var(--text-secondary); font-size: 0.9rem; margin-bottom: 2rem; }
+
+    .files { margin-bottom: 2rem; }
+    .files__title { font-size: 1.1rem; font-weight: 700; margin-bottom: 0.2rem; }
+    .files__path { font-size: 0.8rem; color: var(--text-secondary); margin-bottom: 0.4rem; font-family: 'SF Mono', Monaco, 'Courier New', monospace; }
+
+    pre {
+      background: var(--bg-secondary);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 14px 16px;
+      overflow-x: auto;
+      font-family: 'SF Mono', Monaco, 'Courier New', monospace;
+      font-size: 0.82rem;
+      line-height: 1.55;
+    }
+    pre + pre { margin-top: 0.6rem; }
+    .fname { color: var(--text-secondary); }
+
+    section { padding: 20px 0; }
+    h2.section { font-size: 1.5rem; font-weight: 700; margin-bottom: 1rem; }
+    section p { color: var(--text-secondary); font-size: 0.9rem; margin-top: 0.8rem; }
+    section a { color: var(--accent); text-decoration: none; }
+    section a:hover { text-decoration: underline; }
+
+    /* FAQ */
+    .faq-section { max-width: 640px; margin: 0 auto; padding: 40px 24px 60px; }
+    .faq-section h2 { font-size: 1.5rem; font-weight: 700; margin-bottom: 1.5rem; }
+
+    details { background: var(--bg-primary); border-bottom: 1px solid var(--border); }
+    details:first-of-type { border-top: 1px solid var(--border); }
+    summary {
+      padding: 16px;
+      font-size: 14px;
+      font-weight: 500;
+      cursor: pointer;
+      list-style: none;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    summary::-webkit-details-marker { display: none; }
+    summary::after {
+      content: '+';
+      font-size: 1.25rem;
+      font-weight: 400;
+      color: var(--text-secondary);
+    }
+    details[open] summary::after { content: '−'; }
+    details p {
+      padding: 0 16px 16px;
+      color: var(--text-secondary);
+      font-size: 14px;
+      line-height: 1.6;
+      margin: 0;
+    }
+    details code {
+      background: var(--bg-secondary);
+      padding: 0.15rem 0.4rem;
+      border-radius: 4px;
+      font-size: 0.9em;
+      font-family: 'SF Mono', Monaco, 'Courier New', monospace;
+    }
+    details a { color: var(--accent); text-decoration: none; }
+    details a:hover { text-decoration: underline; }
+
+    /* Footer */
+    .footer { padding: 40px 2rem; text-align: center; }
+    .footer__bottom {
+      padding-top: 2rem;
+      border-top: 1px solid var(--border);
+      font-size: 0.9rem;
+      color: var(--text-secondary);
+    }
+
+    @media (max-width: 600px) {
+      .hero { padding: 80px 1.5rem 30px; }
+      .hero h1 { font-size: 2.5rem; }
+      .hero h2 { font-size: 1.1rem; }
+      .desktop { height: 200px; }
+    }
+  </style>
+</head>
+<body>
+
+  <section class="hero">
+    <h1>stackd</h1>
+    <h2>Make your computer feel like yours</h2>
+    <p class="hero__cta"><a href="https://github.com/sryo/stackd">View on GitHub</a></p>
+  </section>
+
+  <div class="container">
+    <div class="desktop">
+      <div class="bar">
+        <div class="zone" data-side="left">
+          <span id="barApp" class="bold item" data-item="frontmostapp"></span>
+          <span id="barClock" class="item" data-item="clock"></span>
+        </div>
+        <div class="zone" data-side="right">
+          <span id="barBattery" class="item" data-item="battery"></span>
+          <span id="barNet" class="item" data-item="network"></span>
+          <span id="barInput" class="item" data-item="inputsource"></span>
+        </div>
+      </div>
+    </div>
+    <p class="hint">Click anything in the bar to see the file behind it.</p>
+
+    <div class="files">
+      <div class="files__path">~/stackd/stacks/bar/</div>
+
+      <div class="block is-on" data-block="stack">
+<pre><span class="fname">stack.json</span>
+{
+  "region": "menubar",
+  "display": "all",
+  "permissions": ["battery", "net", "input", "apps", "audio", "media"]
+}</pre>
+<pre><span class="fname">index.html</span>
+&lt;div class="bar"&gt;
+  &lt;div class="zone" data-side="left"&gt;&lt;/div&gt;
+  &lt;div class="zone" data-side="center-left"&gt;&lt;/div&gt;
+  &lt;div class="zone" data-side="center-right"&gt;&lt;/div&gt;
+  &lt;div class="zone" data-side="right"&gt;&lt;/div&gt;
+&lt;/div&gt;</pre>
+      </div>
+
+      <div class="block" data-block="frontmostapp">
+<pre><span class="fname">items/frontmostapp.js</span>
+{ id: "frontmostapp", side: "left", order: 10, bold: true,
+  setup(refresh) {
+    sd.app.frontmost.subscribe((a) =&gt; { cached = a?.name || ""; refresh(); });
+  },
+  update() { return cached; },
+  onClick() { sd.bang("palette.open", { under: "bar" }); } }</pre>
+      </div>
+
+      <div class="block" data-block="clock">
+<pre><span class="fname">items/clock.js</span>
+{ id: "clock", side: "left", order: 30, interval: 30,
+  update() { return formatDateLikeStrftime(new Date()); },
+  onClick() { sd.proc.exec("/usr/bin/open", ["/System/Applications/Calendar.app"]); } }</pre>
+      </div>
+
+      <div class="block" data-block="battery">
+<pre><span class="fname">items/battery.js</span>
+{ id: "battery", side: "right", order: 50,
+  setup(refresh) {
+    sd.battery.subscribe((b) =&gt; {
+      cached = `${b.charging ? "{sf:bolt.fill} " : ""}${Math.round(b.percent)}%`;
+      refresh();
+    });
+  } }</pre>
+      </div>
+
+      <div class="block" data-block="network">
+<pre><span class="fname">items/network.js</span>
+{ id: "network", side: "right", order: 55,
+  setup(refresh) {
+    sd.net.wifi.subscribe((w) =&gt; { wifi = w; recompute(refresh); });
+    sd.net.lan.subscribe ((l) =&gt; { lan  = l; recompute(refresh); });
+    sd.net.path.subscribe((p) =&gt; { path = p; recompute(refresh); });
+  } }</pre>
+      </div>
+
+      <div class="block" data-block="inputsource">
+<pre><span class="fname">items/inputsource.js</span>
+{ id: "inputsource", side: "right", order: 75,
+  setup(refresh) {
+    sd.input.layout.subscribe((info) =&gt; {
+      cached = KNOWN[info.layout] || info.layout.slice(0, 2).toUpperCase();
+      refresh();
+    });
+  } }</pre>
+      </div>
+    </div>
+
+    <section>
+      <h2 class="section">Install</h2>
+      <pre>git clone https://github.com/sryo/stackd ~/Documents/stackd
+cd ~/Documents/stackd && ./build.sh
+.build/stackd</pre>
+      <p>
+        Requires macOS 14+. On first launch it asks for Accessibility, and creates
+        <code>~/stackd/</code> for your stacks. <code>stackd new hello</code> scaffolds one.
+      </p>
+    </section>
+  </div>
+
+  <section class="faq-section">
+    <h2>FAQ</h2>
+
+    <details>
+      <summary>What is a stack?</summary>
+      <p>
+        A folder with a <code>stack.json</code>, an <code>index.html</code> and an
+        <code>index.css</code>. stackd renders it in a transparent WKWebView and feeds it
+        system state. Drop the folder in and it appears; edit a file and it reloads.
+      </p>
+    </details>
+
+    <details>
+      <summary>What can a stack read?</summary>
+      <p>
+        Battery, windows and focus, displays, network, audio, sensors, USB, location, the
+        trackpad's individual fingers, the menu bar. It can also take screenshots, run OCR
+        and speech, open SQLite files and serve HTTP. Permissions are declared per stack.
+      </p>
+    </details>
+
+    <details>
+      <summary>Why HTML?</summary>
+      <p>
+        Because you already know it. The native parts stay native; the visual layer is
+        HTML and CSS, so gradients and layout are the same tools you use everywhere else.
+      </p>
+    </details>
+
+    <details>
+      <summary>Is it free?</summary>
+      <p>Yes, open source and free to use.</p>
+    </details>
+  </section>
+
+  <footer class="footer">
+    <div class="container">
+      <div class="footer__bottom">© 2026 sryo</div>
+    </div>
+  </footer>
+
+  <script>
+    // Clicking a bar item reveals its file; clicking it again goes back to the
+    // stack itself. The real items are clickable too, so this reads as the
+    // same affordance.
+    const show = (name) => {
+      document.querySelectorAll('.block').forEach((b) => {
+        b.classList.toggle('is-on', b.dataset.block === name);
+      });
+      document.querySelectorAll('.item').forEach((i) => {
+        i.classList.toggle('is-on', i.dataset.item === name);
+      });
+    };
+
+    document.querySelectorAll('.item').forEach((item) => {
+      item.addEventListener('click', () => {
+        show(item.classList.contains('is-on') ? 'stack' : item.dataset.item);
+      });
+    });
+
+    // The bar carries the same items the real one does, in the same zones, and
+    // the readings come from what this browser can actually see.
+    // clock: the real item mirrors strftime "%a %b %d  %H:%M".
+    const DATE_OPTS = { weekday: 'short', month: 'short', day: '2-digit' };
+    const TIME_OPTS = { hour: '2-digit', minute: '2-digit', hour12: false };
+    const clock = () => {
+      const now = new Date();
+      document.getElementById('barClock').textContent =
+        now.toLocaleDateString(undefined, DATE_OPTS).replace(',', '')
+        + '  ' + now.toLocaleTimeString(undefined, TIME_OPTS);
+    };
+    clock();
+    setInterval(clock, 30000);
+
+    // frontmostapp: in a browser, the frontmost app is the browser.
+    const ua = navigator.userAgent;
+    const brand = /Arc\//.test(ua) ? 'Arc'
+      : /Edg\//.test(ua) ? 'Edge'
+      : /Firefox\//.test(ua) ? 'Firefox'
+      : /Chrome\//.test(ua) ? 'Chrome'
+      : /Safari\//.test(ua) ? 'Safari'
+      : 'Browser';
+    document.getElementById('barApp').textContent = brand;
+
+    // network: the real item shows the SSID, else the interface kind.
+    const net = () => {
+      const c = navigator.connection;
+      const type = c && c.type;
+      document.getElementById('barNet').textContent = !navigator.onLine ? 'offline'
+        : type === 'ethernet' ? 'Ethernet'
+        : type === 'cellular' ? 'Cellular'
+        : 'Wi-Fi';
+    };
+    net();
+    window.addEventListener('online', net);
+    window.addEventListener('offline', net);
+
+    // inputsource: two-letter code, same shape as the real item's map.
+    const LANG = { en: 'US', es: 'ES', fr: 'FR', de: 'DE', it: 'IT', pt: 'PT', nl: 'NL' };
+    const tag = (navigator.language || 'en').toLowerCase();
+    document.getElementById('barInput').textContent =
+      tag.startsWith('en-gb') ? 'UK' : (LANG[tag.split('-')[0]] || tag.split('-')[0].toUpperCase());
+
+    // battery: bolt prefix while charging, same as the real item.
+    if (navigator.getBattery) {
+      navigator.getBattery().then((b) => {
+        const paint = () => {
+          document.getElementById('barBattery').textContent =
+            (b.charging ? '⚡ ' : '') + Math.round(b.level * 100) + '%';
+        };
+        paint();
+        b.addEventListener('levelchange', paint);
+        b.addEventListener('chargingchange', paint);
+      }).catch(() => {});
+    }
+  </script>
+</body>
+</html>
