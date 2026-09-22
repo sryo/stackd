@@ -76,6 +76,7 @@ final class OverlayHandle: NSObject, WKNavigationDelegate {
     private var navigationReady: Bool = false
     private var pendingTargetJS: String?
     private var lastPushedTargetJS: String?
+    private var resizeDetector = LiveResizeDetector()
     // True after a window-server move AppKit didn't see: `panel.frame` still
     // holds the old origin until syncAppKitFrame() tells it.
     private var appKitStale: Bool = false
@@ -213,7 +214,10 @@ final class OverlayHandle: NSObject, WKNavigationDelegate {
         // coordinates, so the target's top-left sits at (outset, outset).
         // With outset 0 that's (0,0), byte-compatible with the pre-outset
         // payload plus the new field.
-        let payload = OverlayGeometry.targetPayloadJS(targetFrame: targetFrame, outset: outset)
+        let resizing = resizeDetector.update(size: targetFrame.size, now: CFAbsoluteTimeGetCurrent(),
+                                             buttonDown: Mouse.isLeftButtonDown)
+        let payload = OverlayGeometry.targetPayloadJS(targetFrame: targetFrame, outset: outset,
+                                                      resizing: resizing)
         guard let js = OverlayTickPlan.payloadToPush(payload, lastPushed: lastPushedTargetJS) else { return }
         lastPushedTargetJS = js
         if navigationReady {
@@ -330,15 +334,43 @@ enum OverlayGeometry {
     /// spelling of the payload shape shared by the per-tick push and the
     /// attach-time bootstrap seed (adding a field means editing exactly
     /// here). The target's top-left sits at (outset, outset).
-    static func targetObjectJS(targetFrame: CGRect, outset: CGFloat) -> String {
+    /// `resizing` is only spelled out while true, so the idle payload stays
+    /// byte-identical to the pre-resizing shape (JS reads it as falsy).
+    static func targetObjectJS(targetFrame: CGRect, outset: CGFloat, resizing: Bool = false) -> String {
         let o = Int(outset)
-        return "{x:\(o),y:\(o),w:\(Int(targetFrame.width)),h:\(Int(targetFrame.height)),outset:\(o)}"
+        let flag = resizing ? ",resizing:true" : ""
+        return "{x:\(o),y:\(o),w:\(Int(targetFrame.width)),h:\(Int(targetFrame.height)),outset:\(o)\(flag)}"
     }
 
     /// The per-tick JS push. Outset 0 reproduces the legacy `{x:0,y:0,w,h}`
     /// payload plus the new `outset` field.
-    static func targetPayloadJS(targetFrame: CGRect, outset: CGFloat) -> String {
-        "window.sd=window.sd||{};window.sd.target=\(targetObjectJS(targetFrame: targetFrame, outset: outset));window.dispatchEvent(new CustomEvent('sd:target',{detail:window.sd.target}));"
+    static func targetPayloadJS(targetFrame: CGRect, outset: CGFloat, resizing: Bool = false) -> String {
+        "window.sd=window.sd||{};window.sd.target=\(targetObjectJS(targetFrame: targetFrame, outset: outset, resizing: resizing));window.dispatchEvent(new CustomEvent('sd:target',{detail:window.sd.target}));"
+    }
+}
+
+// MARK: - Live resize (pure, testable)
+
+/// Observes whether the target is being live-resized by the user: its size
+/// changed within the last `quiet` seconds while the left button is held.
+/// Programmatic resizes (tilers, animations) have no button down and never
+/// count. The daemon only reports the state; what to do with it (hide the
+/// border, drop effects) is the stack's call.
+struct LiveResizeDetector {
+    static let quiet: Double = 0.060
+    private var lastSize: CGSize?
+    private var lastChange: Double = -.infinity
+
+    /// `buttonDown` is only evaluated while a size change is recent, so idle
+    /// ticks never query the window server.
+    mutating func update(size: CGSize, now: Double, buttonDown: () -> Bool) -> Bool {
+        if let last = lastSize,
+           abs(last.width - size.width) >= 0.5 || abs(last.height - size.height) >= 0.5 {
+            lastChange = now
+        }
+        lastSize = size
+        guard now - lastChange < Self.quiet else { return false }
+        return buttonDown()
     }
 }
 

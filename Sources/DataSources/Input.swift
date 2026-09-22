@@ -223,6 +223,10 @@ enum Mouse {
         ) { _ in cachedPrimaryHeight = nil }
     }()
 
+    static func isLeftButtonDown() -> Bool {
+        CGEventSource.buttonState(.combinedSessionState, button: .left)
+    }
+
     static func location() -> CGPoint {
         _ = screenChangeObserver
         let appkit = NSEvent.mouseLocation

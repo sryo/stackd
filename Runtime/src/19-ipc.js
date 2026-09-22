@@ -87,7 +87,10 @@ sd.urlhandler = {
   //
   // Inside the overlay's WebView, `window.sd.target = {x, y, w, h, outset}`
   // is updated on change — PANEL coordinates, so the target's top-left is
-  // at (outset, outset); with outset 0 that's the legacy (0,0).
+  // at (outset, outset); with outset 0 that's the legacy (0,0). While the
+  // user is live-resizing the target, the object also carries
+  // `resizing: true` (absent otherwise) so the overlay can hide or simplify
+  // itself instead of trailing the resize.
   // Permission: "overlay".
 sd.overlay = {
     async attach(targetId, spec) {
