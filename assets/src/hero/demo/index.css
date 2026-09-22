@@ -1,0 +1,10 @@
+body {
+  display: grid;
+  place-content: center;
+  height: 100vh;
+  font: 26px Inter, sans-serif;
+  text-align: center;
+  color: #a0a0a0;
+}
+h1, p { margin: 0 }
+h1 { font-size: 84px; color: #f0f0f0 }

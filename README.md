@@ -2,6 +2,8 @@
 
 A small macOS daemon for making your computer feel like yours.
 
+<p align="center"><img src="assets/hero.gif" width="830" alt="Editing index.html in an editor; on save, a glass widget on the desktop hot-reloads with the change."></p>
+
 Drop a folder into `~/stackd/stacks/` and it becomes a live piece of your desktop — a status strip across the top, a launcher you summon with a hotkey, a script that fires when you close a window. The folder is a *stack*: a `stack.json`, an `index.html`, an `index.css`. stackd renders it in a transparent WKWebView and feeds it system state through a small JavaScript API.
 
 It's the successor to a Hammerspoon config that grew too tall. The native parts stay native (Accessibility, eventtaps, IOKit, CGEvent post); the visual layer is HTML/CSS — the same tools, the same dev tooling, the same gradients you can already write — instead of a paint-program's worth of `hs.canvas` arithmetic.
@@ -16,6 +18,12 @@ It's the successor to a Hammerspoon config that grew too tall. The native parts 
 └── index.css
 ```
 
+<p align="center"><img src="assets/gallery/bar.png" alt="bar — the menubar, replaced: frontmost app, date, weather, now playing, input source, brightness, volume, Wi-Fi, battery"></p>
+
+<p align="center"><img src="assets/gallery/timetrail.png" width="600" alt="timetrail — the current hour orbiting the cursor"><br><sub><code>bar</code> — the menubar, replaced · <code>timetrail</code> — the hour, orbiting your cursor</sub></p>
+
+These and the rest of a daily-driver config live in [stackd-stacks](https://github.com/sryo/stackd-stacks).
+
 ## Contents
 
 - [Install](#install) · [Quick start](#quick-start) · [Concepts](#concepts)
@@ -29,7 +37,7 @@ It's the successor to a Hammerspoon config that grew too tall. The native parts 
 Requires macOS 14+. Build from source:
 
 ```
-git clone <this repo> ~/Documents/stackd
+git clone https://github.com/sryo/stackd ~/Documents/stackd
 cd ~/Documents/stackd
 ./build.sh
 .build/stackd                                # starts the daemon

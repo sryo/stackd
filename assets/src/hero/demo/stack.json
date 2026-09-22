@@ -1,0 +1,24 @@
+{
+  "id": "hero-demo",
+  "name": "Hero clip widget",
+  "anchor": {
+    "edge": "top-left",
+    "inset": [
+      685,
+      1464
+    ]
+  },
+  "size": {
+    "w": 320,
+    "h": 180
+  },
+  "material": "glass",
+  "cornerRadius": 24,
+  "level": "tooltip",
+  "display": "primary",
+  "clickThrough": true,
+  "hideDuringScreenshot": false,
+  "permissions": [
+    "battery"
+  ]
+}

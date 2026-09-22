@@ -1,0 +1,270 @@
+/* Hero clip stage. Everything is laid out inside a 1200×676 .frame that is
+   centered on the panel — the recording rect. The panel itself is the
+   whole screen, flat #111318 outside the frame (never in the recording). */
+
+:root {
+  --bg: #111318;
+  --editor: #1e1e1e;
+  --raised: #2a2a2a;
+  --text: #f0f0f0;
+  --muted: #a0a0a0;
+  --accent: #0a84ff;
+  --punct: #8b949e;
+  --tag: #7ee787;
+  --attr: #79c0ff;
+  --string: #a5d6ff;
+  --expr: #ffa657;
+  --ui-font: Inter, -apple-system, "SF Pro Text", system-ui, sans-serif;
+  --code-font: ui-monospace, "SF Mono", Menlo, monospace;
+  --code-size: 22px;
+  --line-h: 36px;
+  --frame-w: 1200px;
+  --frame-h: 676px;
+}
+
+html, body {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: var(--bg);
+  font-family: var(--ui-font);
+  -webkit-font-smoothing: antialiased;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.frame {
+  position: absolute;
+  width: var(--frame-w);
+  height: var(--frame-h);
+  left: 0;
+  top: 0;
+  overflow: hidden;
+  background:
+    radial-gradient(120% 90% at 85% 10%, #0a84ff 0%, transparent 55%),
+    radial-gradient(90% 80% at 10% 95%, #5e5ce6 0%, transparent 60%),
+    radial-gradient(70% 60% at 60% 70%, #ff375f33 0%, transparent 60%),
+    #111318;
+}
+
+/* ── editor window ─────────────────────────────────────────────────── */
+
+.editor {
+  position: absolute;
+  left: 48px;
+  top: 95px;
+  width: 640px;
+  height: 486px;
+  border-radius: 12px;
+  background: var(--editor);
+  box-shadow:
+    0 0 0 1px rgba(255, 255, 255, 0.08),
+    inset 0 1px 0 rgba(255, 255, 255, 0.05),
+    0 30px 80px rgba(0, 0, 0, 0.45);
+  overflow: hidden;
+}
+
+.chrome {
+  height: 46px;
+  display: flex;
+  align-items: center;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.lights {
+  display: flex;
+  gap: 8px;
+  padding: 0 16px 0 18px;
+}
+.lights i {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  display: block;
+  box-shadow: inset 0 0 0 0.5px rgba(0, 0, 0, 0.25);
+}
+.lights .r { background: #ff5f57; }
+.lights .y { background: #febc2e; }
+.lights .g { background: #28c840; }
+
+.tabs {
+  display: flex;
+  gap: 4px;
+  padding-left: 4px;
+}
+.tab {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 28px;
+  padding: 0 12px;
+  border-radius: 7px;
+  font-size: 15px;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  color: var(--muted);
+}
+.tab.active {
+  background: var(--raised);
+  color: var(--text);
+}
+.tab .dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: 0;
+}
+.tab.modified .dot { opacity: 0.9; }
+
+/* ── code area ─────────────────────────────────────────────────────── */
+
+.code {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 47px;
+  padding-top: 14px;
+  font-family: var(--code-font);
+  font-size: var(--code-size);
+  line-height: var(--line-h);
+  font-variant-ligatures: none;
+  color: var(--text);
+}
+
+.row {
+  position: relative;
+  height: var(--line-h);
+  display: flex;
+}
+.row.current::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: rgba(255, 255, 255, 0.035);
+}
+.num {
+  position: relative;
+  width: 44px;
+  flex: none;
+  text-align: right;
+  font-size: 15px;
+  color: #4d4d4d;
+  padding-right: 0;
+}
+.row.current .num { color: var(--muted); }
+
+.line {
+  position: relative;
+  flex: 1;
+  margin-left: 20px;
+  white-space: pre;
+  tab-size: 2;
+}
+
+.tk-punct  { color: var(--punct); }
+.tk-tag    { color: var(--tag); }
+.tk-attr   { color: var(--attr); }
+.tk-string { color: var(--string); }
+.tk-expr   { color: var(--expr); }
+.tk-dim    { color: var(--punct); }
+.tk-sel    { color: var(--tag); }
+.tk-prop   { color: var(--attr); }
+.tk-hex    { font-weight: 500; }
+
+.sel {
+  position: absolute;
+  top: 3px;
+  height: calc(var(--line-h) - 6px);
+  background: rgba(10, 132, 255, 0.38);
+  border-radius: 3px;
+  pointer-events: none;
+}
+
+.caret {
+  position: absolute;
+  top: 5px;
+  width: 2px;
+  height: calc(var(--line-h) - 10px);
+  background: var(--text);
+  border-radius: 1px;
+}
+.caret.blink {
+  animation: blink 1.06s steps(1, end) infinite;
+}
+@keyframes blink {
+  0%, 49% { opacity: 1; }
+  50%, 100% { opacity: 0; }
+}
+
+/* ── ⌘S keycap toast ───────────────────────────────────────────────── */
+
+.toast {
+  position: absolute;
+  right: 16px;
+  bottom: 14px;
+  display: flex;
+  gap: 6px;
+  opacity: 0;
+  transform: scale(0.92) translateY(4px);
+  pointer-events: none;
+}
+.toast .key {
+  height: 42px;
+  min-width: 42px;
+  padding: 0 12px;
+  border-radius: 9px;
+  background: var(--text);
+  color: var(--bg);
+  font-family: var(--ui-font);
+  font-size: 21px;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow:
+    0 2px 0 #c6c6c6,
+    0 10px 28px rgba(0, 0, 0, 0.35);
+}
+.toast.on {
+  opacity: 1;
+  transform: none;
+  transition: opacity 110ms ease-out, transform 110ms ease-out;
+}
+.toast.off {
+  opacity: 0;
+  transform: scale(0.98);
+  transition: opacity 160ms ease-in, transform 160ms ease-in;
+}
+
+/* ── look-dev mock widget (headless Chrome only; never rendered in stackd) */
+
+.mock {
+  position: absolute;
+  left: 784px;
+  top: 248px;
+  width: 320px;
+  height: 180px;
+  border-radius: 24px;
+  background: rgba(24, 28, 40, 0.42);
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.16),
+    inset 0 1px 0 rgba(255, 255, 255, 0.14);
+  overflow: hidden;
+}
+.mock iframe {
+  border: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+  background: transparent;
+}
+
+/* Snapshot mode (?t= / ?beat=): freeze every animation so a headless
+   screenshot lands on the intended state. */
+html.snapshot * {
+  animation: none !important;
+  transition: none !important;
+}

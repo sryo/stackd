@@ -1,0 +1,12 @@
+{
+  "id": "hero-stage",
+  "name": "Hero clip stage",
+  "region": "fullscreen",
+  "display": "primary",
+  "level": "960",
+  "clickThrough": true,
+  "hideDuringScreenshot": false,
+  "padding": 0,
+  "permissions": ["fs"],
+  "handles": ["hero.start", "hero.jump"]
+}
