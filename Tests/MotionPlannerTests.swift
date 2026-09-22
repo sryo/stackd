@@ -138,4 +138,45 @@ func registerMotionPlannerTests() {
         _ = p.tick(now: 10)
         try expect(!p.isAnimating(11))
     }
+
+    test("translate-only intermediate writes skip the size axis") {
+        // A size write makes the app re-layout; a pure tile shift must not
+        // pay for one every frame.
+        var p = MotionPlanner()
+        _ = p.register(windowID: 1, from: rect(0, 0, 400, 300), to: rect(800, 0, 400, 300),
+                       duration: 1.0, easing: .linear)
+        _ = p.tick(now: 0)
+        let mid = p.tick(now: 0.5)
+        try expectEqual(mid.writes.count, 1)
+        try expect(!mid.writes[0].writeSize, "size unchanged, must not be written")
+        try expect(mid.writes[0].writePosition)
+    }
+
+    test("resize-only intermediate writes skip the position axis") {
+        var p = MotionPlanner()
+        _ = p.register(windowID: 1, from: rect(100, 100, 400, 300), to: rect(100, 100, 800, 600),
+                       duration: 1.0, easing: .linear)
+        _ = p.tick(now: 0)
+        let mid = p.tick(now: 0.5)
+        try expectEqual(mid.writes.count, 1)
+        try expect(mid.writes[0].writeSize)
+        try expect(!mid.writes[0].writePosition, "origin unchanged, must not be written")
+    }
+
+    test("mixed move+resize writes both axes, and the final write always writes both") {
+        var p = MotionPlanner()
+        _ = p.register(windowID: 1, from: rect(0, 0, 400, 300), to: rect(800, 0, 400, 300),
+                       duration: 0.2, easing: .linear)
+        _ = p.register(windowID: 2, from: rect(0, 0, 400, 300), to: rect(200, 50, 600, 400),
+                       duration: 1.0, easing: .linear)
+        _ = p.tick(now: 0)
+        let mid = p.tick(now: 0.1)
+        let mixed = mid.writes.first { $0.windowID == 2 }
+        try expect(mixed?.writeSize == true && mixed?.writePosition == true)
+        let done = p.tick(now: 5.0)
+        let final1 = done.writes.first { $0.windowID == 1 }
+        try expect(final1?.isFinal == true)
+        try expect(final1?.writeSize == true && final1?.writePosition == true,
+                   "settle frame must write both axes")
+    }
 }

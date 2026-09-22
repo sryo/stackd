@@ -92,6 +92,10 @@ struct MotionPlanner {
         let windowID: CGWindowID
         let frame: CGRect
         let isFinal: Bool
+        // Axes that differ from the previous write. Final writes always
+        // carry both — the settle frame must stick.
+        var writeSize: Bool = true
+        var writePosition: Bool = true
     }
 
     struct Finished: Equatable {
@@ -218,7 +222,9 @@ struct MotionPlanner {
 
             let frame = Self.evaluate(reg, elapsed: elapsed).motionRounded
             if frame != reg.lastWritten {
-                writes.append(FrameWrite(windowID: windowID, frame: frame, isFinal: false))
+                writes.append(FrameWrite(windowID: windowID, frame: frame, isFinal: false,
+                                         writeSize: frame.size != reg.lastWritten.size,
+                                         writePosition: frame.origin != reg.lastWritten.origin))
                 reg.lastWritten = frame
             }
             active[windowID] = reg
@@ -555,17 +561,24 @@ final class WindowMotionEngine {
             )
             return
         }
-        // Intermediate ticks: two writes (size, position) on the cached
-        // element. The belt-and-suspenders second size set is deferred to
+        // Intermediate ticks: at most two writes (size, position) on the
+        // cached element, skipping any axis that didn't change since the
+        // last tick. The belt-and-suspenders second size set is deferred to
         // the final frame; per-tick it would double the AX volume for a
         // correction no one can see mid-flight.
         guard let el = elements[write.windowID] else { return }
-        var pos = write.frame.origin
-        var size = write.frame.size
-        guard let posVal = AXValueCreate(.cgPoint, &pos),
-              let sizeVal = AXValueCreate(.cgSize, &size) else { return }
-        _ = AXUIElementSetAttributeValue(el, kAXSizeAttribute as CFString, sizeVal)
-        _ = AXUIElementSetAttributeValue(el, kAXPositionAttribute as CFString, posVal)
+        if write.writeSize {
+            var size = write.frame.size
+            if let sizeVal = AXValueCreate(.cgSize, &size) {
+                _ = AXUIElementSetAttributeValue(el, kAXSizeAttribute as CFString, sizeVal)
+            }
+        }
+        if write.writePosition {
+            var pos = write.frame.origin
+            if let posVal = AXValueCreate(.cgPoint, &pos) {
+                _ = AXUIElementSetAttributeValue(el, kAXPositionAttribute as CFString, posVal)
+            }
+        }
     }
 
     private func resolve(_ finished: MotionPlanner.Finished) {
