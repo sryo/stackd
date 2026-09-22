@@ -490,6 +490,18 @@ enum AXShim {
 
 // MARK: - WindowsByID: per-window actions targeting a CGWindowID
 
+/// Pure resolution order for a window's owning pid. `cached` maps each pid
+/// to the window ids its AX cache holds; `query` is the single-window
+/// CGWindowList fallback.
+enum WindowOwnerLookup {
+    static func pid(for windowID: CGWindowID,
+                    cached: [pid_t: Set<CGWindowID>],
+                    query: (CGWindowID) -> pid_t?) -> pid_t? {
+        if let hit = cached.first(where: { $0.value.contains(windowID) }) { return hit.key }
+        return query(windowID)
+    }
+}
+
 enum WindowsByID {
     // Batch sink. When sd.windows.batch is active, setFrame on a specific id
     // queues the FULL frame here instead of writing AX; commit applies every
@@ -641,19 +653,23 @@ enum WindowsByID {
         return existing[windowID]
     }
 
-    // Look up by CGWindowID alone — we walk the CGWindowList to recover the
-    // pid (cheap), then dispatch via elementFor(windowID:pid:).
+    // Look up by CGWindowID alone — recover the pid, then dispatch via
+    // elementFor(windowID:pid:).
     static func elementFor(windowID: CGWindowID) -> AXUIElement? {
-        let target = Int(windowID)
-        guard let raw = CGWindowListCopyWindowInfo([.optionAll], kCGNullWindowID) else { return nil }
-        let list = raw as! [[String: Any]]
-        for info in list {
-            if let n = info[kCGWindowNumber as String] as? Int, n == target,
-               let p = info[kCGWindowOwnerPID as String] as? Int {
-                return elementFor(windowID: CGWindowID(target), pid: pid_t(p))
-            }
+        guard let pid = ownerPID(windowID: windowID) else { return nil }
+        return elementFor(windowID: windowID, pid: pid)
+    }
+
+    /// Owning pid for a window: the AX element cache already knows it for
+    /// every window we've touched, so only an unseen window costs a
+    /// single-window CGWindowList query.
+    static func ownerPID(windowID: CGWindowID) -> pid_t? {
+        cacheLock.lock()
+        let cached = axCache.mapValues { Set($0.keys) }
+        cacheLock.unlock()
+        return WindowOwnerLookup.pid(for: windowID, cached: cached) { wid in
+            (windowInfo(windowID: wid)?[kCGWindowOwnerPID as String] as? Int).map { pid_t($0) }
         }
-        return nil
     }
 
     @discardableResult
@@ -810,21 +826,11 @@ enum WindowsByID {
     // activation the window comes forward but the app keeps prior key state.
     @discardableResult
     static func focus(windowID: CGWindowID) -> Bool {
-        let target = Int(windowID)
-        guard let raw = CGWindowListCopyWindowInfo([.optionAll], kCGNullWindowID) else { return false }
-        let list = raw as! [[String: Any]]
-        var foundPid: pid_t?
-        for info in list {
-            if let n = info[kCGWindowNumber as String] as? Int, n == target,
-               let p = info[kCGWindowOwnerPID as String] as? Int {
-                foundPid = pid_t(p); break
-            }
-        }
-        guard let pid = foundPid else { return false }
+        guard let pid = ownerPID(windowID: windowID) else { return false }
         if let app = NSRunningApplication(processIdentifier: pid) {
             app.activate(options: [.activateIgnoringOtherApps])
         }
-        guard let el = elementFor(windowID: CGWindowID(target), pid: pid) else { return false }
+        guard let el = elementFor(windowID: windowID, pid: pid) else { return false }
         AXUIElementPerformAction(el, kAXRaiseAction as CFString)
         AXUIElementSetAttributeValue(el, kAXMainAttribute as CFString, true as CFTypeRef)
         AXUIElementSetAttributeValue(el, kAXFocusedAttribute as CFString, true as CFTypeRef)
@@ -2964,12 +2970,15 @@ final class WindowsAXObserver {
     private var heldFrameBangs: [FrameBangCoalescer.Key: [String: Any]] = [:]
 
     private func fireFrameBang(_ kind: FrameBangCoalescer.Kind, wid: CGWindowID, window: AXUIElement) {
-        let frame = axWindowFrame(window) ?? .zero
         lastAxFire[wid] = Date().timeIntervalSince1970
+        // Checked before the frame read: during an animation every tick
+        // echoes back here, and the two synchronous AX reads would be
+        // discarded anyway.
         if WindowMotionEngine.shared.isAnimating(windowID: wid) {
             WindowDebug.log("ax: \(kind.rawValue) swallowed (animating) wid=\(wid)")
             return
         }
+        let frame = axWindowFrame(window) ?? .zero
         let isSelf = FrameLedger.shared.isSelf(
             windowID: wid, observed: frame, now: CFAbsoluteTimeGetCurrent()
         )
