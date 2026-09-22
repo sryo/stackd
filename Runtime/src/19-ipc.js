@@ -69,7 +69,7 @@ sd.urlhandler = {
   // frame tracks SLSGetWindowBounds(targetId) every vsync; inside that
   // WebView, the stack-supplied {html, css, js} renders normally. The
   // daemon pushes `window.sd.target = {x, y, w, h}` into the overlay's
-  // WebView each tick (and fires a `sd:target` CustomEvent) so spec
+  // WebView whenever it changes (and fires a `sd:target` CustomEvent) so spec
   // authors can position their elements off the current target geometry.
   //
   //   const h = await sd.overlay.attach(targetId, {
@@ -86,7 +86,7 @@ sd.urlhandler = {
   //   await h.detach();
   //
   // Inside the overlay's WebView, `window.sd.target = {x, y, w, h, outset}`
-  // is updated each vsync — PANEL coordinates, so the target's top-left is
+  // is updated on change — PANEL coordinates, so the target's top-left is
   // at (outset, outset); with outset 0 that's the legacy (0,0).
   // Permission: "overlay".
 sd.overlay = {

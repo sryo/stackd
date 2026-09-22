@@ -141,7 +141,7 @@ window.__sd_proc_stream_fire = (id, payload) => {
 };
 // sd.overlay no longer round-trips JS draw callbacks. The daemon hosts a
 // per-overlay WKWebView and pushes `window.sd.target = {x,y,w,h}` into it
-// each vsync; the overlay's own HTML/CSS/JS handles rendering. attach()
+// when it changes; the overlay's own HTML/CSS/JS handles rendering. attach()
 // mints an id and returns a thin handle whose `.detach()` closes the panel.
 // HTTP servers: serverId → callback(req). One callback per server; the
 // stack handles route dispatch, CORS, Content-Type, and static-asset

@@ -250,7 +250,7 @@ Handle-based; handles are opaque ints owned by this stack — release them.
 - `show(spec) → Promise` — `spec:{title, body, subtitle?, sound?}`.
 
 ### `sd.overlay` — foreign-window overlay · `overlay`
-- `attach(targetId, spec) → Promise<handle|null>` — `spec:{html?,css?,js?}` in a click-through panel tracking `targetId`'s bounds; `window.sd.target={x,y,w,h}` + `sd:target` event pushed each vsync. Handle: `setTarget(newTargetId)` · `eval(js)` · `detach()` `→ Promise`.
+- `attach(targetId, spec) → Promise<handle|null>` — `spec:{html?,css?,js?}` in a click-through panel tracking `targetId`'s bounds; `window.sd.target={x,y,w,h}` + `sd:target` event pushed when the target's size changes (panel coordinates, so moves don't re-push). Handle: `setTarget(newTargetId)` · `eval(js)` · `detach()` `→ Promise`.
 
 ### `sd.pasteboard` — clipboard · `pasteboard`
 - `sd.pasteboard.changed` *(channel)* — `{text, changeCount}`.

@@ -5,9 +5,9 @@ import CoreGraphics
 // WebKit overlay primitive: a borderless click-through NSPanel hosting a
 // WKWebView, pinned to a target window we don't own. The stack supplies
 // {html, css?, js?}; per vsync the daemon repositions the panel to match
-// SLSGetWindowBounds(targetWID) and pushes `window.sd.target = {x,y,w,h}`
-// into the overlay's WebView. Rendering is WebKit; the daemon only observes
-// and sets geometry.
+// SLSGetWindowBounds(targetWID) and, when the target's size or the outset
+// changes, pushes `window.sd.target = {x,y,w,h}` into the overlay's
+// WebView. Rendering is WebKit; the daemon only observes and sets geometry.
 //
 // Why NSPanel + WKWebView instead of an SLS-owned sibling window (the
 // JankyBorders pattern):
@@ -75,6 +75,7 @@ final class OverlayHandle: NSObject, WKNavigationDelegate {
     // Until then we buffer the latest target geometry; on finish we flush.
     private var navigationReady: Bool = false
     private var pendingTargetJS: String?
+    private var lastPushedTargetJS: String?
     private var released: Bool = false
 
     init(id: Int, targetWID: CGWindowID, panel: NSPanel, webView: WKWebView,
@@ -143,8 +144,9 @@ final class OverlayHandle: NSObject, WKNavigationDelegate {
     private var pendingEvalJS: String?
 
     /// Per-tick: reposition the panel to the target's current bounds
-    /// (grown by `outset` on all sides) and push `window.sd.target =
-    /// {x,y,w,h,outset}` in PANEL coordinates into the overlay's WebView.
+    /// (grown by `outset` on all sides) and, when it changed, push
+    /// `window.sd.target = {x,y,w,h,outset}` in PANEL coordinates into the
+    /// overlay's WebView.
     /// `targetFrame` comes from SLSGetWindowBounds(targetWID) (top-left,
     /// screen-points).
     func tick(targetFrame: CGRect) {
@@ -164,11 +166,14 @@ final class OverlayHandle: NSObject, WKNavigationDelegate {
             lastFrame = .zero
         }
 
-        let frameChanged = !rectsApproxEqual(appKitFrame, lastFrame)
-        if frameChanged {
-            panel.setFrame(appKitFrame, display: true)
-            lastFrame = appKitFrame
+        let frameOp = OverlayTickPlan.frameOp(next: appKitFrame, last: lastFrame)
+        switch frameOp {
+        case .none: break
+        case .move(let origin): panel.setFrameOrigin(origin)
+        case .reshape(let frame): panel.setFrame(frame, display: true)
         }
+        let frameChanged = frameOp != .none
+        if frameChanged { lastFrame = appKitFrame }
         // Ensure the panel sits above the target. Tag/level setup at
         // attach time covers most cases; SLSTransactionOrderWindow with
         // the target's wid as reference is the explicit "above this
@@ -188,7 +193,9 @@ final class OverlayHandle: NSObject, WKNavigationDelegate {
         // coordinates, so the target's top-left sits at (outset, outset).
         // With outset 0 that's (0,0), byte-compatible with the pre-outset
         // payload plus the new field.
-        let js = OverlayGeometry.targetPayloadJS(targetFrame: targetFrame, outset: outset)
+        let payload = OverlayGeometry.targetPayloadJS(targetFrame: targetFrame, outset: outset)
+        guard let js = OverlayTickPlan.payloadToPush(payload, lastPushed: lastPushedTargetJS) else { return }
+        lastPushedTargetJS = js
         if navigationReady {
             webView.evaluateJavaScript(js, completionHandler: nil)
         } else {
@@ -255,15 +262,6 @@ final class OverlayHandle: NSObject, WKNavigationDelegate {
             height: cgsFrame.height
         )
     }
-
-    private func rectsApproxEqual(_ a: CGRect, _ b: CGRect) -> Bool {
-        // Sub-pixel jitter from AX/CG round-trips would otherwise force a
-        // setFrame + reorder every tick. 0.5pt is well below "user notices."
-        abs(a.origin.x - b.origin.x) < 0.5 &&
-        abs(a.origin.y - b.origin.y) < 0.5 &&
-        abs(a.size.width  - b.size.width)  < 0.5 &&
-        abs(a.size.height - b.size.height) < 0.5
-    }
 }
 
 // MARK: - Overlay tick geometry (pure, testable)
@@ -299,6 +297,39 @@ enum OverlayGeometry {
     /// payload plus the new `outset` field.
     static func targetPayloadJS(targetFrame: CGRect, outset: CGFloat) -> String {
         "window.sd=window.sd||{};window.sd.target=\(targetObjectJS(targetFrame: targetFrame, outset: outset));window.dispatchEvent(new CustomEvent('sd:target',{detail:window.sd.target}));"
+    }
+}
+
+// MARK: - Tick plan (pure, testable)
+
+/// What a panel frame update costs. A move only changes the origin, so the
+/// WebView's layout is untouched and no redisplay is needed; a reshape
+/// resizes the web content and must go through a displaying setFrame.
+enum OverlayFrameOp: Equatable {
+    case none
+    case move(CGPoint)
+    case reshape(CGRect)
+}
+
+/// Per-tick decisions for `OverlayHandle.tick`, split out so the "skip work
+/// when nothing changed" rules are testable without a panel or WebView.
+enum OverlayTickPlan {
+    /// `last == .zero` is the "force" sentinel (first tick, requested repin)
+    /// and always yields a reshape. Sub-0.5pt jitter from CGS round-trips is
+    /// treated as unchanged.
+    static func frameOp(next: CGRect, last: CGRect) -> OverlayFrameOp {
+        let sameOrigin = abs(next.origin.x - last.origin.x) < 0.5 &&
+                         abs(next.origin.y - last.origin.y) < 0.5
+        let sameSize = abs(next.width - last.width) < 0.5 &&
+                       abs(next.height - last.height) < 0.5
+        if sameSize && last != .zero { return sameOrigin ? .none : .move(next.origin) }
+        return .reshape(next)
+    }
+
+    /// The payload is in panel coordinates, so it only changes on resize or
+    /// outset change — never on a pure move.
+    static func payloadToPush(_ js: String, lastPushed: String?) -> String? {
+        js == lastPushed ? nil : js
     }
 }
 
