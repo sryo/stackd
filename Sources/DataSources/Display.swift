@@ -307,6 +307,22 @@ private func displayLinkCallback(
     return kCVReturnSuccess
 }
 
+/// At most one display-link → main hop in flight. When main is busy, frames
+/// that arrive meanwhile collapse into the pending hop (subscribers read the
+/// latest snapshot) instead of queueing one stale block per vsync.
+struct HopGate {
+    private var pending = false
+
+    /// True when the caller should dispatch a hop.
+    mutating func arm() -> Bool {
+        if pending { return false }
+        pending = true
+        return true
+    }
+
+    mutating func disarm() { pending = false }
+}
+
 final class DisplayLinkObserver: RefCountedObserver {
     static let shared = DisplayLinkObserver()
     private override init() { super.init() }
@@ -333,9 +349,20 @@ final class DisplayLinkObserver: RefCountedObserver {
         lock.lock()
         frameCounter += 1
         current = (timestamp: timestamp, frame: frameCounter, refreshRate: refreshRate)
+        let shouldHop = hopGate.arm()
         lock.unlock()
-        DispatchQueue.main.async { [weak self] in self?.fire() }
+        guard shouldHop else { return }
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            // Disarm before firing so a frame that lands during fire()
+            // schedules the next hop rather than being dropped.
+            self.lock.lock()
+            self.hopGate.disarm()
+            self.lock.unlock()
+            self.fire()
+        }
     }
+    private var hopGate = HopGate()
 
     override func install() -> Token? {
         var newLink: CVDisplayLink?
