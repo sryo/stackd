@@ -519,7 +519,10 @@ final class AXAppObserver {
             let err = AXObserverAddNotification(observer, target, notification as CFString, refcon)
             // .notificationUnsupported is common for AXTitleChanged on apps
             // without a window — treat as soft-failure, silently no-op.
-            guard err == .success || err == .notificationAlreadyRegistered else { return nil }
+            guard err == .success || err == .notificationAlreadyRegistered else {
+                WindowDebug.log("ax: AXObserverAddNotification \(notification) err=\(err.rawValue)")
+                return nil
+            }
         }
         notifCounts[key] = currentCount + 1
         let id = nextId
