@@ -234,6 +234,7 @@ final class OverlayHandle: NSObject, WKNavigationDelegate {
     func detach() {
         if released { return }
         released = true
+        Overlay.orderOutNow(panel)
         panel.orderOut(nil)
         panel.close()
     }
@@ -491,6 +492,55 @@ enum Overlay {
         }
     }
 
+    /// Take the panel off screen at the window server right now. AppKit's
+    /// orderOut is only committed when the run loop turns, and a stack
+    /// reload (display change) holds the main thread for seconds while
+    /// every stack rebuilds — the old outline would sit frozen until then.
+    /// AppKit's own orderOut still follows for its bookkeeping.
+    static func orderOutNow(_ panel: NSPanel) {
+        guard let create = WindowTransaction.create,
+              let order  = WindowTransaction.orderWindow,
+              let commit = WindowTransaction.commit else { return }
+        let cid = SkyLight.cid
+        guard cid != 0, panel.windowNumber > 0,
+              let txRef = create(cid)?.takeRetainedValue() else { return }
+        // Order 0 = out; the relative window is ignored.
+        _ = order(txRef, UInt32(panel.windowNumber), 0, 0)
+        _ = commit(txRef, 0)
+    }
+
+    /// Shared NSPanel recipe for attach() and region(): borderless,
+    /// transparent, click-through, never key. `frame` is AppKit coordinates.
+    static func makeOverlayPanel(frame: NSRect) -> NSPanel {
+        let panel = OverlayPanel(
+            contentRect: frame,
+            styleMask: [.borderless, .nonactivatingPanel],
+            backing: .buffered,
+            defer: false
+        )
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
+        panel.hasShadow = false
+        // .statusBar gets us above most app windows; the per-tick
+        // SLSTransactionOrderWindow call explicitly pins us above the
+        // specific target on the WindowServer side, which is what
+        // ultimately wins for foreign-window ordering.
+        panel.level = .statusBar
+        // canJoinAllSpaces + stationary + fullScreenAuxiliary + ignoresCycle
+        // match the JankyBorders SLS tag set (sticky across spaces, no
+        // cmd-tab / mission-control surface). Same recipe StackWindow uses.
+        panel.collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary, .ignoresCycle]
+        panel.ignoresMouseEvents = true
+        panel.unregisterDraggedTypes()
+        panel.isMovableByWindowBackground = false
+        panel.hidesOnDeactivate = false
+        // Order-out must be immediate: an animated one needs the run loop,
+        // and a stack reload (display change) blocks it for seconds while
+        // every stack rebuilds — the old outline would sit frozen on screen.
+        panel.animationBehavior = .none
+        return panel
+    }
+
     /// Shared WKWebView recipe for overlay panels — attach() and region()
     /// build byte-identical webviews. Always drag-passthrough: every
     /// sd.overlay panel is ignoresMouseEvents=true by contract, and a
@@ -541,28 +591,7 @@ enum Overlay {
 
         let webView = makeOverlayWebView(size: initialFrame.size)
 
-        let panel = OverlayPanel(
-            contentRect: initialFrame,
-            styleMask: [.borderless, .nonactivatingPanel],
-            backing: .buffered,
-            defer: false
-        )
-        panel.isOpaque = false
-        panel.backgroundColor = .clear
-        panel.hasShadow = false
-        // .statusBar gets us above most app windows; the per-tick
-        // SLSTransactionOrderWindow call below explicitly pins us above
-        // the specific target on the WindowServer side, which is what
-        // ultimately wins for foreign-window ordering.
-        panel.level = .statusBar
-        // canJoinAllSpaces + stationary + fullScreenAuxiliary + ignoresCycle
-        // match the JankyBorders SLS tag set (sticky across spaces, no
-        // cmd-tab / mission-control surface). Same recipe StackWindow uses.
-        panel.collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary, .ignoresCycle]
-        panel.ignoresMouseEvents = true
-        panel.unregisterDraggedTypes()
-        panel.isMovableByWindowBackground = false
-        panel.hidesOnDeactivate = false
+        let panel = makeOverlayPanel(frame: initialFrame)
         panel.contentView = webView
 
         let doc = """
@@ -698,6 +727,7 @@ final class RegionOverlayHandle: NSObject, WKNavigationDelegate {
     func remove() {
         if released { return }
         released = true
+        Overlay.orderOutNow(panel)
         panel.orderOut(nil)
         panel.close()
     }
@@ -721,21 +751,7 @@ extension Overlay {
 
         let webView = makeOverlayWebView(size: appKit.size)
 
-        let panel = OverlayPanel(
-            contentRect: appKit,
-            styleMask: [.borderless, .nonactivatingPanel],
-            backing: .buffered,
-            defer: false
-        )
-        panel.isOpaque = false
-        panel.backgroundColor = .clear
-        panel.hasShadow = false
-        panel.level = .statusBar
-        panel.collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary, .ignoresCycle]
-        panel.ignoresMouseEvents = true
-        panel.unregisterDraggedTypes()
-        panel.isMovableByWindowBackground = false
-        panel.hidesOnDeactivate = false
+        let panel = makeOverlayPanel(frame: appKit)
         panel.contentView = webView
 
         let doc = """

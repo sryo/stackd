@@ -338,4 +338,15 @@ func registerOverlayTests() {
         h.setFrame(CGRect(x: 0, y: 0, width: 100, height: 100))  // must not crash
         try expectEqual(h.panel.isVisible, false)
     }
+
+    test("Overlay.makeOverlayPanel orders out without an animation") {
+        // Stack reloads (e.g. on a display change) block the main thread
+        // while every stack rebuilds; an animated order-out can't run until
+        // that finishes, leaving the old outline frozen on screen.
+        let panel = Overlay.makeOverlayPanel(frame: NSRect(x: -9999, y: -9999, width: 1, height: 1))
+        try expect(panel.animationBehavior == .none)
+        try expect(panel.ignoresMouseEvents)
+        try expect(!panel.canBecomeKey)
+        panel.close()
+    }
 }
