@@ -495,6 +495,18 @@ enum AXShim {
 
 // MARK: - WindowsByID: per-window actions targeting a CGWindowID
 
+/// Per-app rate limit for the create-triggered AX install retry.
+struct AXInstallRetryGate {
+    static let minInterval: Double = 2.0
+    private var lastAttempt: [pid_t: Double] = [:]
+
+    mutating func shouldAttempt(pid: pid_t, now: Double) -> Bool {
+        if let last = lastAttempt[pid], now - last < Self.minInterval { return false }
+        lastAttempt[pid] = now
+        return true
+    }
+}
+
 /// Pure resolution order for a window's owning pid. `cached` maps each pid
 /// to the window ids its AX cache holds; `query` is the single-window
 /// CGWindowList fallback.
@@ -1932,6 +1944,8 @@ enum WindowEvents {
               (info[kCGWindowLayer as String] as? Int) == 0,
               let pid = info[kCGWindowOwnerPID as String] as? Int
         else { return }
+        // Before the subrole gate below, which needs AX for this app.
+        WindowsAXObserver.shared.ensureInstalled(pid: pid_t(pid))
         // Standard-window gate (positive verdict only): layer 0 alone
         // admits app helper windows — Arc's tab-creation hint, Chromium
         // bubbles, tooltips-with-a-layer. Non-standard or not-yet-readable
@@ -2672,6 +2686,24 @@ final class WindowsAXObserver {
         // (Dock+menubar) and .accessory (menubar-only) can still vend
         // AXWindows, so we observe both.
         app.activationPolicy != .prohibited && app.processIdentifier > 0
+    }
+
+    private var installRetryGate = AXInstallRetryGate()
+
+    /// A window appeared (CGS 1325) for an app we hold no AX observer on —
+    /// its install exhausted the launch/startup ladder, typically on a
+    /// transient failure while the daemon or the app was busy. Without a
+    /// retry the app stays blind for the daemon's lifetime (new windows
+    /// only surface via the 10s safety poll). Keyed off window creation, so
+    /// windowless helper processes that also fail install never retry.
+    func ensureInstalled(pid: pid_t) {
+        guard appObservers[pid] == nil,
+              installRetryGate.shouldAttempt(pid: pid, now: CFAbsoluteTimeGetCurrent()),
+              let app = NSRunningApplication(processIdentifier: pid),
+              shouldObserve(app) else { return }
+        if installForApp(app: app, fireForExisting: false) {
+            log("ax: install recovered pid=\(pid) (\(app.localizedName ?? "?")) on window create")
+        }
     }
 
     private func installForAppRetry(app: NSRunningApplication, delays: [TimeInterval], fireForExisting: Bool) {
