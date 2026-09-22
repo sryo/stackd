@@ -700,6 +700,14 @@ enum WindowsByID {
             return true
         }
         guard let el = elementFor(windowID: windowID) else { return false }
+        return setFrame(element: el, windowID: windowID, frame: CGRect(x: x, y: y, width: w, height: h))
+    }
+
+    /// The write itself, on an already-resolved element (the motion engine's
+    /// settle frame reuses the element it animated through). Bypasses the
+    /// batch sink — callers check it first.
+    static func setFrame(element el: AXUIElement, windowID: CGWindowID, frame: CGRect) -> Bool {
+        let x = frame.origin.x, y = frame.origin.y, w = frame.size.width, h = frame.size.height
         var pos = CGPoint(x: x, y: y)
         var sz  = CGSize(width: w, height: h)
         guard let posVal = AXValueCreate(.cgPoint, &pos),

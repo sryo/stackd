@@ -128,6 +128,9 @@ struct MotionPlanner {
         var seedVelocity: [Double]
         var springs: [MotionMath.Spring]?
         var lastWritten: CGRect
+        // An intermediate write timed out (hung app): only the final frame
+        // is written from here on.
+        var stalled = false
     }
 
     private var active: [CGWindowID: Registration] = [:]
@@ -185,6 +188,10 @@ struct MotionPlanner {
         return RegisterResult(key: key, superseded: superseded)
     }
 
+    mutating func markStalled(windowID: CGWindowID) {
+        active[windowID]?.stalled = true
+    }
+
     @discardableResult
     mutating func cancel(windowID: CGWindowID) -> Finished? {
         guard let old = active.removeValue(forKey: windowID) else { return nil }
@@ -221,7 +228,7 @@ struct MotionPlanner {
             }
 
             let frame = Self.evaluate(reg, elapsed: elapsed).motionRounded
-            if frame != reg.lastWritten {
+            if frame != reg.lastWritten && !reg.stalled {
                 writes.append(FrameWrite(windowID: windowID, frame: frame, isFinal: false,
                                          writeSize: frame.size != reg.lastWritten.size,
                                          writePosition: frame.origin != reg.lastWritten.origin))
@@ -550,10 +557,14 @@ final class WindowMotionEngine {
     }
 
     private func apply(_ write: MotionPlanner.FrameWrite) {
-        FrameLedger.shared.recordWrite(windowID: write.windowID, frame: write.frame)
         if write.isFinal {
-            // Full size→pos→size dance with a fresh element lookup — the
-            // settle frame is the one that must stick.
+            // Full size→pos→size dance — the settle frame is the one that
+            // must stick. Reuses the element every intermediate frame just
+            // wrote through; a fresh lookup only if it went stale.
+            if WindowsByID.batchSink == nil, let el = elements[write.windowID],
+               WindowsByID.setFrame(element: el, windowID: write.windowID, frame: write.frame) {
+                return
+            }
             _ = WindowsByID.setFrame(
                 windowID: write.windowID,
                 x: write.frame.origin.x, y: write.frame.origin.y,
@@ -566,20 +577,35 @@ final class WindowMotionEngine {
         // last tick. The belt-and-suspenders second size set is deferred to
         // the final frame; per-tick it would double the AX volume for a
         // correction no one can see mid-flight.
+        // setFrame records final frames itself, on success.
+        FrameLedger.shared.recordWrite(windowID: write.windowID, frame: write.frame)
         guard let el = elements[write.windowID] else { return }
+        // Bounded so a hung app can't hold main for the ~6s system default
+        // on every frame; generous enough that a busy-but-alive app (a
+        // Chromium re-layout) still animates. Reset after so other callers
+        // sharing the cached element keep the default.
+        AXUIElementSetMessagingTimeout(el, Self.intermediateWriteTimeout)
+        defer { AXUIElementSetMessagingTimeout(el, 0) }
+        var timedOut = false
         if write.writeSize {
             var size = write.frame.size
             if let sizeVal = AXValueCreate(.cgSize, &size) {
-                _ = AXUIElementSetAttributeValue(el, kAXSizeAttribute as CFString, sizeVal)
+                timedOut = AXUIElementSetAttributeValue(el, kAXSizeAttribute as CFString, sizeVal) == .cannotComplete
             }
         }
-        if write.writePosition {
+        if write.writePosition && !timedOut {
             var pos = write.frame.origin
             if let posVal = AXValueCreate(.cgPoint, &pos) {
-                _ = AXUIElementSetAttributeValue(el, kAXPositionAttribute as CFString, posVal)
+                timedOut = AXUIElementSetAttributeValue(el, kAXPositionAttribute as CFString, posVal) == .cannotComplete
             }
         }
+        if timedOut {
+            WindowDebug.log("motion: wid=\(write.windowID) stalled — skipping to the final frame")
+            planner.markStalled(windowID: write.windowID)
+        }
     }
+
+    private static let intermediateWriteTimeout: Float = 0.1
 
     private func resolve(_ finished: MotionPlanner.Finished) {
         guard let completion = completions.removeValue(forKey: finished.key) else { return }

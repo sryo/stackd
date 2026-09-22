@@ -179,4 +179,34 @@ func registerMotionPlannerTests() {
         try expect(final1?.writeSize == true && final1?.writePosition == true,
                    "settle frame must write both axes")
     }
+
+    test("a stalled window gets no more intermediate writes but still settles") {
+        // A hung app times out an intermediate write; retrying every frame
+        // would stall main for the whole animation. Skip to the final frame.
+        var p = MotionPlanner()
+        _ = p.register(windowID: 1, from: rect(0, 0, 400, 300), to: rect(800, 0, 400, 300),
+                       duration: 1.0, easing: .linear)
+        _ = p.register(windowID: 2, from: rect(0, 400, 400, 300), to: rect(800, 400, 400, 300),
+                       duration: 1.0, easing: .linear)
+        _ = p.tick(now: 0)
+        p.markStalled(windowID: 1)
+        let mid = p.tick(now: 0.5)
+        try expect(mid.writes.allSatisfy { $0.windowID == 2 }, "stalled window must not write mid-flight")
+        let done = p.tick(now: 5.0)
+        let final1 = done.writes.first { $0.windowID == 1 }
+        try expect(final1?.isFinal == true && final1?.frame == rect(800, 0, 400, 300))
+    }
+
+    test("a superseding registration clears the stall") {
+        var p = MotionPlanner()
+        _ = p.register(windowID: 1, from: rect(0, 0, 400, 300), to: rect(800, 0, 400, 300),
+                       duration: 1.0, easing: .linear)
+        _ = p.tick(now: 0)
+        p.markStalled(windowID: 1)
+        _ = p.register(windowID: 1, from: rect(0, 0, 400, 300), to: rect(0, 0, 400, 300).offsetBy(dx: 600, dy: 0),
+                       duration: 1.0, easing: .linear)
+        _ = p.tick(now: 1)
+        let mid = p.tick(now: 1.5)
+        try expect(mid.writes.contains { $0.windowID == 1 && !$0.isFinal })
+    }
 }
