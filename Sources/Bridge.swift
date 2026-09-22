@@ -623,6 +623,16 @@ final class Bridge: NSObject, WKScriptMessageHandler {
 
     func handles(bang: String) -> Bool { handlesBangs.contains(bang) }
 
+    /// The stack's display changed geometry without a reload: replace the
+    /// page's screen info (sd.screen.current / window.__sd_screen) and fire
+    /// `sd:screen` so stacks that laid out from it can redo it.
+    func updateScreen(_ screen: NSScreen, index: Int) {
+        guard let webView = webView else { return }
+        let payload = Bridge.jsonify(Bridge.screenInfo(screen: screen, index: index))
+        let script = "window.__sd_screen=\(payload);if(window.sd&&sd.screen)sd.screen.current=window.__sd_screen;window.dispatchEvent(new CustomEvent('sd:screen',{detail:window.__sd_screen}));"
+        webView.evaluateJavaScript(script, completionHandler: nil)
+    }
+
     /// Detail can hold any JSON-compatible Any (String, Int, Bool, Array, Dict).
     /// Useful for system-fired bangs (window lifecycle) carrying structured
     /// data — CLI-fired bangs still pass [String: String] which round-trips fine.

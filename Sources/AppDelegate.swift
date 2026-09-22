@@ -89,18 +89,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             host?.reloadAll()
         }
 
-        // Reposition all stack panels when display geometry changes
-        // (resolution change, monitor hotplug, scale factor flip). Without
-        // this, frameFor's compute-once-at-load contract leaves region:menubar
-        // and region:fullscreen panels stranded at the OLD screen edges.
+        // Adapt stack panels when display geometry changes (resolution
+        // change, monitor hotplug, scale factor flip). Without this,
+        // frameFor's compute-once-at-load contract leaves region:menubar and
+        // region:fullscreen panels stranded at the OLD screen edges. Stacks
+        // keep running — see StackHost.relayoutForScreenChange for when a
+        // single stack is reloaded instead.
         //
         // Dedupe: macOS fires didChangeScreenParameters on events that don't
         // actually change geometry (cursor moves between displays, dock
-        // collapse/expand on some macOS versions). Without a guard we'd
-        // re-spawn every WKWebView ~10 times per session for nothing —
-        // every stack reboots its JS context, sqlite re-opens, timers
-        // restart from zero. Hash the screen layout and skip the reload
-        // when nothing relevant changed.
+        // collapse/expand on some macOS versions). Hash the screen layout
+        // and skip when nothing relevant changed.
         var lastScreenSig: String = ""
         NotificationCenter.default.addObserver(
             forName: NSApplication.didChangeScreenParametersNotification,
@@ -113,8 +112,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }.joined(separator: "|")
             if sig == lastScreenSig { return }
             lastScreenSig = sig
-            log("screen parameters changed (sig=\(sig.prefix(60))…) → reload")
-            host?.reloadAll()
+            log("screen parameters changed (sig=\(sig.prefix(60))…) → relayout")
+            host?.relayoutForScreenChange()
         }
 
         // Wire window lifecycle → bangs. AX-primary (WindowsAXObserver) with

@@ -3,6 +3,8 @@ sd.timer = timer;
   // Per-instance screen info, injected before this script runs (see Bridge.swift).
   // Read .current synchronously — items like spacenum + brightness need to
   // know which screen they're rendered on without an async round-trip.
+  // Stacks survive display changes: when their screen's geometry changes,
+  // .current is replaced and an `sd:screen` window event fires.
 sd.screen = { current: window.__sd_screen || null };
 sd.battery = channel("battery");
 sd.mouse = Object.assign(channel("mouse"), {

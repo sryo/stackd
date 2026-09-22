@@ -265,7 +265,7 @@ Handle-based; handles are opaque ints owned by this stack — release them.
 - `stream(opts, callback) → Promise<{id, cancel()}|null>` — `opts:{cmd,args?,env?,cwd?}`; `callback({stream("stdout"|"stderr"|"exit"), chunk, code, signal?})`. `cancel()` SIGTERMs.
 
 ### `sd.screen` — current screen (sync) · none
-- `sd.screen.current` — per-instance screen info injected before script runs (`window.__sd_screen`), read synchronously. null if unavailable.
+- `sd.screen.current` — per-instance screen info injected before script runs (`window.__sd_screen`), read synchronously. null if unavailable. Stacks keep running across display changes: when the screen's geometry changes, `.current` is replaced and a `sd:screen` window event fires (`detail` = the new info). A stack is only reloaded when its set of displays changes (a `display: "all"` stack gaining or losing a display, or its display being unplugged).
 
 ### `sd.sensors` — internal sensors · `sensors`
 - `sd.sensors` *(channel, poll-tunable, 2s)* — `{temperatures[{name,value,unit}], voltages[], currents[], fans[{name,rpm}]}` (Apple silicon).

@@ -116,6 +116,14 @@ final class StackHost {
     var windows: [String: StackWindow] = [:]
     var bridges: [String: Bridge] = [:]
     private var defaults: [String: Any] = [:]
+    // Per loaded stack id: the source it was loaded from, so a display
+    // change can reload one stack without touching the rest.
+    private var sources: [String: StackSource] = [:]
+    // Per instance key: the display it was spawned for.
+    private var instanceDisplays: [String: CGDirectDisplayID] = [:]
+    // Stacks with no matching display right now (e.g. pinned to an external
+    // that's unplugged) — loaded again when a display change brings it back.
+    private var awaitingDisplay: Set<String> = []
 
     init(rootPath: String, runtimePath: String) {
         self.rootPath = rootPath
@@ -164,6 +172,8 @@ final class StackHost {
         // suppressions, future AX observers). Belt-and-suspenders menubar
         // reset covers the rare case where every stack crashed mid-suppress.
         for id in Array(bridges.keys) { unloadStack(id: id) }
+        sources.removeAll()
+        awaitingDisplay.removeAll()
         schemeHandler.clearRegistrations()
         MenuBarVisibility.resetForReload()
     }
@@ -234,6 +244,7 @@ final class StackHost {
             win.close()
             windows.removeValue(forKey: id)
         }
+        instanceDisplays.removeValue(forKey: id)
         // Drain native resources (observer subs, hotkeys, eventtaps, menubar
         // suppressions) BEFORE dropping the Bridge — the Token cancel closures
         // reference back into shared registries, not into Bridge itself.
@@ -252,6 +263,7 @@ final class StackHost {
             windows[k]?.orderOut(nil)
             windows[k]?.close()
             windows.removeValue(forKey: k)
+            instanceDisplays.removeValue(forKey: k)
             bridges[k]?.scope.drain()
             bridges.removeValue(forKey: k)
         }
@@ -331,12 +343,15 @@ final class StackHost {
         }
 
         schemeHandler.register(stackId: manifest.id, rootURL: source.rootURL)
+        sources[manifest.id] = source
 
         let targets = StackHost.screensFor(displaySpec: manifest.display ?? "primary")
         guard !targets.isEmpty else {
             log("stack \(manifest.id) — no matching displays for spec=\(manifest.display ?? "primary")")
+            awaitingDisplay.insert(manifest.id)
             return
         }
+        awaitingDisplay.remove(manifest.id)
 
         for (i, screen) in targets {
             let key = (targets.count == 1) ? manifest.id : "\(manifest.id)@\(i)"
@@ -383,6 +398,63 @@ final class StackHost {
             win.orderFrontRegardless()
         }
         windows[key] = win
+        instanceDisplays[key] = StackHost.displayID(of: screen)
+    }
+
+    private static func displayID(of screen: NSScreen) -> CGDirectDisplayID {
+        (screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID) ?? 0
+    }
+
+    // MARK: - Display changes
+
+    /// Adapt loaded stacks to a new display configuration without restarting
+    /// them. Stacks whose displays survived are moved to their recomputed
+    /// frames and told their new screen geometry; only a stack whose set of
+    /// target displays changed is reloaded. A full reload would restart every
+    /// stack (~3s of blocked main thread) and drop all in-memory state.
+    func relayoutForScreenChange() {
+        var loadedIds = Set(instanceDisplays.keys.map(StackHost.baseId))
+        loadedIds.formUnion(awaitingDisplay)
+        for id in loadedIds.sorted() {
+            guard let source = sources[id] else { continue }
+            let targets = StackHost.screensFor(displaySpec: source.manifest.display ?? "primary")
+            let instances = instanceDisplays.filter { StackHost.baseId($0.key) == id }
+            let plan = ScreenReconcile.plan(
+                id: id, instances: instances,
+                targets: targets.map { ($0.0, StackHost.displayID(of: $0.1)) })
+            switch plan {
+            case .unload:
+                if !instances.isEmpty {
+                    log("stack \(id) — display gone, unloading until it returns")
+                    unloadAllInstances(baseId: id)
+                }
+                awaitingDisplay.insert(id)
+            case .reload:
+                log("stack \(id) — display set changed, reloading this stack")
+                unloadAllInstances(baseId: id)
+                loadStack(source: source)
+            case .relayout(let moves):
+                for move in moves {
+                    guard let win = windows[move.key],
+                          let (_, screen) = targets.first(where: { $0.0 == move.screenIndex }) else { continue }
+                    win.setFrame(frameFor(manifest: source.manifest, screen: screen), display: true)
+                    bridges[move.key]?.updateScreen(screen, index: move.screenIndex)
+                }
+            }
+        }
+        // macOS moves windows off a removed display (and resizes them to fit
+        // a new resolution) before it posts the change, and nothing else
+        // re-pushes sd.windows.all for that — a tiler that survived the
+        // change would lay out from pre-change frames. Push now, and once
+        // more after windows that move late have settled.
+        pumpWindowsListForAllStacks()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            self?.pumpWindowsListForAllStacks()
+        }
+    }
+
+    private static func baseId(_ key: String) -> String {
+        String(key.split(separator: "@", maxSplits: 1).first ?? Substring(key))
     }
 
     /// Compute the on-screen frame for a stack, honoring `region:` overrides
@@ -511,5 +583,40 @@ final class StackHost {
             }
             return []
         }
+    }
+}
+
+/// What a display change means for one stack. Pure so the decision is
+/// testable without NSScreen.
+enum ScreenReconcile {
+    struct Move: Equatable {
+        let key: String
+        let screenIndex: Int
+    }
+
+    enum Plan: Equatable {
+        /// Same displays: move each instance to its recomputed frame.
+        case relayout([Move])
+        /// The stack's set of target displays changed (instance added,
+        /// removed, or moved to a different physical display).
+        case reload
+        /// No display matches the stack's spec any more.
+        case unload
+    }
+
+    /// `instances`: loaded instance key → display it was spawned for.
+    /// `targets`: (screen index, display) pairs the stack's display spec
+    /// resolves to now. Keys follow loadStack: the bare id for one target,
+    /// `id@index` for several.
+    static func plan(id: String,
+                     instances: [String: CGDirectDisplayID],
+                     targets: [(Int, CGDirectDisplayID)]) -> Plan {
+        if targets.isEmpty { return .unload }
+        let expected = targets.map { t in
+            (key: targets.count == 1 ? id : "\(id)@\(t.0)", index: t.0, display: t.1)
+        }
+        guard Set(expected.map { $0.key }) == Set(instances.keys) else { return .reload }
+        if expected.contains(where: { instances[$0.key] != $0.display }) { return .reload }
+        return .relayout(expected.map { Move(key: $0.key, screenIndex: $0.index) })
     }
 }
