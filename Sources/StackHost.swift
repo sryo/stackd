@@ -302,8 +302,10 @@ final class StackHost {
     func bang(name: String, detail: [String: Any]) -> Int {
         var fired = 0
         var handlerIds: [String] = []
+        var json: String?
         for (key, bridge) in bridges where bridge.handles(bang: name) {
-            bridge.fireBang(name: name, detail: detail)
+            if json == nil { json = Bridge.jsonify(detail) }
+            bridge.fireBang(name: name, json: json!)
             fired += 1
             if WindowDebug.enabled && name.hasPrefix("sd.window.") { handlerIds.append(key) }
         }

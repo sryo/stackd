@@ -443,21 +443,20 @@ extension Bridge {
         // multiple times for one focus change) doesn't traverse WebKit
         // unnecessarily.
         let pushAppActivated: () -> Void = { [weak self] in
-            guard let self = self, let app = App.frontmostApp() else { return }
-            let json = Bridge.jsonify(app)
+            guard let self = self, let json = WorkspaceFanout.frontAppJSON() else { return }
             if json == self.lastState["appActivated"] { return }
             self.lastState["appActivated"] = json
             self.push(channel: "appActivated", json: json)
         }
         let pushFocusedChanged: () -> Void = { [weak self] in
             guard let self = self else { return }
-            let json = Windows.focused().map(Bridge.jsonify) ?? "null"
+            let json = WorkspaceFanout.focusedJSON()
             if json == self.lastState["focusedChanged"] { return }
             self.lastState["focusedChanged"] = json
             self.push(channel: "focusedChanged", json: json)
         }
         let pushTitleChanged: () -> Void = { [weak self] in
-            guard let self = self, let w = Windows.focused() else { return }
+            guard let self = self, let w = WorkspaceFanout.focused() else { return }
             // Small payload — id, app, title, pid. Keeps the channel narrow
             // so stacks that only care about title rename don't pay the
             // whole focusedWindow dict on every keystroke in a renaming field.
@@ -477,21 +476,19 @@ extension Bridge {
         // sd.windows.focused see the same shape they always did.
         let pushFn: () -> Void = { [weak self] in
             guard let self = self else { return }
-            if includeApp, let app = App.frontmostApp() {
-                let json = Bridge.jsonify(app)
+            if includeApp, let json = WorkspaceFanout.frontAppJSON() {
                 if json != self.lastState["frontApp"] {
                     self.lastState["frontApp"] = json
                     self.push(channel: "frontApp", json: json)
                 }
             }
             if includeWindows {
-                let json = Windows.focused().map(Bridge.jsonify) ?? "null"
+                let json = WorkspaceFanout.focusedJSON()
                 if json != self.lastState["focusedWindow"] {
                     self.lastState["focusedWindow"] = json
                     self.push(channel: "focusedWindow", json: json)
                 }
-                let snapshot = Windows.all()
-                let allJson = Bridge.jsonify(snapshot)
+                let (snapshot, allJson) = WorkspaceFanout.allWindows()
                 if allJson != self.lastState["windowsAll"] {
                     self.lastState["windowsAll"] = allJson
                     self.push(channel: "windowsAll", json: allJson)
@@ -546,5 +543,78 @@ extension Bridge {
         // the windowsListPump comment on the property for why this is
         // needed (background window close has no focus-change signal).
         self.windowsListPump = pushFn
+    }
+}
+
+/// Caches one value per main-queue turn. `turn` is supplied by the caller
+/// so the rule stays testable without a run loop.
+struct TurnMemo<Value> {
+    private var cached: (turn: UInt64, value: Value)?
+
+    mutating func value(turn: UInt64, compute: () -> Value) -> Value {
+        if let c = cached, c.turn == turn { return c.value }
+        let v = compute()
+        cached = (turn, v)
+        return v
+    }
+}
+
+/// Workspace state shared by every stack's workspace pushes. One focus
+/// change fans out synchronously to each stack's closures (several per
+/// stack), so within a single main-queue turn the front app, focused
+/// window and window list are read and serialized once instead of per
+/// closure per stack. Per-stack dedupe (`lastState`) and deltas stay in
+/// each Bridge. Main thread only.
+enum WorkspaceFanout {
+    private static var turn: UInt64 = 0
+    private static var turnOpen = false
+    private static var turnOpenedAt: CFAbsoluteTime = 0
+    /// A main.async close lands behind whatever is already queued, which
+    /// during a burst of AX work can be hundreds of ms of other blocks —
+    /// cap how long one snapshot can be reused regardless.
+    private static let maxTurnAge: CFAbsoluteTime = 0.010
+
+    /// The first read in a turn opens it; a main.async closes it, so the
+    /// next event's reads start fresh.
+    private static func currentTurn() -> UInt64 {
+        let now = CFAbsoluteTimeGetCurrent()
+        if turnOpen && now - turnOpenedAt > maxTurnAge {
+            turn &+= 1
+            turnOpenedAt = now
+        }
+        if !turnOpen {
+            turnOpen = true
+            turnOpenedAt = now
+            DispatchQueue.main.async {
+                turnOpen = false
+                turn &+= 1
+            }
+        }
+        return turn
+    }
+
+    private static var frontAppMemo = TurnMemo<String?>()
+    private static var focusedMemo = TurnMemo<(dict: [String: Any]?, json: String)>()
+    private static var allMemo = TurnMemo<(snapshot: [[String: Any]], json: String)>()
+
+    static func frontAppJSON() -> String? {
+        frontAppMemo.value(turn: currentTurn()) { App.frontmostApp().map(Bridge.jsonify) }
+    }
+
+    static func focused() -> [String: Any]? { focusedEntry().dict }
+    static func focusedJSON() -> String { focusedEntry().json }
+
+    private static func focusedEntry() -> (dict: [String: Any]?, json: String) {
+        focusedMemo.value(turn: currentTurn()) {
+            let w = Windows.focused()
+            return (w, w.map(Bridge.jsonify) ?? "null")
+        }
+    }
+
+    static func allWindows() -> (snapshot: [[String: Any]], json: String) {
+        allMemo.value(turn: currentTurn()) {
+            let snapshot = Windows.all()
+            return (snapshot, Bridge.jsonify(snapshot))
+        }
     }
 }

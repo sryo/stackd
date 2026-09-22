@@ -627,12 +627,16 @@ final class Bridge: NSObject, WKScriptMessageHandler {
     /// Useful for system-fired bangs (window lifecycle) carrying structured
     /// data — CLI-fired bangs still pass [String: String] which round-trips fine.
     func fireBang(name: String, detail: [String: Any]) {
+        fireBang(name: name, json: Bridge.jsonify(detail))
+    }
+
+    /// Pre-serialized variant so a fan-out across stacks encodes once.
+    func fireBang(name: String, json: String) {
         guard let webView = webView else { return }
         let safe = name.lowercased().map { c -> Character in
             (c.isLetter || c.isNumber) ? c : "_"
         }
         let suffix = String(safe)
-        let json = Bridge.jsonify(detail)
         let script = "window.onBang_\(suffix) && window.onBang_\(suffix)(\(json));"
         DispatchQueue.main.async {
             webView.evaluateJavaScript(script, completionHandler: nil)
