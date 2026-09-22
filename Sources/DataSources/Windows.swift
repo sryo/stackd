@@ -39,10 +39,15 @@ enum WindowTransaction {
     typealias CreateFn          = @convention(c) (Int32) -> Unmanaged<CFTypeRef>?
     typealias CommitFn          = @convention(c) (CFTypeRef, Int32) -> Int32
     typealias OrderWindowFn     = @convention(c) (CFTypeRef, UInt32, Int32, UInt32) -> Int32
+    // (tx, wid, origin) — origin in CGS global top-left coordinates, no
+    // AppKit flip. "WithGroup" moves attached child windows along; our
+    // panels have none, so it's a plain move.
+    typealias MoveWithGroupFn   = @convention(c) (CFTypeRef, UInt32, CGPoint) -> Int32
 
     static let create:         CreateFn?         = SkyLight.sym("SLSTransactionCreate")
     static let commit:         CommitFn?         = SkyLight.sym("SLSTransactionCommit")
     static let orderWindow:    OrderWindowFn?    = SkyLight.sym("SLSTransactionOrderWindow")
+    static let moveWithGroup:  MoveWithGroupFn?  = SkyLight.sym("SLSTransactionMoveWindowWithGroup")
 }
 
 // Everything window-related, by source-of-truth:

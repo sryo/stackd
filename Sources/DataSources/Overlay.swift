@@ -76,6 +76,9 @@ final class OverlayHandle: NSObject, WKNavigationDelegate {
     private var navigationReady: Bool = false
     private var pendingTargetJS: String?
     private var lastPushedTargetJS: String?
+    // True after a window-server move AppKit didn't see: `panel.frame` still
+    // holds the old origin until syncAppKitFrame() tells it.
+    private var appKitStale: Bool = false
     private var released: Bool = false
 
     init(id: Int, targetWID: CGWindowID, panel: NSPanel, webView: WKWebView,
@@ -167,10 +170,25 @@ final class OverlayHandle: NSObject, WKNavigationDelegate {
         }
 
         let frameOp = OverlayTickPlan.frameOp(next: appKitFrame, last: lastFrame)
+        var reordered = false
         switch frameOp {
-        case .none: break
-        case .move(let origin): panel.setFrameOrigin(origin)
-        case .reshape(let frame): panel.setFrame(frame, display: true)
+        case .none:
+            if OverlayTickPlan.needsAppKitSync(frameOp: frameOp, appKitStale: appKitStale) {
+                syncAppKitFrame()
+            }
+        case .move(let origin):
+            // Straight to the window server, move + z-order in one
+            // transaction: no AppKit round-trip, and no frame where the
+            // panel has moved but sits below its target.
+            if moveAndOrderAboveTarget(cgsOrigin: panelFrame.origin) {
+                appKitStale = true
+                reordered = true
+            } else {
+                panel.setFrameOrigin(origin)
+            }
+        case .reshape(let frame):
+            panel.setFrame(frame, display: true)
+            appKitStale = false
         }
         let frameChanged = frameOp != .none
         if frameChanged { lastFrame = appKitFrame }
@@ -182,8 +200,10 @@ final class OverlayHandle: NSObject, WKNavigationDelegate {
         // (folded into frameChanged above), and on a low-frequency safety
         // cadence — see OverlayRepinPolicy for why the cadence exists.
         ticksSinceReorder += 1
-        if OverlayRepinPolicy.shouldReorder(frameChanged: frameChanged,
-                                            ticksSinceReorder: ticksSinceReorder) {
+        if reordered {
+            ticksSinceReorder = 0
+        } else if OverlayRepinPolicy.shouldReorder(frameChanged: frameChanged,
+                                                   ticksSinceReorder: ticksSinceReorder) {
             reorderAboveTarget()
             ticksSinceReorder = 0
         }
@@ -229,6 +249,28 @@ final class OverlayHandle: NSObject, WKNavigationDelegate {
     }
 
     // MARK: - Helpers
+
+    /// Bring AppKit's cached frame in line with where the window server has
+    /// the panel. The server-side move is a no-op (the panel is already
+    /// there); this only keeps AppKit from later restoring the stale origin.
+    func syncAppKitFrame() {
+        guard appKitStale, lastFrame != .zero else { return }
+        panel.setFrameOrigin(lastFrame.origin)
+        appKitStale = false
+    }
+
+    private func moveAndOrderAboveTarget(cgsOrigin: CGPoint) -> Bool {
+        guard let create = WindowTransaction.create,
+              let move   = WindowTransaction.moveWithGroup,
+              let order  = WindowTransaction.orderWindow,
+              let commit = WindowTransaction.commit else { return false }
+        let cid = SkyLight.cid
+        guard cid != 0, let txRef = create(cid)?.takeRetainedValue() else { return false }
+        let panelWID = UInt32(panel.windowNumber)
+        _ = move(txRef, panelWID, cgsOrigin)
+        _ = order(txRef, panelWID, 1, UInt32(targetWID))
+        return commit(txRef, 0) == 0
+    }
 
     private func reorderAboveTarget() {
         // SLSTransactionOrderWindow(tx, panelWID, 1, targetWID) = "place
@@ -324,6 +366,14 @@ enum OverlayTickPlan {
                        abs(next.height - last.height) < 0.5
         if sameSize && last != .zero { return sameOrigin ? .none : .move(next.origin) }
         return .reshape(next)
+    }
+
+    /// After window-server moves, AppKit's cached origin is resynced on the
+    /// first tick with no frame change — never mid-motion, where it would
+    /// put the AppKit round-trip back on the hot path. A reshape goes
+    /// through setFrame, which resyncs by itself.
+    static func needsAppKitSync(frameOp: OverlayFrameOp, appKitStale: Bool) -> Bool {
+        appKitStale && frameOp == .none
     }
 
     /// The payload is in panel coordinates, so it only changes on resize or

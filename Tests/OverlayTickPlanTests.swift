@@ -59,4 +59,16 @@ func registerOverlayTickPlanTests() {
         let js = OverlayGeometry.targetPayloadJS(targetFrame: base, outset: 0)
         try expect(OverlayTickPlan.payloadToPush(js, lastPushed: nil) == js)
     }
+
+    test("OverlayTickPlan.needsAppKitSync only once motion has stopped") {
+        // An out-of-band (window-server) move leaves AppKit's cached frame
+        // stale; resync on the first idle tick, never mid-motion.
+        try expect(OverlayTickPlan.needsAppKitSync(frameOp: .none, appKitStale: true))
+        try expect(!OverlayTickPlan.needsAppKitSync(frameOp: .move(.zero), appKitStale: true))
+        try expect(!OverlayTickPlan.needsAppKitSync(frameOp: .none, appKitStale: false))
+    }
+
+    test("OverlayTickPlan.needsAppKitSync is false on reshape (setFrame resyncs)") {
+        try expect(!OverlayTickPlan.needsAppKitSync(frameOp: .reshape(.zero), appKitStale: true))
+    }
 }

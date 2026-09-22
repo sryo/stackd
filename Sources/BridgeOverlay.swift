@@ -104,6 +104,7 @@ extension Bridge {
                             return
                         }
                         if !h.panel.isVisible {
+                            h.syncAppKitFrame()
                             h.panel.orderFrontRegardless()
                             // Coming back from the target-hidden branch: the
                             // target may have returned at its exact old frame
