@@ -112,6 +112,9 @@ final class Bridge: NSObject, WKScriptMessageHandler {
     // Widened from fileprivate to internal so BridgeOverlay.swift's
     // overlay.attach / .setTarget / .eval / .detach closures can mint and
     // release OverlayHandles.
+    // Ordering for eval(_:in:) — see EvalOrderGate.
+    private var evalGate = EvalOrderGate()
+    private let evalGateLock = NSLock()
     var overlayHandles: [Int: OverlayHandle] = [:]
     var overlayTokens: [Int: Token] = [:]
     var nextOverlayId: Int = 1
@@ -648,9 +651,7 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         }
         let suffix = String(safe)
         let script = "window.onBang_\(suffix) && window.onBang_\(suffix)(\(json));"
-        DispatchQueue.main.async {
-            webView.evaluateJavaScript(script, completionHandler: nil)
-        }
+        eval(script, in: webView)
     }
 
     // MARK: - Message dispatch
@@ -722,8 +723,28 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         guard let webView = webView else { return }
         let json = value.map { Bridge.jsonify($0) } ?? "null"
         let script = "window.__sd_response && window.__sd_response(\(requestId), \(json));"
-        DispatchQueue.main.async {
+        eval(script, in: webView)
+    }
+
+    /// Evaluate a script in this stack's WebView — inline when already on
+    /// main with nothing queued (saves a main-queue hop per response, push
+    /// and bang), otherwise hopped to main in order. evaluateJavaScript is
+    /// itself asynchronous (it posts to the WebContent process), so running
+    /// it inline can't re-enter page JS.
+    private func eval(_ script: String, in webView: WKWebView) {
+        evalGateLock.lock()
+        let inline = evalGate.shouldRunInline(isMain: Thread.isMainThread)
+        evalGateLock.unlock()
+        if inline {
             webView.evaluateJavaScript(script, completionHandler: nil)
+            return
+        }
+        DispatchQueue.main.async { [weak self] in
+            webView.evaluateJavaScript(script, completionHandler: nil)
+            guard let self = self else { return }
+            self.evalGateLock.lock()
+            self.evalGate.drained()
+            self.evalGateLock.unlock()
         }
     }
 
@@ -1178,9 +1199,7 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         let h = Bridge.jsString(handler)
         let joined = args.joined(separator: ", ")
         let script = "globalThis[\(h)] && globalThis[\(h)](\(joined));"
-        DispatchQueue.main.async {
-            webView.evaluateJavaScript(script, completionHandler: nil)
-        }
+        eval(script, in: webView)
     }
 
     /// Widened from private to internal so fs.watch.start's callback (now in
@@ -1297,7 +1316,7 @@ final class Bridge: NSObject, WKScriptMessageHandler {
             }
         }
         let script = "window.__sd_push && window.__sd_push(\"\(channel)\", \(json));"
-        DispatchQueue.main.async { webView.evaluateJavaScript(script, completionHandler: nil) }
+        eval(script, in: webView)
     }
 
     deinit {
@@ -1308,4 +1327,21 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         for w in fsWatches.values { w.stop() }
         axHandles.releaseAll()
     }
+}
+
+/// Decides whether a script may be evaluated inline or must hop to main.
+/// Inline only on main with nothing queued: once any script is queued,
+/// later ones queue behind it so a stack sees them in call order.
+struct EvalOrderGate {
+    private var pending = 0
+
+    /// Counts the script as queued when it returns false.
+    mutating func shouldRunInline(isMain: Bool) -> Bool {
+        if isMain && pending == 0 { return true }
+        pending += 1
+        return false
+    }
+
+    /// A queued script ran.
+    mutating func drained() { pending = max(0, pending - 1) }
 }
