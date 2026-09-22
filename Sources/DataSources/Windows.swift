@@ -1663,9 +1663,19 @@ final class FrontmostWindowObserver: RefCountedObserver {
 // callbacks while 806/807 flowed) — which kills the overlay border's z-order
 // repair ("outline behind the window"). 808 is
 // load-bearing; window-server-latency moved/resized is not (the AX
-// notifications + the frame-bang coalescer cover that signal). If CGS
-// frames are ever wanted, they need a SECOND SLS connection so the
-// interest list can't scope the main one — yabai-style.
+// notifications + the frame-bang coalescer cover that signal).
+//
+// A second connection does not escape this (measured on Tahoe, ~20
+// raises + a drag + a resize per variant):
+//   - SLSNewConnection + per-connection registration + interest list on
+//     that connection: zero 806/807 delivered (nothing services the new
+//     connection's event port), and cid1's 808 still went silent.
+//   - Global SLSRegisterNotifyProc + interest list on the main connection
+//     (JankyBorders' pattern): 806/807/811/815/816 flow at frame rate, but
+//     808 drops to ~2 per 20 raises on both the global and per-connection
+//     registrations.
+// So window-server frame events and reliable 808 are mutually exclusive
+// for this process.
 //
 // The per-code fire counters (logged from the 10s poll tick) are the
 // standing verification that registered codes keep firing across macOS
