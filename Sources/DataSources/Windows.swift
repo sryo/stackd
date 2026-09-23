@@ -338,20 +338,29 @@ enum WindowAddressabilityCache {
         }
         lock.unlock()
         // Probe outside the lock — AX calls hop to main thread internally.
-        let el = WindowsByID.elementFor(windowID: windowID, pid: pid)
-        let addressable = (el != nil)
+        var el: AXUIElement?
         var isStd = false
         var isMin = false
-        if let e = el {
+        var subroleErr: AXError = .success
+        for attempt in 0..<2 {
+            el = WindowsByID.elementFor(windowID: windowID, pid: pid)
+            isStd = false
+            isMin = false
+            guard let e = el else { break }
             var minRef: AnyObject?
             if AXUIElementCopyAttributeValue(e, kAXMinimizedAttribute as CFString, &minRef) == .success,
                let b = minRef as? Bool {
                 isMin = b
             }
             var subroleRef: AnyObject?
-            _ = AXUIElementCopyAttributeValue(e, kAXSubroleAttribute as CFString, &subroleRef)
+            subroleErr = AXUIElementCopyAttributeValue(e, kAXSubroleAttribute as CFString, &subroleRef)
             isStd = standardVerdict(subrole: subroleRef as? String, isMinimized: isMin)
+            guard StaleElementRetry.shouldReResolve(readError: subroleErr, attempt: attempt) else { break }
+            // The cached element may be dead while the window lives on
+            // (sleep/wake): drop it so elementFor re-walks kAXWindows.
+            WindowsByID.invalidateCache(pid: pid, windowID: windowID)
         }
+        let addressable = (el != nil)
         lock.lock()
         let existing = cache[key]
         let probe: Probe
@@ -406,7 +415,25 @@ enum WindowAddressabilityCache {
         }
         if shouldCache { cache[key] = probe }
         lock.unlock()
+        // Verdict flips are rare and are what silently drops a window from
+        // every tiler — say why.
+        if shouldCache, let old = existing,
+           old.addressable != probe.addressable || old.isStandard != probe.isStandard {
+            log("windows: wid=\(windowID) pid=\(pid) addressable \(old.addressable)→\(probe.addressable) standard \(old.isStandard)→\(probe.isStandard) (element \(el == nil ? "unresolved" : "ok"), subrole read \(subroleErr.rawValue))")
+        } else if shouldCache, existing == nil, !probe.addressable {
+            // Common for layer-0 windows AX doesn't vend (helpers, offscreen
+            // chrome) — debug-only; the flips above are the signal.
+            WindowDebug.log("windows: wid=\(windowID) pid=\(pid) unaddressable after grace (element unresolved)")
+        }
         return probe
+    }
+
+    /// Forget every verdict except established positives, so windows get
+    /// re-probed with fresh elements (after wake).
+    static func dropNonPositive() {
+        lock.lock(); defer { lock.unlock() }
+        cache = cache.filter { $0.value.addressable && $0.value.isStandard }
+        firstSeenAt.removeAll()
     }
 
     static func invalidate(pid: pid_t) {
@@ -494,6 +521,27 @@ enum AXShim {
 }
 
 // MARK: - WindowsByID: per-window actions targeting a CGWindowID
+
+/// When a failed attribute read on a cached element means "re-resolve the
+/// element and read again" rather than a real answer about the window.
+enum StaleElementRetry {
+    static func shouldReResolve(readError: AXError, attempt: Int) -> Bool {
+        attempt == 0 && (readError == .invalidUIElement || readError == .cannotComplete)
+    }
+}
+
+/// Whether a window's per-window AX observers need (re)attaching, given
+/// what's stored and what AX resolves for it now. Generic so it's testable
+/// without live AXUIElements.
+enum PerWindowInstallDecision: Equatable {
+    case install, replace, keep
+
+    static func decide<T>(existing: T?, fresh: T?, same: (T, T) -> Bool) -> PerWindowInstallDecision {
+        guard let fresh = fresh else { return .keep }
+        guard let existing = existing else { return .install }
+        return same(existing, fresh) ? .keep : .replace
+    }
+}
 
 /// Per-app rate limit for the create-triggered AX install retry.
 struct AXInstallRetryGate {
@@ -1236,6 +1284,10 @@ final class WindowsLifecycleObserver {
 
     private func tick() {
         let now = current()
+        if Self.shouldSkipTick(previousCount: snapshot.count, currentCount: now.count) {
+            WindowDebug.log("poll tick skipped: window list read empty (transient)")
+            return
+        }
         let diff = WindowsLifecycleObserver.diff(prev: snapshot, next: now)
 
         // Fire diffs that AX didn't already cover. AX writes
@@ -1251,9 +1303,20 @@ final class WindowsLifecycleObserver {
             axCovered: { self.axCoveredRecently(wid: CGWindowID($0)) },
             announced: { WindowLifecycleFanout.announcedRecently(id: $0) })
         let missedCreated = creates.announce.count
-        for snap in creates.announce { onCreate?(snap) }
+        for snap in creates.announce {
+            onCreate?(snap)
+            WindowsAXObserver.shared.ensurePerWindow(pid: pid_t(snap.pid), wid: CGWindowID(snap.id))
+        }
         if creates.pumpNudge { onPumpNudge?() }
-        for snap in diff.destroyed where !axCoveredRecently(wid: CGWindowID(snap.id)) {
+        // Only a destroy AX/CGS actually REPORTED suppresses the poll's. Any
+        // recent AX event used to — but a display removal fires moved/resized
+        // for every relocated window, so windows that dropped out then were
+        // forgotten silently: no destroy, caches kept, per-window observers
+        // kept, and the window came back later as a phantom "create".
+        let destroys = Self.pollDestroyActions(
+            destroyed: diff.destroyed,
+            destroyReported: { WindowsAXObserver.shared.destroyReportedRecently(wid: CGWindowID($0), within: 12.0) })
+        for snap in destroys {
             onDestroy?(snap)
             missedDestroyed += 1
         }
@@ -1304,6 +1367,20 @@ final class WindowsLifecycleObserver {
                                   announced: (Int) -> Bool) -> (announce: [Snap], pumpNudge: Bool) {
         let announce = created.filter { !axCovered($0.id) && !announced($0.id) }
         return (announce, announce.count < created.count)
+    }
+
+    /// CGWindowList can read empty for a moment (wake, display
+    /// reconfiguration). Diffing that would report every window destroyed
+    /// and then re-created; real closes still arrive through AX/CGS.
+    static func shouldSkipTick(previousCount: Int, currentCount: Int) -> Bool {
+        currentCount == 0 && previousCount > 0
+    }
+
+    /// Pure classification for the poll's destroyed diffs: fire every one
+    /// except those AX or CGS already reported as destroyed (their
+    /// onDestroy already ran).
+    static func pollDestroyActions(destroyed: [Snap], destroyReported: (Int) -> Bool) -> [Snap] {
+        destroyed.filter { !destroyReported($0.id) }
     }
 
     /// Pure diff for testability — given two snapshots, return the
@@ -1901,6 +1978,7 @@ enum WindowEvents {
                 if let pid = WindowsAXObserver.shared.pidFor(wid: CGWindowID(wid)) {
                     WindowsByID.invalidateCache(pid: pid, windowID: CGWindowID(wid))
                 }
+                WindowsAXObserver.shared.noteDestroyReported(wid: CGWindowID(wid))
                 host.bang(name: "sd.window.destroyed", detail: ["id": Int(wid)])
             case .moved, .resized, .titleChanged:
                 // Not registered (see the header comment: they need the
@@ -1953,7 +2031,7 @@ enum WindowEvents {
               let pid = info[kCGWindowOwnerPID as String] as? Int
         else { return }
         // Before the subrole gate below, which needs AX for this app.
-        WindowsAXObserver.shared.ensureInstalled(pid: pid_t(pid))
+        WindowsAXObserver.shared.ensurePerWindow(pid: pid_t(pid), wid: cgWid)
         // Standard-window gate (positive verdict only): layer 0 alone
         // admits app helper windows — Arc's tab-creation hint, Chromium
         // bubbles, tooltips-with-a-layer. Non-standard or not-yet-readable
@@ -2624,6 +2702,14 @@ final class WindowsAXObserver {
         }
 
         let center = NSWorkspace.shared.notificationCenter
+        // AX observer registrations and cached elements can go dead across
+        // a sleep while their windows live on — no notification tells us.
+        // Rebuild the AX layer once the system has settled after wake.
+        for name in [NSWorkspace.didWakeNotification, NSWorkspace.screensDidWakeNotification] {
+            workspaceTokens.append(center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                self?.scheduleRefreshAfterWake()
+            })
+        }
         workspaceTokens.append(center.addObserver(
             forName: NSWorkspace.didLaunchApplicationNotification,
             object: nil, queue: .main
@@ -2659,6 +2745,19 @@ final class WindowsAXObserver {
         return (Date().timeIntervalSince1970 - ts) < within
     }
 
+    /// Destroys already delivered to stacks (AX destroyed notification or
+    /// CGS 804), so the safety poll doesn't fire them a second time.
+    private var lastDestroyReported: [CGWindowID: TimeInterval] = [:]
+
+    func noteDestroyReported(wid: CGWindowID) {
+        lastDestroyReported[wid] = Date().timeIntervalSince1970
+    }
+
+    func destroyReportedRecently(wid: CGWindowID, within: TimeInterval) -> Bool {
+        guard let ts = lastDestroyReported[wid] else { return false }
+        return (Date().timeIntervalSince1970 - ts) < within
+    }
+
     /// Drop lastAxFire entries older than `age`. Called from the safety
     /// poll's tick — the missed-by-ax gate only ever looks back ~12s, so
     /// anything older is dead weight that would otherwise accumulate one
@@ -2666,6 +2765,7 @@ final class WindowsAXObserver {
     func pruneAxFireLog(olderThan age: TimeInterval) {
         let cutoff = Date().timeIntervalSince1970 - age
         lastAxFire = lastAxFire.filter { $0.value >= cutoff }
+        lastDestroyReported = lastDestroyReported.filter { $0.value >= cutoff }
     }
 
     /// Owning pid for a wid we hold per-window observers on; nil when the
@@ -2697,6 +2797,71 @@ final class WindowsAXObserver {
     }
 
     private var installRetryGate = AXInstallRetryGate()
+    private var wakeRefreshWork: DispatchWorkItem?
+
+    private func scheduleRefreshAfterWake() {
+        wakeRefreshWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in self?.refreshAfterWake() }
+        wakeRefreshWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0, execute: work)
+    }
+
+    /// Tear down every AX registration and cached element and install again
+    /// from scratch — the daemon-startup path, minus firing creates.
+    private func refreshAfterWake() {
+        var windowCount = 0
+        for pid in Array(appObservers.keys) {
+            if let perWindow = windows.removeValue(forKey: pid) {
+                windowCount += perWindow.count
+                perWindow.values.forEach { $0.tokens.forEach { $0.cancel() } }
+            }
+            appTokens.removeValue(forKey: pid)?.forEach { $0.cancel() }
+            appObservers.removeValue(forKey: pid)
+        }
+        let appCount = NSWorkspace.shared.runningApplications.filter(shouldObserve).count
+        WindowsByID.invalidateAll()
+        WindowAddressabilityCache.dropNonPositive()
+        for app in NSWorkspace.shared.runningApplications where shouldObserve(app) {
+            installForAppRetry(app: app, delays: WindowsAXObserver.startupRetryDelays, fireForExisting: false)
+        }
+        log("ax: refreshed after wake — \(appCount) apps, \(windowCount) windows re-observed")
+        AppDelegate.shared?.host?.pumpWindowsListForAllStacks()
+    }
+
+    /// A window re-found without an AX create (safety poll, CGS 1325): make
+    /// sure it has live per-window observers. The AX create notification
+    /// never fires for a window that already existed, and an entry stored
+    /// for an element that went dead (sleep/wake) would otherwise block
+    /// re-installation — leaving the window with no moved/resized events.
+    func ensurePerWindow(pid: pid_t, wid: CGWindowID) {
+        guard let observer = appObservers[pid] else {
+            ensureInstalled(pid: pid)
+            return
+        }
+        let fresh = WindowsAXObserver.freshElement(appElement: observer.appElement, wid: wid)
+        let decision = PerWindowInstallDecision.decide(
+            existing: windows[pid]?[wid]?.element, fresh: fresh, same: { CFEqual($0, $1) })
+        guard decision != .keep, let window = fresh else { return }
+        if decision == .replace {
+            windows[pid]?.removeValue(forKey: wid)?.tokens.forEach { $0.cancel() }
+        }
+        WindowsByID.invalidateCache(pid: pid, windowID: wid)
+        let app = NSRunningApplication(processIdentifier: pid)?.localizedName ?? ""
+        log("ax: per-window observers \(decision == .replace ? "replaced" : "attached") pid=\(pid) wid=\(wid) (\(app))")
+        installPerWindow(pid: pid, app: app, window: window, firing: false)
+    }
+
+    /// The window's element as AX vends it right now — not the cached one.
+    private static func freshElement(appElement: AXUIElement, wid: CGWindowID) -> AXUIElement? {
+        guard let getWindow = AXShim.getWindow else { return nil }
+        var ref: AnyObject?
+        guard AXUIElementCopyAttributeValue(appElement, kAXWindowsAttribute as CFString, &ref) == .success,
+              let arr = ref as? [AXUIElement] else { return nil }
+        return arr.first { el in
+            var w: CGWindowID = 0
+            return getWindow(el, &w) == .success && w == wid
+        }
+    }
 
     /// A window appeared (CGS 1325) for an app we hold no AX observer on —
     /// its install exhausted the launch/startup ladder, typically on a
@@ -2954,6 +3119,7 @@ final class WindowsAXObserver {
         entry?.tokens.forEach { $0.cancel() }
         let title = lastTitle[pid]?.removeValue(forKey: wid) ?? ""
         lastAxFire[wid] = Date().timeIntervalSince1970
+        noteDestroyReported(wid: wid)
         WindowMotionEngine.shared.cancel(windowID: wid)
         FrameLedger.shared.clear(windowID: wid)
         dropFrameBangState(wid: wid)

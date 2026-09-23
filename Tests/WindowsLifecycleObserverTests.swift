@@ -258,4 +258,26 @@ func registerWindowsLifecycleObserverTests() {
         try expect(r.announce.isEmpty)
         try expectEqual(r.pumpNudge, false, "an empty diff must not trigger pump churn every tick")
     }
+
+    // MARK: - pollDestroyActions — only a reported destroy suppresses the poll's
+
+    test("pollDestroyActions: a window that left Windows.all() fires destroy") {
+        let gone = [snap(id: 1, title: "A"), snap(id: 2, title: "B")]
+        let r = WindowsLifecycleObserver.pollDestroyActions(destroyed: gone, destroyReported: { _ in false })
+        try expectEqual(r.map(\.id), [1, 2])
+    }
+
+    test("pollDestroyActions: a destroy AX or CGS already reported is not fired twice") {
+        let gone = [snap(id: 1, title: "A"), snap(id: 2, title: "B")]
+        let r = WindowsLifecycleObserver.pollDestroyActions(destroyed: gone, destroyReported: { $0 == 2 })
+        try expectEqual(r.map(\.id), [1])
+    }
+
+    test("shouldSkipTick: an empty window list after a non-empty one is a transient read") {
+        // CGWindowList can come back empty for a moment at wake; diffing it
+        // would report every window destroyed and then re-created.
+        try expect(WindowsLifecycleObserver.shouldSkipTick(previousCount: 5, currentCount: 0))
+        try expect(!WindowsLifecycleObserver.shouldSkipTick(previousCount: 5, currentCount: 4))
+        try expect(!WindowsLifecycleObserver.shouldSkipTick(previousCount: 0, currentCount: 0))
+    }
 }
