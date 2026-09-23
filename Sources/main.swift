@@ -8,6 +8,7 @@ if argv.count > 1 {
 }
 
 // Daemon mode.
+Log.startDaemonLog()
 let app = NSApplication.shared
 app.setActivationPolicy(.accessory)
 let delegate = AppDelegate()

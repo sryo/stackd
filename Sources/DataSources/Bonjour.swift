@@ -62,7 +62,7 @@ enum Bonjour {
                 self.listener = listener
                 listener.start(queue: queue)
             } catch {
-                FileHandle.standardError.write(Data("stackd: bonjour publish failed for \(name).\(type):\(port) — \(error)\n".utf8))
+                log("bonjour publish failed for \(name).\(type):\(port) — \(error)")
                 return nil
             }
         }

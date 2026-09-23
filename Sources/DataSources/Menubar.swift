@@ -233,7 +233,7 @@ enum MenuBarVisibility {
     static func forceRestoreOnLaunch() {
         let handleOK = SkyLight.handle != nil
         let symOK    = SkyLightMenuBar.setMenuBarVisibility != nil
-        FileHandle.standardError.write(Data("stackd: SkyLight handle=\(handleOK) sym=\(symOK)\n".utf8))
+        log("SkyLight handle=\(handleOK) sym=\(symOK)")
         guard let fn = SkyLightMenuBar.setMenuBarVisibility else { return }
         lock.lock(); defer { lock.unlock() }
         suppressorCount = 0

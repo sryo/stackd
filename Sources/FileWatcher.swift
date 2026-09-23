@@ -69,9 +69,9 @@ final class FileWatcher {
         if let stream = stream {
             FSEventStreamSetDispatchQueue(stream, DispatchQueue.main)
             FSEventStreamStart(stream)
-            FileHandle.standardError.write(Data("stackd: watching \(paths.joined(separator: ", "))\n".utf8))
+            log("watching \(paths.joined(separator: ", "))")
         } else {
-            FileHandle.standardError.write(Data("stackd: FSEventStream creation failed\n".utf8))
+            log("FSEventStream creation failed")
         }
     }
 

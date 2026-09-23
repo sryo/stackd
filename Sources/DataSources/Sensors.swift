@@ -192,7 +192,7 @@ final class BatteryObserver: RefCountedObserver {
             // IOKit power services unavailable / denied. Return nil so the
             // base class retries on the next subscribe — pull-based readers
             // (Battery.percent) still work in the meantime.
-            FileHandle.standardError.write(Data("stackd: BatteryObserver — IOPS source creation failed\n".utf8))
+            log("BatteryObserver — IOPS source creation failed")
             return nil
         }
         CFRunLoopAddSource(CFRunLoopGetMain(), src, .commonModes)
@@ -720,7 +720,7 @@ enum Caffeinate {
         case "system":       assertionType = kIOPMAssertionTypeNoIdleSleep as CFString
         case "userActivity": assertionType = kIOPMAssertionTypePreventUserIdleSystemSleep as CFString
         default:
-            FileHandle.standardError.write(Data("stackd: caffeinate.assert — unknown type \(type)\n".utf8))
+            log("caffeinate.assert — unknown type \(type)")
             return nil
         }
         // Reason string is surfaced in `pmset -g assertions` / Activity Monitor,
@@ -735,7 +735,7 @@ enum Caffeinate {
             &assertionId
         )
         guard result == kIOReturnSuccess else {
-            FileHandle.standardError.write(Data("stackd: caffeinate.assert — IOPMAssertionCreateWithName failed (\(result))\n".utf8))
+            log("caffeinate.assert — IOPMAssertionCreateWithName failed (\(result))")
             return nil
         }
         return assertionId

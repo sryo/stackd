@@ -83,7 +83,7 @@ extension Bridge {
                     bridge.httpServerTokens[serverId] = token
                     bridge.respond(requestId: requestId, value: serverId)
                 } catch {
-                    FileHandle.standardError.write(Data("stackd: httpserver bind failed on :\(port) — \(error)\n".utf8))
+                    log("httpserver bind failed on :\(port) — \(error)")
                     bridge.respond(requestId: requestId, value: NSNull())
                 }
             },

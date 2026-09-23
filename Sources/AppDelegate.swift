@@ -1,9 +1,5 @@
 import AppKit
 
-func log(_ s: String) {
-    FileHandle.standardError.write(Data("stackd: \(s)\n".utf8))
-}
-
 /// The user's drop folder. Stacks live here. Default: ~/stackd.
 /// Override with STACKD_ROOT.
 func stackdRoot() -> String {

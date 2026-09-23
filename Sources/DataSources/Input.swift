@@ -1340,7 +1340,7 @@ final class HotkeyRegistry {
             }
         }
         guard let token = keyToken, let keyCode = HotkeyRegistry.keyCode(for: token) else {
-            FileHandle.standardError.write(Data("stackd: hotkey unparsed: \(spec)\n".utf8))
+            log("hotkey unparsed: \(spec)")
             return nil
         }
 
@@ -1356,7 +1356,7 @@ final class HotkeyRegistry {
         let combo = (UInt64(keyCode) << 32) | UInt64(mods)
         if let ownerId = hotkeyIdByCombo[combo] {
             comboRefCounts[combo, default: 0] += 1
-            FileHandle.standardError.write(Data("stackd: hotkey bound \(spec) id=\(ownerId) (shared refs=\(comboRefCounts[combo]!))\n".utf8))
+            log("hotkey bound \(spec) id=\(ownerId) (shared refs=\(comboRefCounts[combo]!))")
             return Token { [weak self] in self?.releaseCombo(combo) }
         }
 
@@ -1368,14 +1368,14 @@ final class HotkeyRegistry {
         let hotKeyID = EventHotKeyID(signature: OSType(0x73645f6b /* "sd_k" */), id: id)
         let status = RegisterEventHotKey(keyCode, mods, hotKeyID, GetApplicationEventTarget(), 0, &ref)
         guard status == noErr, let ref = ref else {
-            FileHandle.standardError.write(Data("stackd: RegisterEventHotKey failed for \(spec) status=\(status)\n".utf8))
+            log("RegisterEventHotKey failed for \(spec) status=\(status)")
             bindings.removeValue(forKey: id)
             return nil
         }
         refs[id] = ref
         hotkeyIdByCombo[combo] = id
         comboRefCounts[combo] = 1
-        FileHandle.standardError.write(Data("stackd: hotkey bound \(spec) id=\(id)\(mode.map { " mode=\($0)" } ?? "")\(apps.map { " apps=\($0)" } ?? "")\n".utf8))
+        log("hotkey bound \(spec) id=\(id)\(mode.map { " mode=\($0)" } ?? "")\(apps.map { " apps=\($0)" } ?? "")")
         return Token { [weak self] in self?.releaseCombo(combo) }
     }
 
@@ -1386,7 +1386,7 @@ final class HotkeyRegistry {
     func enterMode(_ name: String) {
         guard currentMode != name else { return }
         currentMode = name
-        FileHandle.standardError.write(Data("stackd: hotkey mode → \(name)\n".utf8))
+        log("hotkey mode → \(name)")
     }
 
     /// Return to "default" mode. Idempotent.

@@ -161,8 +161,7 @@ enum Calendar {
                 let id = ev.eventIdentifier
                 DispatchQueue.main.async { completion(id) }
             } catch {
-                FileHandle.standardError.write(Data(
-                    "stackd: Calendar.createEvent — save failed: \(error.localizedDescription)\n".utf8))
+                log("Calendar.createEvent — save failed: \(error.localizedDescription)")
                 DispatchQueue.main.async { completion(nil) }
             }
         }

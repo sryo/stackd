@@ -31,7 +31,7 @@ enum WindowDebug {
     // throughout drags) and their interpolations — enum reflection
     // included — must not be built when the switch is off.
     static func log(_ s: @autoclosure () -> String) {
-        if enabled { FileHandle.standardError.write(Data("stackd: win-dbg \(s())\n".utf8)) }
+        if enabled { Log.write("win-dbg \(s())") }
     }
 }
 
@@ -486,7 +486,7 @@ enum AXShim {
         // _AXUIElementGetWindow is exported by ApplicationServices itself;
         // dlsym(RTLD_DEFAULT, ...) finds it without needing a framework path.
         guard let sym = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "_AXUIElementGetWindow") else {
-            FileHandle.standardError.write(Data("stackd: _AXUIElementGetWindow unavailable\n".utf8))
+            log("_AXUIElementGetWindow unavailable")
             return nil
         }
         return unsafeBitCast(sym, to: GetWindowFn.self)
@@ -1819,7 +1819,7 @@ private let debugWindowEventsCallback: SkyLightWindowEvents.CGSConnectionCallbac
             hex += String(format: "%02x ", data.advanced(by: i).load(as: UInt8.self))
         }
     }
-    FileHandle.standardError.write(Data("stackd-cgs: event=\(event) len=\(dataLen) [\(hex)]\n".utf8))
+    log("cgs: event=\(event) len=\(dataLen) [\(hex)]")
 }
 
 enum WindowEvents {

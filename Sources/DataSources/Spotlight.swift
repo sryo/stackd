@@ -58,7 +58,7 @@ enum Spotlight {
         // log + return empty instead of crashing the daemon.
         var parseError: NSString?
         guard let predicate = StackdSafeNSPredicate(predicateStr, &parseError) else {
-            FileHandle.standardError.write(Data("stackd: spotlight.find bad predicate '\(predicateStr)': \(parseError ?? "")\n".utf8))
+            log("spotlight.find bad predicate '\(predicateStr)': \(parseError ?? "")")
             completion([]); return
         }
         let query = NSMetadataQuery()
@@ -133,7 +133,7 @@ enum Spotlight {
             // null handle that quietly never emits.
             var parseError: NSString?
             guard let predicate = StackdSafeNSPredicate(predicateStr, &parseError) else {
-                FileHandle.standardError.write(Data("stackd: spotlight.subscribe bad predicate '\(predicateStr)': \(parseError ?? "")\n".utf8))
+                log("spotlight.subscribe bad predicate '\(predicateStr)': \(parseError ?? "")")
                 return nil
             }
             let query = NSMetadataQuery()

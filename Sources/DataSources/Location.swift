@@ -136,6 +136,6 @@ private final class LocationDelegate: NSObject, CLLocationManagerDelegate {
     }
 
     func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {
-        FileHandle.standardError.write(Data("stackd: LocationObserver — \(error.localizedDescription)\n".utf8))
+        log("LocationObserver — \(error.localizedDescription)")
     }
 }

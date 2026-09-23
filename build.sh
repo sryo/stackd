@@ -10,6 +10,7 @@ scripts/build-runtime.sh
 SWIFT_SOURCES=(
   Sources/main.swift
   Sources/AppDelegate.swift
+  Sources/Log.swift
   Sources/StackWindow.swift
   Sources/PassthroughWebView.swift
   Sources/ScreenshotHider.swift

@@ -214,8 +214,7 @@ final class StackWindow: NSPanel, WKNavigationDelegate {
         // Log the initial geometry — didMove/didResize only fire on changes
         // from this baseline, so creation would otherwise be invisible.
         let displayId = (screen?.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID) ?? 0
-        FileHandle.standardError.write(Data(
-            "stackd: stack frame init=\(Int(frame.minX)),\(Int(frame.minY)) \(Int(frame.width))×\(Int(frame.height)) display=\(displayId)\n".utf8))
+        log("stack frame init=\(Int(frame.minX)),\(Int(frame.minY)) \(Int(frame.width))×\(Int(frame.height)) display=\(displayId)")
     }
 
     deinit {
@@ -229,8 +228,7 @@ final class StackWindow: NSPanel, WKNavigationDelegate {
         lastObservedFrame = f
         let displayId = (screen?.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID) ?? 0
         let name = webView.url?.host ?? "?"
-        FileHandle.standardError.write(Data(
-            "stackd: stack '\(name)' frame=\(Int(f.minX)),\(Int(f.minY)) \(Int(f.width))×\(Int(f.height)) display=\(displayId)\n".utf8))
+        log("stack '\(name)' frame=\(Int(f.minX)),\(Int(f.minY)) \(Int(f.width))×\(Int(f.height)) display=\(displayId)")
         let js = "window.dispatchEvent(new CustomEvent('stackd:frame',{detail:{x:\(f.minX),y:\(f.minY),w:\(f.width),h:\(f.height),displayId:\(displayId)}}))"
         webView.evaluateJavaScript(js, completionHandler: nil)
     }
@@ -483,8 +481,7 @@ final class StackWindow: NSPanel, WKNavigationDelegate {
         let name = webView.url?.host ?? "?"
         switch crashBackoff.crashed(now: Date().timeIntervalSinceReferenceDate) {
         case .reload(let delay):
-            FileHandle.standardError.write(Data(
-                "stackd: stack '\(name)' web content process crashed — reloading in \(delay)s\n".utf8))
+            log("stack '\(name)' web content process crashed — reloading in \(delay)s")
             if delay == 0 {
                 webView.reload()
             } else {
@@ -495,13 +492,12 @@ final class StackWindow: NSPanel, WKNavigationDelegate {
         case .giveUp:
             // Crash loop — stop feeding it. The panel stays revealed (blank),
             // which is debuggable; an invisible auto-reload cycle is not.
-            FileHandle.standardError.write(Data(
-                "stackd: stack '\(name)' web content process crash loop — giving up after \(CrashBackoff.delays.count) reloads\n".utf8))
+            log("stack '\(name)' web content process crash loop — giving up after \(CrashBackoff.delays.count) reloads")
         }
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-        FileHandle.standardError.write(Data("stackd: webview did-finish \(webView.url?.absoluteString ?? "?")\n".utf8))
+        log("webview did-finish \(webView.url?.absoluteString ?? "?")")
         webView.evaluateJavaScript("window.dispatchEvent(new Event('stackd:load'))", completionHandler: nil)
         // Latch the loaded flag so a later first-arm (invocable stack on
         // first invoke) knows it can skip the fallback-timer wait.
@@ -512,13 +508,13 @@ final class StackWindow: NSPanel, WKNavigationDelegate {
         if gate.shouldRevealOnLoadFinish() { revealNow() }
     }
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
-        FileHandle.standardError.write(Data("stackd: webview did-fail \(error)\n".utf8))
+        log("webview did-fail \(error)")
         // Reveal a broken stack instead of leaving it permanently hidden —
         // visible-but-empty is more debuggable than silently invisible.
         if gate.shouldRevealOnLoadFail() { revealNow() }
     }
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
-        FileHandle.standardError.write(Data("stackd: webview did-fail-provisional \(error)\n".utf8))
+        log("webview did-fail-provisional \(error)")
         if gate.shouldRevealOnLoadFail() { revealNow() }
     }
 }

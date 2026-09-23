@@ -429,7 +429,7 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         if let taps = manifest.eventtap {
             for et in taps {
                 guard let type = EventTapRegistry.parse(et.event) else {
-                    FileHandle.standardError.write(Data("stackd: unknown eventtap type \(et.event)\n".utf8))
+                    log("unknown eventtap type \(et.event)")
                     continue
                 }
                 let cb = et.callback
@@ -664,7 +664,7 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         if message.name == "log", let body = message.body as? [String: Any] {
             let level = body["level"] as? String ?? "log"
             let msg = body["msg"] as? String ?? ""
-            FileHandle.standardError.write(Data("stackd: js[\(level)] \(msg)\n".utf8))
+            log("js[\(level)] \(msg)")
             return
         }
         guard message.name == "sd",
@@ -682,7 +682,7 @@ final class Bridge: NSObject, WKScriptMessageHandler {
             let lastLogged = Bridge.lastRpcLogged[rpcKey] ?? 0
             if now - lastLogged >= Bridge.rpcLogThrottleSec {
                 Bridge.lastRpcLogged[rpcKey] = now
-                FileHandle.standardError.write(Data("stackd: rpc \(stackId) → \(type)\n".utf8))
+                log("rpc \(stackId) → \(type)")
             }
         }
         if let perm = primitive.permission, !permissions.contains(perm) {
@@ -1221,10 +1221,6 @@ final class Bridge: NSObject, WKScriptMessageHandler {
                    args: ["\(itemId)", Bridge.jsString(type), payloadJson])
     }
 
-    private func log(_ s: String) {
-        FileHandle.standardError.write(Data("stackd: \(s)\n".utf8))
-    }
-
     // replayState iterates Channels.all (single source of truth shared with
     // the JS-side __sdSignalPaths). For each replayable channel where the
     // stack has the gating permission AND lastState[channel.name] exists,
@@ -1312,7 +1308,7 @@ final class Bridge: NSObject, WKScriptMessageHandler {
             if now - lastLogged >= Bridge.pushLogThrottleSec {
                 Bridge.lastPushLogged[channel] = now
                 let preview = json.count > 120 ? String(json.prefix(117)) + "..." : json
-                FileHandle.standardError.write(Data("stackd: push \(channel) (\(json.count)B) \(preview)\n".utf8))
+                log("push \(channel) (\(json.count)B) \(preview)")
             }
         }
         let script = "window.__sd_push && window.__sd_push(\"\(channel)\", \(json));"

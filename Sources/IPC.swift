@@ -78,7 +78,7 @@ final class IPCServer {
 
         running = true
         acceptQueue.async { [weak self] in self?.acceptLoop() }
-        FileHandle.standardError.write(Data("stackd: ipc listening on \(IPC.socketPath)\n".utf8))
+        log("ipc listening on \(IPC.socketPath)")
     }
 
     private func acceptLoop() {

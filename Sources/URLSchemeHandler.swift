@@ -39,13 +39,13 @@ final class StackdSchemeHandler: NSObject, WKURLSchemeHandler {
         }
 
         guard let file = fileURL, let data = try? Data(contentsOf: file) else {
-            FileHandle.standardError.write(Data("stackd: 404 \(url.absoluteString) → \(fileURL?.path ?? "no-mapping")\n".utf8))
+            log("404 \(url.absoluteString) → \(fileURL?.path ?? "no-mapping")")
             task.didFailWithError(NSError(domain: "stackd", code: 404, userInfo: [
                 NSLocalizedDescriptionKey: "Not found: \(url.absoluteString)"
             ]))
             return
         }
-        FileHandle.standardError.write(Data("stackd: 200 \(url.absoluteString) (\(data.count)B)\n".utf8))
+        log("200 \(url.absoluteString) (\(data.count)B)")
 
         let mime = mimeType(for: file.pathExtension)
         let response = HTTPURLResponse(

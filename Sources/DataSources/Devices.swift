@@ -70,12 +70,12 @@ final class USBObserver: RefCountedObserver {
         // IONotificationPort owns the runloop source that delivers add/remove
         // callbacks. One port handles both iterators (publish + terminate).
         guard let port = IONotificationPortCreate(kIOMainPortDefault) else {
-            FileHandle.standardError.write(Data("stackd: USBObserver — IONotificationPortCreate failed\n".utf8))
+            log("USBObserver — IONotificationPortCreate failed")
             return nil
         }
         guard let src = IONotificationPortGetRunLoopSource(port)?.takeUnretainedValue() else {
             IONotificationPortDestroy(port)
-            FileHandle.standardError.write(Data("stackd: USBObserver — runloop source unavailable\n".utf8))
+            log("USBObserver — runloop source unavailable")
             return nil
         }
         CFRunLoopAddSource(CFRunLoopGetMain(), src, .commonModes)
@@ -110,7 +110,7 @@ final class USBObserver: RefCountedObserver {
             if termIter    != 0 { IOObjectRelease(termIter) }
             CFRunLoopRemoveSource(CFRunLoopGetMain(), src, .commonModes)
             IONotificationPortDestroy(port)
-            FileHandle.standardError.write(Data("stackd: USBObserver — IOServiceAddMatchingNotification failed\n".utf8))
+            log("USBObserver — IOServiceAddMatchingNotification failed")
             return nil
         }
         // Initial drain arms both iterators. Without this they never fire.
