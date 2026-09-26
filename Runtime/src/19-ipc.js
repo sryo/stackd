@@ -66,18 +66,24 @@ sd.urlhandler = {
   };
   // WebKit overlay pinned to a target window the stack doesn't own. The
   // daemon hosts a borderless click-through NSPanel + WKWebView whose
-  // frame tracks SLSGetWindowBounds(targetId) every vsync; inside that
-  // WebView, the stack-supplied {html, css, js} renders normally. The
-  // daemon pushes `window.sd.target = {x, y, w, h}` into the overlay's
-  // WebView whenever it changes (and fires a `sd:target` CustomEvent) so spec
-  // authors can position their elements off the current target geometry.
+  // frame tracks SLSGetWindowBounds(targetId); inside that WebView, the
+  // stack-supplied {html, css, js} renders normally. The daemon pushes
+  // `window.sd.target = {x, y, w, h}` into the overlay's WebView whenever it
+  // changes (and fires a `sd:target` CustomEvent). Position elements off
+  // sd.target, not the panel edge: during a live resize the panel is
+  // larger than the target (room to grow, hanging off the right and
+  // bottom) and is fitted once the resize pauses.
   //
   //   const h = await sd.overlay.attach(targetId, {
   //     html: `<div class="border"></div>`,
-  //     css:  `.border { position: absolute; inset: 1px;
+  //     css:  `.border { position: absolute; box-sizing: border-box;
   //                      border: 2px solid #7c8cff; border-radius: 16px;
   //                      pointer-events: none; }`,
-  //     js:   `/* optional — runs inside the overlay's WebView */`,
+  //     js:   `const b = document.querySelector('.border');
+  //            const place = t => Object.assign(b.style, { left: t.x + 'px',
+  //              top: t.y + 'px', width: t.w + 'px', height: t.h + 'px' });
+  //            place(sd.target);
+  //            addEventListener('sd:target', e => place(e.detail));`,
   //     outset: 0  // optional — panel extends N px beyond the target on
   //                // every side, so a border can draw AROUND the window
   //                // instead of covering its edge content

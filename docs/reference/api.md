@@ -250,7 +250,7 @@ Handle-based; handles are opaque ints owned by this stack — release them.
 - `show(spec) → Promise` — `spec:{title, body, subtitle?, sound?}`.
 
 ### `sd.overlay` — foreign-window overlay · `overlay`
-- `attach(targetId, spec) → Promise<handle|null>` — `spec:{html?,css?,js?}` in a click-through panel tracking `targetId`'s bounds; `window.sd.target={x,y,w,h}` + `sd:target` event pushed when the target's size changes (panel coordinates, so moves don't re-push); `resizing: true` is present while the user live-resizes the target. Handle: `setTarget(newTargetId)` · `eval(js)` · `detach()` `→ Promise`.
+- `attach(targetId, spec) → Promise<handle|null>` — `spec:{html?,css?,js?}` in a click-through panel tracking `targetId`'s bounds; `window.sd.target={x,y,w,h}` + `sd:target` event pushed when the target's size changes (panel coordinates, so moves don't re-push); `resizing: true` is present while the user live-resizes the target. Position content off `sd.target`, not the panel edge: during a live resize the panel is larger than the target (extra room past its right and bottom edges) and is fitted once the resize pauses. Handle: `setTarget(newTargetId)` · `eval(js)` · `detach()` `→ Promise`.
 
 ### `sd.pasteboard` — clipboard · `pasteboard`
 - `sd.pasteboard.changed` *(channel)* — `{text, changeCount}`.

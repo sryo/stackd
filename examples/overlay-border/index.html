@@ -134,8 +134,11 @@
     return {
       css: `
         html, body { margin: 0; padding: 0; background: transparent; overflow: hidden; }
-        /* inset: 0 + box-sizing: border-box draws the border at the panel
-           edge — no inner padding before the border starts. */
+        /* Placed off sd.target by the script below: during a live resize the
+           panel is larger than the target, so the panel edge is not the
+           window edge. inset: 0 only covers the moment before the first
+           sd.target push. box-sizing: border-box keeps the border inside
+           the box. */
         #ws-border {
           position: absolute;
           inset: 0;
@@ -147,6 +150,19 @@
       `,
       html: `<div id="ws-border"></div>`,
       js: `
+        // The target's outset frame in panel coordinates: the target sits
+        // at (outset, outset), grown by outset on every side.
+        function place(t) {
+          var el = document.getElementById('ws-border');
+          if (!el || !t || !(t.w > 0) || !(t.h > 0)) return;
+          var o = t.outset || 0;
+          el.style.left = (t.x - o) + 'px';
+          el.style.top = (t.y - o) + 'px';
+          el.style.width = (t.w + 2 * o) + 'px';
+          el.style.height = (t.h + 2 * o) + 'px';
+        }
+        place(window.sd && window.sd.target);
+        window.addEventListener('sd:target', function(e) { place(e.detail); });
         window.applyStyle = function(thickness, radius, color) {
           var el = document.getElementById('ws-border');
           if (!el) return;

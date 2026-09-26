@@ -85,6 +85,7 @@ final class OverlayHandle: NSObject, WKNavigationDelegate {
     private var lastPushedTargetJS: String?
     private var targetPush = NewestWinsPush()
     private var resizeDetector = LiveResizeDetector()
+    private var headroom = OverlayHeadroom()
     // True after a window-server move AppKit didn't see: `panel.frame` still
     // holds the old origin until syncAppKitFrame() tells it.
     private var appKitStale: Bool = false
@@ -244,19 +245,15 @@ final class OverlayHandle: NSObject, WKNavigationDelegate {
     /// Per-tick: reposition the panel to the target's current bounds
     /// (grown by `outset` on all sides) and, when it changed, push
     /// `window.sd.target = {x,y,w,h,outset}` in PANEL coordinates into the
-    /// overlay's WebView.
+    /// overlay's WebView. During a live resize the panel may be larger than
+    /// that (see OverlayHeadroom); the target still sits at (outset, outset).
     /// `targetFrame` comes from SLSGetWindowBounds(targetWID) (top-left,
-    /// screen-points).
+    /// screen-points). True when anything changed, or while the panel still
+    /// has to be fitted after a resize.
     @discardableResult
     func tick(targetFrame: CGRect) -> Bool {
         if released { return false }
-
-        // Convert CGS top-left coords to AppKit bottom-left for NSPanel.
-        // The target's top edge in CGS == the panel's top edge in AppKit;
-        // AppKit setFrame uses the bottom edge, so origin.y becomes
-        // (screen height - targetFrame.maxY).
-        let panelFrame = OverlayGeometry.panelFrame(target: targetFrame, outset: outset)
-        let appKitFrame = OverlayHandle.cgsToAppKit(panelFrame)
+        let now = CFAbsoluteTimeGetCurrent()
 
         // A requested repin invalidates the frame cache so BOTH the
         // setFrame and the reorder below re-run this tick.
@@ -264,6 +261,23 @@ final class OverlayHandle: NSObject, WKNavigationDelegate {
             repinRequested = false
             lastFrame = .zero
         }
+
+        let resizing = resizeDetector.update(size: targetFrame.size, now: now,
+                                             buttonDown: Mouse.isLeftButtonDown)
+        let fitted = OverlayGeometry.panelFrame(target: targetFrame, outset: outset).size
+        let size = headroom.panelSize(content: fitted,
+                                      current: lastFrame == .zero ? nil : lastFrame.size,
+                                      resizing: resizing, now: now,
+                                      limit: { OverlayHandle.roomToDesktopEdge(from: CGPoint(
+                                          x: targetFrame.minX - self.outset,
+                                          y: targetFrame.minY - self.outset)) })
+        // Convert CGS top-left coords to AppKit bottom-left for NSPanel.
+        // The target's top edge in CGS == the panel's top edge in AppKit;
+        // AppKit setFrame uses the bottom edge, so origin.y becomes
+        // (screen height - panelFrame.maxY).
+        let panelFrame = OverlayGeometry.panelFrame(target: targetFrame, outset: outset, size: size)
+        let appKitFrame = OverlayHandle.cgsToAppKit(panelFrame)
+        let unfitted = size != fitted
 
         let frameOp = OverlayTickPlan.frameOp(next: appKitFrame, last: lastFrame)
         var reordered = false
@@ -295,7 +309,6 @@ final class OverlayHandle: NSObject, WKNavigationDelegate {
         // app boundaries. Reordered on frame change, on explicit repin
         // (folded into frameChanged above), and on a low-frequency safety
         // cadence — see OverlayRepinPolicy for why the cadence exists.
-        let now = CFAbsoluteTimeGetCurrent()
         if reordered {
             lastReorderAt = now
         } else if OverlayRepinPolicy.shouldReorder(frameChanged: frameChanged,
@@ -309,12 +322,10 @@ final class OverlayHandle: NSObject, WKNavigationDelegate {
         // coordinates, so the target's top-left sits at (outset, outset).
         // With outset 0 that's (0,0), byte-compatible with the pre-outset
         // payload plus the new field.
-        let resizing = resizeDetector.update(size: targetFrame.size, now: now,
-                                             buttonDown: Mouse.isLeftButtonDown)
         let payload = OverlayGeometry.targetPayloadJS(targetFrame: targetFrame, outset: outset,
                                                       resizing: resizing)
         guard let js = OverlayTickPlan.payloadToPush(payload, lastPushed: lastPushedTargetJS) else {
-            return frameChanged
+            return frameChanged || unfitted
         }
         lastPushedTargetJS = js
         if navigationReady {
@@ -395,6 +406,19 @@ final class OverlayHandle: NSObject, WKNavigationDelegate {
         _ = commit(txRef, 0)
     }
 
+    /// Width and height from `cgsPoint` to the right and bottom edges of the
+    /// union of all displays (CGS top-left coords). nil without screens.
+    static func roomToDesktopEdge(from cgsPoint: CGPoint) -> CGSize? {
+        let screens = NSScreen.screens
+        guard let primary = screens.first else { return nil }
+        let primaryHeight = primary.frame.maxY
+        let desktop = screens.reduce(CGRect.null) { acc, screen in
+            let f = screen.frame
+            return acc.union(CGRect(x: f.minX, y: primaryHeight - f.maxY, width: f.width, height: f.height))
+        }
+        return CGSize(width: desktop.maxX - cgsPoint.x, height: desktop.maxY - cgsPoint.y)
+    }
+
     static func cgsToAppKit(_ cgsFrame: CGRect) -> CGRect {
         // CGS uses top-left origin with y growing down; AppKit uses
         // bottom-left with y growing up. The screen height for the flip is
@@ -431,6 +455,15 @@ enum OverlayGeometry {
     /// Outset 0 is the identity — today's pin-exactly behavior.
     static func panelFrame(target: CGRect, outset: CGFloat) -> CGRect {
         target.insetBy(dx: -outset, dy: -outset)
+    }
+
+    /// Panel frame of an explicit `size` (≥ the outset frame's) anchored
+    /// top-left, so the target keeps its (outset, outset) panel position
+    /// and any extra room hangs off the right and bottom. CGS top-left in
+    /// and out.
+    static func panelFrame(target: CGRect, outset: CGFloat, size: CGSize) -> CGRect {
+        CGRect(x: target.minX - outset, y: target.minY - outset,
+               width: size.width, height: size.height)
     }
 
     /// The {x,y,w,h,outset} object literal in PANEL coordinates — the one
@@ -474,6 +507,48 @@ struct LiveResizeDetector {
         lastSize = size
         guard now - lastChange < Self.quiet else { return false }
         return buttonDown()
+    }
+}
+
+// MARK: - Live-resize headroom (pure, testable)
+
+/// Panel size while the user live-resizes the target. Reshaping the panel
+/// makes WebKit re-lay out and redisplay on every resize tick, so during a
+/// resize the panel is rounded up with `room` to grow into, in `step`
+/// increments, and only reshaped when the target outgrows it; in between,
+/// resize ticks are window-server moves (or nothing). It is fitted exactly
+/// once the resize has paused for `settle`. The extra room hangs off the
+/// right and bottom — stacks position off `sd.target`, not the panel edge.
+struct OverlayHeadroom {
+    static let step: CGFloat = 128
+    static let room: CGFloat = 0.5
+    static let settle: Double = 0.25
+
+    private var lastResizeAt: Double = -.infinity
+
+    /// `content` is the exactly-fitted panel size (target plus outset),
+    /// `current` the panel's size now (nil when unknown or forced).
+    /// `limit` is the room from the panel's top-left to the desktop's right
+    /// and bottom edges, read only when growing: room past the desktop is
+    /// backing store nothing can ever draw into.
+    mutating func panelSize(content: CGSize, current: CGSize?, resizing: Bool, now: Double,
+                            limit: () -> CGSize? = { nil }) -> CGSize {
+        if resizing { lastResizeAt = now }
+        guard now - lastResizeAt < Self.settle else { return content }
+        if let cur = current, content.width <= cur.width, content.height <= cur.height {
+            return cur
+        }
+        var grown = CGSize(width: Self.roundUp(content.width * (1 + Self.room)),
+                           height: Self.roundUp(content.height * (1 + Self.room)))
+        if let cap = limit() {
+            grown.width = max(content.width, min(grown.width, cap.width))
+            grown.height = max(content.height, min(grown.height, cap.height))
+        }
+        return grown
+    }
+
+    private static func roundUp(_ v: CGFloat) -> CGFloat {
+        (v / step).rounded(.up) * step
     }
 }
 
