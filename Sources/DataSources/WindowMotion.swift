@@ -1,6 +1,7 @@
 import Foundation
 import CoreGraphics
 import ApplicationServices
+import AppKit
 
 // Window motion engine — daemon-side animated setFrame.
 //
@@ -9,13 +10,13 @@ import ApplicationServices
 //
 //   MotionMath    — easing curves + a critically-damped spring, pure math.
 //   MotionPlanner — pure scheduler: registrations in, per-tick AX writes out.
-//   WindowMotionEngine — the only impure part: subscribes the shared
-//                   CVDisplayLink clock while animations are live and issues
-//                   the actual AX writes.
+//   WindowMotionEngine — the only impure part: subscribes a display-link
+//                   clock per display while animations are live and hands
+//                   the AX writes to per-app writer queues.
 //
 // Why daemon-side at all (vs. the JS rAF loop windowscape shipped): every
-// animating window is evaluated inside ONE display-link tick on ONE clock,
-// so a multi-window tile pass moves in lockstep instead of staggering on
+// animating window on a display is evaluated inside ONE display-link tick on
+// ONE clock, so a multi-window tile pass moves in lockstep instead of staggering on
 // per-window RPC round-trips. hs.window:setFrame(rect, duration) is the
 // Hammerspoon precedent that sanctions the daemon owning this.
 //
@@ -90,6 +91,34 @@ enum MotionRouting {
                          reduceMotion: Bool, respectReduceMotion: Bool) -> Bool {
         guard duration > 0 || easing == .spring else { return false }
         return !(reduceMotion && respectReduceMotion)
+    }
+}
+
+/// Which display's refresh drives a window's animation: the display
+/// holding the target frame's center, else the one it overlaps most, else
+/// none (the caller falls back to the all-displays link).
+enum MotionClock {
+    static func display(for target: CGRect,
+                        displays: [(id: CGDirectDisplayID, bounds: CGRect)]) -> CGDirectDisplayID? {
+        let center = CGPoint(x: target.midX, y: target.midY)
+        if let hit = displays.first(where: { $0.bounds.contains(center) }) { return hit.id }
+        var best: (id: CGDirectDisplayID, area: CGFloat)?
+        for d in displays {
+            let i = d.bounds.intersection(target)
+            guard !i.isNull, i.width > 0, i.height > 0 else { continue }
+            let area = i.width * i.height
+            if best == nil || area > best!.area { best = (d.id, area) }
+        }
+        return best?.id
+    }
+
+    /// Active displays with their global top-left bounds (AX frame space).
+    static func activeDisplays() -> [(id: CGDirectDisplayID, bounds: CGRect)] {
+        var count: UInt32 = 0
+        guard CGGetActiveDisplayList(0, nil, &count) == .success, count > 0 else { return [] }
+        var ids = [CGDirectDisplayID](repeating: 0, count: Int(count))
+        guard CGGetActiveDisplayList(count, &ids, &count) == .success else { return [] }
+        return ids.prefix(Int(count)).map { (id: $0, bounds: CGDisplayBounds($0)) }
     }
 }
 
@@ -254,12 +283,19 @@ struct MotionPlanner {
 
     private var lastTickTime: Double = 0
 
-    mutating func tick(now: Double) -> (writes: [FrameWrite], finished: [Finished]) {
+    /// Registered windows, ascending.
+    var windowIDs: [CGWindowID] { active.keys.sorted() }
+
+    /// Advance the animations of `only` (every window when nil). A window
+    /// outside `only` is untouched, and its start time stays unassigned
+    /// until a tick covers it — windows ticked by the same clock still
+    /// start together.
+    mutating func tick(now: Double, only: Set<CGWindowID>? = nil) -> (writes: [FrameWrite], finished: [Finished]) {
         lastTickTime = now
         var writes: [FrameWrite] = []
         var finished: [Finished] = []
 
-        for windowID in active.keys.sorted() {
+        for windowID in active.keys.sorted() where only?.contains(windowID) ?? true {
             guard var reg = active[windowID] else { continue }
 
             let startTime: Double
@@ -619,7 +655,14 @@ final class WindowMotionEngine {
     private init() {}
 
     private var planner = MotionPlanner()
-    private var linkToken: Token?
+    // One display-link subscription per display with animating windows;
+    // key 0 is the all-displays link. Each window ticks on the clock of the
+    // display its target lands on, so a 120Hz panel and a 60Hz monitor each
+    // animate at their own rate, and windows on one display start together.
+    private static let sharedClock: CGDirectDisplayID = 0
+    private var clocks: [CGDirectDisplayID: Token] = [:]
+    private var clockOf: [CGWindowID: CGDirectDisplayID] = [:]
+    private var screenObserver: NSObjectProtocol?
     private var completions: [UInt64: (Bool) -> Void] = [:]
     // AX element resolved once per animation — WindowsByID.elementFor walks
     // the CGWindowList, far too expensive per tick. A stale element mid-
@@ -712,7 +755,9 @@ final class WindowMotionEngine {
         )
         if let old = result.superseded { resolve(old) }
         completions[result.key] = completion
-        ensureClock()
+        let clock = clockDisplay(for: to)
+        clockOf[windowID] = clock
+        ensureClock(clock)
     }
 
     /// An instant setFrame taking effect while an animation is in flight
@@ -758,19 +803,58 @@ final class WindowMotionEngine {
         return CGRect(origin: pos, size: size)
     }
 
-    private func ensureClock() {
-        guard linkToken == nil else { return }
-        linkToken = DisplayLinkObserver.shared.subscribe { [weak self] in self?.tick() }
+    /// The all-displays link on a single display (where it is the same
+    /// clock), per-display links otherwise.
+    private func clockDisplay(for target: CGRect) -> CGDirectDisplayID {
+        let displays = MotionClock.activeDisplays()
+        guard displays.count > 1 else { return Self.sharedClock }
+        return MotionClock.display(for: target, displays: displays) ?? Self.sharedClock
     }
 
-    private func tick() {
-        guard !planner.isEmpty else {
-            linkToken?.cancel()
-            linkToken = nil
-            writers = writers.filter { !$0.value.mailbox.isIdle }
+    private func ensureClock(_ display: CGDirectDisplayID) {
+        installScreenObserver()
+        guard clocks[display] == nil else { return }
+        let observer = display == Self.sharedClock
+            ? DisplayLinkObserver.shared : DisplayLinkObserver.forDisplay(display)
+        let token = observer.subscribe { [weak self] in self?.tick(display) }
+        guard observer.isActive || display == Self.sharedClock else {
+            // No link for that display (it just went away): the
+            // all-displays link takes its windows.
+            token.cancel()
+            moveAllToSharedClock(from: display)
             return
         }
-        let out = planner.tick(now: CFAbsoluteTimeGetCurrent())
+        clocks[display] = token
+    }
+
+    /// Displays changed: per-display links may be gone or rebound, so
+    /// every animating window finishes on the all-displays link.
+    private func installScreenObserver() {
+        guard screenObserver == nil else { return }
+        screenObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.didChangeScreenParametersNotification,
+            object: nil, queue: .main
+        ) { [weak self] _ in self?.moveAllToSharedClock(from: nil) }
+    }
+
+    private func moveAllToSharedClock(from display: CGDirectDisplayID?) {
+        var moved = false
+        for (wid, d) in clockOf where d != Self.sharedClock && (display == nil || d == display) {
+            clockOf[wid] = Self.sharedClock
+            moved = true
+        }
+        if moved { ensureClock(Self.sharedClock) }
+    }
+
+    private func tick(_ display: CGDirectDisplayID) {
+        for (wid, _) in clockOf where !planner.isAnimating(wid) { clockOf[wid] = nil }
+        let wids = Set(clockOf.filter { $0.value == display }.keys)
+        guard !wids.isEmpty else {
+            clocks.removeValue(forKey: display)?.cancel()
+            if clocks.isEmpty { writers = writers.filter { !$0.value.mailbox.isIdle } }
+            return
+        }
+        let out = planner.tick(now: CFAbsoluteTimeGetCurrent(), only: wids)
         var settles: [CGWindowID: MotionPlanner.Finished] = [:]
         for done in out.finished {
             if done.settled { settles[done.windowID] = done } else { resolve(done) }

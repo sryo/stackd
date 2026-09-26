@@ -324,8 +324,27 @@ struct HopGate {
 }
 
 final class DisplayLinkObserver: RefCountedObserver {
-    static let shared = DisplayLinkObserver()
-    private override init() { super.init() }
+    /// Link over all active displays, at the rate CoreVideo picks for them.
+    static let shared = DisplayLinkObserver(displayID: nil)
+
+    private static var perDisplay: [CGDirectDisplayID: DisplayLinkObserver] = [:]
+
+    /// A link bound to one display, ticking at that display's own refresh
+    /// rate. Main thread. Subscribers must check `isActive` after
+    /// subscribing: a display that went away can't install a link.
+    static func forDisplay(_ id: CGDirectDisplayID) -> DisplayLinkObserver {
+        if let o = perDisplay[id] { return o }
+        let o = DisplayLinkObserver(displayID: id)
+        perDisplay[id] = o
+        return o
+    }
+
+    private let displayID: CGDirectDisplayID?
+
+    private init(displayID: CGDirectDisplayID?) {
+        self.displayID = displayID
+        super.init()
+    }
 
     private var link: CVDisplayLink?
     private let lock = NSLock()
@@ -366,7 +385,8 @@ final class DisplayLinkObserver: RefCountedObserver {
 
     override func install() -> Token? {
         var newLink: CVDisplayLink?
-        let createStatus = CVDisplayLinkCreateWithActiveCGDisplays(&newLink)
+        let createStatus = displayID.map { CVDisplayLinkCreateWithCGDisplay($0, &newLink) }
+            ?? CVDisplayLinkCreateWithActiveCGDisplays(&newLink)
         guard createStatus == kCVReturnSuccess, let link = newLink else { return nil }
 
         let retained = Unmanaged.passRetained(self)

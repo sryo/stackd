@@ -288,4 +288,51 @@ func registerMotionPlannerTests() {
         try expect(MotionRouting.animates(duration: 0.25, easing: nil, reduceMotion: true, respectReduceMotion: false))
         try expect(MotionRouting.animates(duration: 0, easing: .spring, reduceMotion: true, respectReduceMotion: false))
     }
+
+    test("a tick scoped to some windows leaves the others unstarted") {
+        var p = MotionPlanner()
+        _ = p.register(windowID: 1, from: rect(0, 0, 100, 100), to: rect(1000, 0, 100, 100),
+                       duration: 1.0, easing: .linear)
+        _ = p.register(windowID: 2, from: rect(0, 500, 100, 100), to: rect(1000, 500, 100, 100),
+                       duration: 1.0, easing: .linear)
+        _ = p.tick(now: 0, only: [1])
+        let a = p.tick(now: 0.5, only: [1])
+        try expectEqual(a.writes.map { $0.windowID }, [1])
+        // Window 2's clock starts on the first tick that covers it.
+        _ = p.tick(now: 0.5, only: [2])
+        let b = p.tick(now: 1.0, only: [2])
+        try expectEqual(b.writes.first?.frame.origin.x, 500, "window 2 started at 0.5, not 0")
+    }
+
+    test("windows sharing a scoped clock still start in lockstep") {
+        var p = MotionPlanner()
+        for wid in [CGWindowID(1), 2, 3] {
+            _ = p.register(windowID: wid, from: rect(0, Double(wid) * 200, 100, 100),
+                           to: rect(1000, Double(wid) * 200, 100, 100), duration: 1.0, easing: .linear)
+        }
+        _ = p.tick(now: 3, only: [1, 2])
+        let mid = p.tick(now: 3.25, only: [1, 2])
+        try expectEqual(Set(mid.writes.map { $0.frame.origin.x }), [250])
+        try expectEqual(Set(mid.writes.map { $0.windowID }), [1, 2])
+        try expectEqual(p.windowIDs, [1, 2, 3])
+    }
+
+    test("MotionClock: a window ticks on the display holding its target's center") {
+        let displays: [(id: CGDirectDisplayID, bounds: CGRect)] = [
+            (id: 1, bounds: rect(0, 0, 1440, 900)),
+            (id: 2, bounds: rect(1440, 0, 2560, 1440)),
+        ]
+        try expectEqual(MotionClock.display(for: rect(100, 100, 400, 300), displays: displays), 1)
+        try expectEqual(MotionClock.display(for: rect(1300, 100, 800, 300), displays: displays), 2,
+                        "straddling: the center decides")
+    }
+
+    test("MotionClock: a target off every display takes the one it overlaps most, else none") {
+        let displays: [(id: CGDirectDisplayID, bounds: CGRect)] = [
+            (id: 1, bounds: rect(0, 0, 1440, 900)),
+            (id: 2, bounds: rect(1440, 0, 2560, 1440)),
+        ]
+        try expectEqual(MotionClock.display(for: rect(1400, 1300, 400, 400), displays: displays), 2)
+        try expectEqual(MotionClock.display(for: rect(-5000, -5000, 100, 100), displays: displays), nil)
+    }
 }
