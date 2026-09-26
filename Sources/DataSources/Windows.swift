@@ -369,8 +369,12 @@ enum Windows {
 //
 // AX probe results for each (pid, CGWindowID) cached with a TTL. Used to
 // enrich Windows.all() without paying an AX round-trip per window per push.
-// First call for an id pays the elementFor + subrole lookup; subsequent
-// reads within the TTL hit the cache. Entries are dropped per window on
+// The elementFor + subrole lookup never runs on the caller's thread: a
+// missing or expired verdict starts one read on the app's AXAppQueues
+// queue (AddressabilityReads) and the caller gets the last known verdict,
+// or the pending one for an unseen window. The read's result lands on main,
+// and a change in what Windows.all() reports re-pumps sd.windows.all.
+// Reads within the TTL hit the cache. Entries are dropped per window on
 // window-destroyed events and per pid when the app terminates.
 //
 // Why on the daemon side: lets every stack consume sd.windows.all without
@@ -418,9 +422,9 @@ enum WindowAddressabilityCache {
     // Failed probes are re-checked quickly at first so an app that JUST
     // opened a window gets re-evaluated within a beat, then less and less
     // often: a window that keeps failing is one AX does not vend (helper
-    // chrome, offscreen surfaces), and Windows.all() runs on main for every
+    // chrome, offscreen surfaces), and Windows.all() runs for every
     // create/destroy/focus push — re-probing ~100 of them at a flat 0.5s
-    // cost 30–100ms of main per window event. Windows that do become
+    // keeps every app's AX queue busy for nothing. Windows that do become
     // addressable later are found without the timer: the AX create observer
     // and CGS 1325 re-finds confirm() them, and a space change calls
     // retryFailures().
@@ -449,86 +453,94 @@ enum WindowAddressabilityCache {
         return (now - p.ts) < failTtl(after: p.failures, windowID: windowID)
     }
 
+    /// A cached verdict (or the pending one) plus whether a live AX read is
+    /// due. Never touches AX.
+    struct Lookup {
+        let probe: Probe
+        let needsRead: Bool
+    }
+
+    /// One finished AX read of a window whose element resolved. A read whose
+    /// element did not resolve is recorded as `nil`.
+    struct Reading: Equatable {
+        let isStandard: Bool
+        let isMinimized: Bool
+        var subroleError: Int32 = 0
+    }
+
+    /// What Windows.all() reports for a window with no verdict yet: kept as
+    /// a candidate (addressable) but not standard, so a tiler never takes a
+    /// sheet or dialog whose subrole is still unknown.
+    static func pending(now: TimeInterval) -> Probe {
+        Probe(addressable: true, isStandard: false, isMinimized: false, ts: now)
+    }
+
+    /// Never blocks: returns the usable cached verdict, or — when it is
+    /// missing or expired — the last known verdict (pending for an unseen
+    /// window) and starts one off-main AX read on the app's AXAppQueues
+    /// queue. When that read changes what Windows.all() reports, the
+    /// windows channel is re-pumped (see `readResolved`).
     static func probe(pid: pid_t, windowID: CGWindowID,
                       now: TimeInterval = Date().timeIntervalSince1970) -> Probe {
-        let key = "\(pid)|\(windowID)"
-        lock.lock()
-        if let p = cache[key], cacheVerdictUsable(p, now: now, windowID: windowID) {
-            lock.unlock()
-            return p
+        let l = lookup(pid: pid, windowID: windowID, now: now)
+        if l.needsRead { requestRead(Key(pid: pid, windowID: windowID)) }
+        return l.probe
+    }
+
+    static func lookup(pid: pid_t, windowID: CGWindowID, now: TimeInterval) -> Lookup {
+        let key = cacheKey(pid, windowID)
+        lock.lock(); defer { lock.unlock() }
+        guard let p = cache[key] else {
+            // Grace runs from first sight: the read that settles this
+            // window may land well after the pass that first listed it.
+            if firstSeenAt[key] == nil { firstSeenAt[key] = now }
+            return Lookup(probe: pending(now: now), needsRead: true)
         }
-        liveProbes += 1
-        lock.unlock()
-        // Probe outside the lock — AX calls hop to main thread internally.
-        var el: AXUIElement?
-        var isStd = false
-        var isMin = false
-        var subroleErr: AXError = .success
-        for attempt in 0..<2 {
-            el = WindowsByID.elementFor(windowID: windowID, pid: pid)
-            isStd = false
-            isMin = false
-            guard let e = el else { break }
-            var minRef: AnyObject?
-            if AXUIElementCopyAttributeValue(e, kAXMinimizedAttribute as CFString, &minRef) == .success,
-               let b = minRef as? Bool {
-                isMin = b
-            }
-            var subroleRef: AnyObject?
-            subroleErr = AXUIElementCopyAttributeValue(e, kAXSubroleAttribute as CFString, &subroleRef)
-            isStd = standardVerdict(subrole: subroleRef as? String, isMinimized: isMin)
-            guard StaleElementRetry.shouldReResolve(readError: subroleErr, attempt: attempt) else { break }
-            // The cached element may be dead while the window lives on
-            // (sleep/wake): drop it so elementFor re-walks kAXWindows.
-            WindowsByID.invalidateCache(pid: pid, windowID: windowID)
-        }
-        let addressable = (el != nil)
+        return Lookup(probe: p, needsRead: !cacheVerdictUsable(p, now: now, windowID: windowID))
+    }
+
+    /// Folds one finished read into the cache. `changed` is whether the
+    /// verdict Windows.all() reports for the window (addressable, standard,
+    /// minimized) differs from what it reported while the read was pending.
+    @discardableResult
+    static func record(pid: pid_t, windowID: CGWindowID, reading: Reading?,
+                       now: TimeInterval) -> (probe: Probe, changed: Bool) {
+        let key = cacheKey(pid, windowID)
         lock.lock()
         let existing = cache[key]
+        let before = existing ?? pending(now: now)
         let probe: Probe
         let shouldCache: Bool
-        if addressable {
+        if let r = reading {
             // Success — cache true permanently.
-            probe = Probe(addressable: true, isStandard: isStd, isMinimized: isMin, ts: now)
+            probe = Probe(addressable: true, isStandard: r.isStandard, isMinimized: r.isMinimized, ts: now)
             shouldCache = true
         } else if let e = existing, e.addressable {
             // Sticky-success: established-true never flips to false on a
-            // transient miss. Keep the whole cached verdict — this branch
-            // means the probe FAILED (el is nil), so isMin carries no real
-            // reading; live minimize flips arrive via setMinimized().
+            // transient miss. Keep the whole cached verdict — the read
+            // FAILED, so it carries no minimized reading; live minimize
+            // flips arrive via setMinimized().
             // ts=now also paces an expired negative-isStandard entry: each
             // failed re-probe buys one more nonStandardTtl of patience
-            // instead of hammering AX on every Windows.all() pass.
+            // instead of re-reading AX on every Windows.all() pass.
             probe = Probe(addressable: true, isStandard: e.isStandard, isMinimized: e.isMinimized, ts: now)
             shouldCache = true
         } else {
-            // No success yet. Time-based optimism: report addressable: true
-            // for the first optimisticGraceMs after we first saw the id. AX
-            // is slammed at boot — 5+ misses can happen in milliseconds,
-            // count-based thresholds get blown through. Time-based gives
-            // the app a fair shot at responding before we mark it dead.
-            //
-            // isStandard stays FALSE during grace — we can't risk tiling
-            // a sheet / dialog / save-panel that happens to be born when
-            // AX is busy. The tiler's first-entry filter checks isStandard,
-            // so unknown-subrole windows stay out of rotation until a real
-            // AX probe confirms AXStandardWindow. Worst-case UX: a new
-            // standard window pops in non-tiled for a frame or two before
-            // the next probe lands and the next push includes it.
+            // No success yet. Time-based optimism: report the pending
+            // verdict (addressable: true, isStandard: false) for the first
+            // optimisticGraceMs after we first saw the id. AX is slammed at
+            // boot — 5+ misses can happen in milliseconds, count-based
+            // thresholds get blown through. Time-based gives the app a fair
+            // shot at responding before we mark it dead.
             let firstSeen = firstSeenAt[key] ?? now
             if firstSeenAt[key] == nil { firstSeenAt[key] = now }
-            let inGrace = (now - firstSeen) < optimisticGraceMs
-            if inGrace {
-                // CRUCIAL: do NOT cache the grace-optimism result. The
-                // sticky-success branch above ("if p.addressable") would
-                // then lock in `addressable: true, isStandard: false` for
-                // the window's entire lifetime — meaning every window the
-                // daemon sees during an AX-stress burst (boot, full rebuild
-                // restart, spotlight indexing burst, etc.) would never
-                // re-enter tile rotation. By NOT caching, the next call
-                // re-probes; if AX has caught up we hit the success branch
-                // and cache the real verdict.
-                probe = Probe(addressable: true, isStandard: false, isMinimized: false, ts: now)
+            if (now - firstSeen) < optimisticGraceMs {
+                // NOT cached: the sticky-success branch above would lock in
+                // `addressable: true, isStandard: false` for the window's
+                // lifetime, and every window seen during an AX-stress burst
+                // (boot, restart, spotlight indexing) would never re-enter
+                // tile rotation. Uncached, the next pass reads again.
+                probe = pending(now: now)
                 shouldCache = false
             } else {
                 probe = Probe(addressable: false, isStandard: false, isMinimized: false, ts: now,
@@ -538,27 +550,127 @@ enum WindowAddressabilityCache {
         }
         if shouldCache { cache[key] = probe }
         lock.unlock()
+        let changed = before.addressable != probe.addressable
+            || before.isStandard != probe.isStandard
+            || before.isMinimized != probe.isMinimized
         // Verdict flips are rare and are what silently drops a window from
         // every tiler — say why.
         if shouldCache, let old = existing,
            old.addressable != probe.addressable || old.isStandard != probe.isStandard {
-            log("windows: wid=\(windowID) pid=\(pid) addressable \(old.addressable)→\(probe.addressable) standard \(old.isStandard)→\(probe.isStandard) (element \(el == nil ? "unresolved" : "ok"), subrole read \(subroleErr.rawValue))")
+            log("windows: wid=\(windowID) pid=\(pid) addressable \(old.addressable)→\(probe.addressable) standard \(old.isStandard)→\(probe.isStandard) (element \(reading == nil ? "unresolved" : "ok"), subrole read \(reading?.subroleError ?? 0))")
         } else if shouldCache, existing == nil, !probe.addressable {
             // Common for layer-0 windows AX doesn't vend (helpers, offscreen
             // chrome) — debug-only; the flips above are the signal.
             WindowDebug.log("windows: wid=\(windowID) pid=\(pid) unaddressable after grace (element unresolved)")
         }
-        return probe
+        return (probe, changed)
+    }
+
+    /// The AX half of a probe: resolve the element and read its minimized
+    /// flag and subrole. Blocks for up to the AX messaging timeout per call
+    /// when the app is stuck, so it runs only on the app's AXAppQueues queue.
+    static func readAX(pid: pid_t, windowID: CGWindowID) -> Reading? {
+        for attempt in 0..<2 {
+            guard let e = WindowsByID.elementFor(windowID: windowID, pid: pid) else { return nil }
+            var isMin = false
+            var minRef: AnyObject?
+            if AXUIElementCopyAttributeValue(e, kAXMinimizedAttribute as CFString, &minRef) == .success,
+               let b = minRef as? Bool {
+                isMin = b
+            }
+            var subroleRef: AnyObject?
+            let subroleErr = AXUIElementCopyAttributeValue(e, kAXSubroleAttribute as CFString, &subroleRef)
+            let reading = Reading(isStandard: standardVerdict(subrole: subroleRef as? String, isMinimized: isMin),
+                                  isMinimized: isMin, subroleError: subroleErr.rawValue)
+            guard StaleElementRetry.shouldReResolve(readError: subroleErr, attempt: attempt) else { return reading }
+            // The cached element may be dead while the window lives on
+            // (sleep/wake): drop it so elementFor re-walks kAXWindows.
+            WindowsByID.invalidateCache(pid: pid, windowID: windowID)
+        }
+        return nil
+    }
+
+    struct Key: Hashable {
+        let pid: pid_t
+        let windowID: CGWindowID
+    }
+    /// Main thread only.
+    private static var reads = AddressabilityReads<Key>()
+    private static var pumpScheduled = false
+
+    private static func cacheKey(_ pid: pid_t, _ windowID: CGWindowID) -> String { "\(pid)|\(windowID)" }
+
+    private static func onMain(_ body: @escaping () -> Void) {
+        if Thread.isMainThread { body() } else { DispatchQueue.main.async(execute: body) }
+    }
+
+    private static func requestRead(_ key: Key) {
+        onMain {
+            guard let generation = reads.request(key) else { return }
+            startRead(key, generation: generation)
+        }
+    }
+
+    /// Main thread.
+    private static func startRead(_ key: Key, generation: UInt64) {
+        lock.lock(); liveProbes += 1; lock.unlock()
+        AXAppQueues.queue(for: key.pid).async {
+            let reading = readAX(pid: key.pid, windowID: key.windowID)
+            let readAt = Date().timeIntervalSince1970
+            DispatchQueue.main.async {
+                readResolved(key, generation: generation, reading: reading, readAt: readAt)
+            }
+        }
+    }
+
+    /// Main thread. A verdict change re-pumps sd.windows.all once per main
+    /// turn, however many reads land in it: consumers that filtered a
+    /// pending window out (tilers checking isStandard) see it as soon as
+    /// its read confirms it, not on the next unrelated window event.
+    private static func readResolved(_ key: Key, generation: UInt64, reading: Reading?, readAt: TimeInterval) {
+        switch reads.resolved(key, generation: generation) {
+        case .discard:
+            return
+        case .rerun(let next):
+            startRead(key, generation: next)
+            return
+        case .apply:
+            break
+        }
+        guard record(pid: key.pid, windowID: key.windowID, reading: reading, now: readAt).changed,
+              !pumpScheduled else { return }
+        pumpScheduled = true
+        DispatchQueue.main.async {
+            pumpScheduled = false
+            AppDelegate.shared?.host?.pumpWindowsListForAllStacks()
+        }
     }
 
     /// Let every unaddressable verdict be re-probed on its next read, keeping
     /// its failure count: one fresh look (after a space change, when AX may
     /// now vend a window it did not), then the same backoff if it still fails.
+    /// A read already in flight for such a window may have been taken before
+    /// the change, so it is re-run rather than trusted.
     static func retryFailures() {
-        lock.lock(); defer { lock.unlock() }
+        lock.lock()
         for (key, p) in cache where !p.addressable {
             cache[key] = Probe(addressable: false, isStandard: false, isMinimized: false,
                                ts: -.infinity, failures: p.failures)
+        }
+        lock.unlock()
+        restaleReads { !$0.addressable }
+    }
+
+    /// Marks in-flight reads stale for windows with no verdict yet or whose
+    /// verdict matches `affected`.
+    private static func restaleReads(_ affected: @escaping (Probe) -> Bool) {
+        onMain {
+            lock.lock()
+            let snapshot = cache
+            lock.unlock()
+            reads.markStale { key in
+                snapshot[cacheKey(key.pid, key.windowID)].map(affected) ?? true
+            }
         }
     }
 
@@ -573,16 +685,21 @@ enum WindowAddressabilityCache {
     /// Forget every verdict except established positives, so windows get
     /// re-probed with fresh elements (after wake).
     static func dropNonPositive() {
-        lock.lock(); defer { lock.unlock() }
+        lock.lock()
         cache = cache.filter { $0.value.addressable && $0.value.isStandard }
         firstSeenAt.removeAll()
+        lock.unlock()
+        restaleReads { _ in true }
     }
 
+    /// Also forgets in-flight reads for the pid: their results are dropped.
     static func invalidate(pid: pid_t) {
         let prefix = "\(pid)|"
-        lock.lock(); defer { lock.unlock() }
+        lock.lock()
         cache = cache.filter { !$0.key.hasPrefix(prefix) }
         firstSeenAt = firstSeenAt.filter { !$0.key.hasPrefix(prefix) }
+        lock.unlock()
+        onMain { reads.purge { $0.pid == pid } }
     }
 
     /// Single-window invalidation for the AX window-destroyed path. Document
@@ -595,10 +712,12 @@ enum WindowAddressabilityCache {
     /// A falsely-reported destroy self-heals — the next probe re-establishes
     /// sticky success.
     static func invalidate(pid: pid_t, windowID: CGWindowID) {
-        let key = "\(pid)|\(windowID)"
-        lock.lock(); defer { lock.unlock() }
+        let key = cacheKey(pid, windowID)
+        lock.lock()
         cache.removeValue(forKey: key)
         firstSeenAt.removeValue(forKey: key)
+        lock.unlock()
+        onMain { reads.purge { $0 == Key(pid: pid, windowID: windowID) } }
     }
 
     /// AX-confirmed verdict, bypassing the probe machinery. WindowsAXObserver
@@ -3516,6 +3635,60 @@ struct FrameBangReads<Source> {
 
 extension FrameBangReads.Start: Equatable where Source: Equatable {}
 extension FrameBangReads.Resolution: Equatable where Source: Equatable {}
+
+/// Off-main read schedule for WindowAddressabilityCache probes, one AX read
+/// per window at a time on the app's AXAppQueues queue.
+///
+/// A request while a read is in flight starts nothing: the running read
+/// answers it, so a hung app accrues one pending read per window, not one
+/// per Windows.all() pass. Each read carries a generation. `purge` (window
+/// destroyed, app quit) forgets the key, so a late result resolves to
+/// .discard and can't free a read started after the purge. `markStale`
+/// (space change, wake) keeps the slot but turns the eventual result into
+/// .rerun: a reading taken before the change is not trusted, and one fresh
+/// read replaces it. Pure; the caller owns queues and main hops.
+struct AddressabilityReads<Key: Hashable> {
+    enum Resolution: Equatable {
+        case apply
+        /// Drop the result and start this generation's read instead.
+        case rerun(UInt64)
+        case discard
+    }
+
+    private struct Slot {
+        var generation: UInt64
+        var stale: Bool
+    }
+    private var inFlight: [Key: Slot] = [:]
+    private var nextGeneration: UInt64 = 0
+
+    /// The generation of a read to start now, or nil when one is in flight.
+    mutating func request(_ key: Key) -> UInt64? {
+        guard inFlight[key] == nil else { return nil }
+        return start(key)
+    }
+
+    mutating func resolved(_ key: Key, generation: UInt64) -> Resolution {
+        guard let slot = inFlight[key], slot.generation == generation else { return .discard }
+        if slot.stale { return .rerun(start(key)) }
+        inFlight[key] = nil
+        return .apply
+    }
+
+    mutating func markStale(where matches: (Key) -> Bool) {
+        for key in inFlight.keys where matches(key) { inFlight[key]?.stale = true }
+    }
+
+    mutating func purge(where matches: (Key) -> Bool) {
+        inFlight = inFlight.filter { !matches($0.key) }
+    }
+
+    private mutating func start(_ key: Key) -> UInt64 {
+        nextGeneration += 1
+        inFlight[key] = Slot(generation: nextGeneration, stale: false)
+        return nextGeneration
+    }
+}
 
 // Per-app `AXObserver` (one per pid) listens for
 // `kAXWindowCreatedNotification` on the application AXUIElement. On every

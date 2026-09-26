@@ -195,14 +195,20 @@ func registerWindowsTests() {
         try expectEqual(r["refused"] as? Bool, false)
     }
 
-    // MARK: - WindowAddressabilityCache.probe — grace + sticky-success contract
+    // MARK: - WindowAddressabilityCache — grace + sticky-success contract
     //
     // Each test uses a unique fake (pid, windowID) so they don't collide with
-    // each other or with any real window. `AXUIElementCreateApplication(pid)`
-    // for a pid that owns no windows returns an empty AXWindows array, so
-    // `WindowsByID.elementFor(pid:)` returns nil, driving the probe down its
-    // unaddressable branches deterministically. `invalidate(pid:)` resets
-    // both the result cache and the firstSeenAt map per test.
+    // each other or with any real window. The AX read runs off-main, so the
+    // tests drive its two halves directly: `verdictNow` is what a caller of
+    // probe() gets back (lookup), `readFails` is a finished read whose
+    // element did not resolve (record with a nil reading). `invalidate(pid:)`
+    // resets both the result cache and the firstSeenAt map per test.
+    func verdictNow(pid: pid_t, windowID: CGWindowID, now: TimeInterval) -> WindowAddressabilityCache.Probe {
+        WindowAddressabilityCache.lookup(pid: pid, windowID: windowID, now: now).probe
+    }
+    func readFails(pid: pid_t, windowID: CGWindowID, now: TimeInterval) -> WindowAddressabilityCache.Probe {
+        WindowAddressabilityCache.record(pid: pid, windowID: windowID, reading: nil, now: now).probe
+    }
 
     test("WindowAddressabilityCache.probe — grace optimism reports addressable:true, isStandard:false") {
         // Brand-new ids get the optimistic `addressable: true` (so they stay
@@ -211,7 +217,7 @@ func registerWindowsTests() {
         // while AX is slow is never tiled.
         let pid: pid_t = 7_777_701
         defer { WindowAddressabilityCache.invalidate(pid: pid) }
-        let p = WindowAddressabilityCache.probe(pid: pid, windowID: 7_777_701, now: 1000.0)
+        let p = verdictNow(pid: pid, windowID: 7_777_701, now: 1000.0)
         try expectEqual(p.addressable, true)
         try expectEqual(p.isStandard, false)
         try expectEqual(p.isMinimized, false)
@@ -224,12 +230,12 @@ func registerWindowsTests() {
         // second call must re-probe and reach `addressable: false`.
         let pid: pid_t = 7_777_702
         defer { WindowAddressabilityCache.invalidate(pid: pid) }
-        let inGrace = WindowAddressabilityCache.probe(pid: pid, windowID: 7_777_702, now: 1000.0)
+        let inGrace = readFails(pid: pid, windowID: 7_777_702, now: 1000.0)
         try expectEqual(inGrace.addressable, true)
         try expectEqual(inGrace.isStandard, false)
         // 6.0 seconds later — past the 5.0s optimisticGraceMs window. A
         // poisoned cache would still return the grace result here.
-        let pastGrace = WindowAddressabilityCache.probe(pid: pid, windowID: 7_777_702, now: 1006.0)
+        let pastGrace = readFails(pid: pid, windowID: 7_777_702, now: 1006.0)
         try expectEqual(pastGrace.addressable, false,
                         "grace optimism leaked past graceMs — cache is being poisoned")
         try expectEqual(pastGrace.isStandard, false)
@@ -244,11 +250,11 @@ func registerWindowsTests() {
         let pid: pid_t = 7_777_703
         defer { WindowAddressabilityCache.invalidate(pid: pid) }
         // Seed firstSeenAt so we're past grace immediately.
-        _ = WindowAddressabilityCache.probe(pid: pid, windowID: 7_777_703, now: 1000.0)
-        let first = WindowAddressabilityCache.probe(pid: pid, windowID: 7_777_703, now: 1006.0)
+        _ = readFails(pid: pid, windowID: 7_777_703, now: 1000.0)
+        let first = readFails(pid: pid, windowID: 7_777_703, now: 1006.0)
         try expectEqual(first.addressable, false)
         // Within failTtl (< 0.5s) — same Probe instance, ts unchanged.
-        let cached = WindowAddressabilityCache.probe(pid: pid, windowID: 7_777_703, now: 1006.1)
+        let cached = verdictNow(pid: pid, windowID: 7_777_703, now: 1006.1)
         try expectEqual(cached.addressable, false)
         try expectEqual(cached.ts, first.ts,
                         "within failTtl, probe must return cached entry (same ts)")
@@ -300,13 +306,13 @@ func registerWindowsTests() {
         let pid: pid_t = 7_777_720
         let wid: CGWindowID = 7_777_720
         defer { WindowAddressabilityCache.invalidate(pid: pid) }
-        _ = WindowAddressabilityCache.probe(pid: pid, windowID: wid, now: 1000.0)   // grace, uncached
-        let f1 = WindowAddressabilityCache.probe(pid: pid, windowID: wid, now: 1006.0)
+        _ = readFails(pid: pid, windowID: wid, now: 1000.0)   // grace, uncached
+        let f1 = readFails(pid: pid, windowID: wid, now: 1006.0)
         try expectEqual(f1.failures, 1)
-        let f2 = WindowAddressabilityCache.probe(pid: pid, windowID: wid, now: 1006.0 + WindowAddressabilityCache.failTtl)
+        let f2 = readFails(pid: pid, windowID: wid, now: 1006.0 + WindowAddressabilityCache.failTtl)
         try expectEqual(f2.failures, 2)
         // Inside the doubled gate: the cached verdict, not a new probe.
-        let held = WindowAddressabilityCache.probe(pid: pid, windowID: wid,
+        let held = verdictNow(pid: pid, windowID: wid,
                                                    now: f2.ts + 2 * WindowAddressabilityCache.failTtl - 0.01)
         try expectEqual(held.ts, f2.ts)
         try expectEqual(held.failures, 2)
@@ -319,12 +325,14 @@ func registerWindowsTests() {
         let pid: pid_t = 7_777_721
         let wid: CGWindowID = 7_777_721
         defer { WindowAddressabilityCache.invalidate(pid: pid) }
-        _ = WindowAddressabilityCache.probe(pid: pid, windowID: wid, now: 1000.0)
-        _ = WindowAddressabilityCache.probe(pid: pid, windowID: wid, now: 1006.0)
-        let f2 = WindowAddressabilityCache.probe(pid: pid, windowID: wid, now: 1007.0)
+        _ = readFails(pid: pid, windowID: wid, now: 1000.0)
+        _ = readFails(pid: pid, windowID: wid, now: 1006.0)
+        let f2 = readFails(pid: pid, windowID: wid, now: 1007.0)
+        try expectEqual(WindowAddressabilityCache.lookup(pid: pid, windowID: wid, now: 1007.1).needsRead, false)
         WindowAddressabilityCache.retryFailures()
-        let again = WindowAddressabilityCache.probe(pid: pid, windowID: wid, now: 1007.1)
-        try expect(again.ts == 1007.1, "retryFailures must force a live re-probe")
+        try expect(WindowAddressabilityCache.lookup(pid: pid, windowID: wid, now: 1007.1).needsRead,
+                   "retryFailures must force a live re-probe")
+        let again = readFails(pid: pid, windowID: wid, now: 1007.1)
         try expectEqual(again.failures, f2.failures + 1)
     }
 
@@ -350,13 +358,13 @@ func registerWindowsTests() {
         defer { WindowAddressabilityCache.invalidate(pid: pid) }
         WindowAddressabilityCache.confirm(pid: pid, windowID: 7_777_704,
                                           isStandard: true, isMinimized: false, now: 1000.0)
-        let p = WindowAddressabilityCache.probe(pid: pid, windowID: 7_777_704, now: 1000.1)
+        let p = verdictNow(pid: pid, windowID: 7_777_704, now: 1000.1)
         try expectEqual(p.addressable, true)
         try expectEqual(p.isStandard, true,
             "AX-confirmed standard verdict must win over grace's isStandard:false")
         // Far past the 5s grace — a probe-derived entry would have had to
         // re-probe (and fail, fake pid); the confirmed entry must stick.
-        let late = WindowAddressabilityCache.probe(pid: pid, windowID: 7_777_704, now: 1100.0)
+        let late = verdictNow(pid: pid, windowID: 7_777_704, now: 1100.0)
         try expectEqual(late.addressable, true, "confirmed verdict must be sticky, not grace-scoped")
         try expectEqual(late.isStandard, true)
     }
@@ -370,11 +378,11 @@ func registerWindowsTests() {
         WindowAddressabilityCache.confirm(pid: pid, windowID: 7_777_705,
                                           isStandard: true, isMinimized: false, now: 1000.0)
         WindowAddressabilityCache.setMinimized(pid: pid, windowID: 7_777_705, true)
-        let minimized = WindowAddressabilityCache.probe(pid: pid, windowID: 7_777_705, now: 1001.1)
+        let minimized = verdictNow(pid: pid, windowID: 7_777_705, now: 1001.1)
         try expectEqual(minimized.isMinimized, true)
         try expectEqual(minimized.isStandard, true, "setMinimized must not disturb isStandard")
         WindowAddressabilityCache.setMinimized(pid: pid, windowID: 7_777_705, false)
-        let restored = WindowAddressabilityCache.probe(pid: pid, windowID: 7_777_705, now: 1002.1)
+        let restored = verdictNow(pid: pid, windowID: 7_777_705, now: 1002.1)
         try expectEqual(restored.isMinimized, false)
         try expectEqual(restored.addressable, true)
     }
@@ -389,7 +397,7 @@ func registerWindowsTests() {
         WindowAddressabilityCache.setMinimized(pid: pid, windowID: 7_777_706, true)
         // Probe goes down the normal (unseeded) path: fake pid → grace
         // optimism with isStandard false, NOT a synthesized minimized entry.
-        let p = WindowAddressabilityCache.probe(pid: pid, windowID: 7_777_706, now: 1000.1)
+        let p = verdictNow(pid: pid, windowID: 7_777_706, now: 1000.1)
         try expectEqual(p.isMinimized, false,
             "setMinimized on an unknown key must not fabricate cache state")
         try expectEqual(p.isStandard, false)
@@ -408,11 +416,11 @@ func registerWindowsTests() {
         WindowAddressabilityCache.invalidate(pid: pid, windowID: 1)
         // wid 1: no cache entry left → fake pid probes go down the unseeded
         // path (grace optimism: addressable true but isStandard FALSE).
-        let ghost = WindowAddressabilityCache.probe(pid: pid, windowID: 1, now: 1000.1)
+        let ghost = verdictNow(pid: pid, windowID: 1, now: 1000.1)
         try expectEqual(ghost.isStandard, false,
                         "invalidated window must lose its sticky isStandard verdict")
         // wid 2: untouched sticky success survives.
-        let sibling = WindowAddressabilityCache.probe(pid: pid, windowID: 2, now: 1000.1)
+        let sibling = verdictNow(pid: pid, windowID: 2, now: 1000.1)
         try expectEqual(sibling.isStandard, true, "sibling window's verdict must survive")
     }
 
@@ -458,21 +466,23 @@ func registerWindowsTests() {
         WindowAddressabilityCache.confirm(pid: pid, windowID: 7_777_708,
                                           isStandard: false, isMinimized: false, now: 1000.0)
         // Within TTL: cached entry returned untouched (same ts).
-        let cached = WindowAddressabilityCache.probe(pid: pid, windowID: 7_777_708, now: 1001.0)
+        let cached = verdictNow(pid: pid, windowID: 7_777_708, now: 1001.0)
         try expectEqual(cached.isStandard, false)
         try expectEqual(cached.ts, 1000.0,
                         "within nonStandardTtl the cached entry must be returned as-is")
         // Past TTL: a live re-probe must happen. AX fails for the fake pid,
         // so the sticky-preserve branch keeps the verdict but stamps ts=now
         // — the observable proof a re-probe was attempted.
-        let reprobed = WindowAddressabilityCache.probe(pid: pid, windowID: 7_777_708, now: 1004.0)
+        try expect(WindowAddressabilityCache.lookup(pid: pid, windowID: 7_777_708, now: 1004.0).needsRead,
+                   "past nonStandardTtl the verdict must be re-read")
+        let reprobed = readFails(pid: pid, windowID: 7_777_708, now: 1004.0)
         try expectEqual(reprobed.addressable, true)
         try expectEqual(reprobed.isStandard, false)
         try expectEqual(reprobed.ts, 1004.0,
                         "past nonStandardTtl the probe must re-read AX (sticky-preserve stamps ts)")
         // One-TTL-per-failure pacing: the failed re-probe buys one more TTL
         // of patience — not a permanent verdict, not a hot loop.
-        let paced = WindowAddressabilityCache.probe(pid: pid, windowID: 7_777_708, now: 1005.0)
+        let paced = verdictNow(pid: pid, windowID: 7_777_708, now: 1005.0)
         try expectEqual(paced.ts, 1004.0,
                         "failed re-probe must hold for one more TTL, not re-probe every call")
     }
@@ -489,7 +499,9 @@ func registerWindowsTests() {
         // re-probe → sticky-preserve stamps ts=now. Had setMinimized
         // stamped ts=1002.5, the entry would still read as fresh and come
         // back untouched.
-        let p = WindowAddressabilityCache.probe(pid: pid, windowID: 7_777_709, now: 1004.0)
+        try expect(WindowAddressabilityCache.lookup(pid: pid, windowID: 7_777_709, now: 1004.0).needsRead,
+                   "setMinimized must not reset the negative-verdict re-probe clock")
+        let p = readFails(pid: pid, windowID: 7_777_709, now: 1004.0)
         try expectEqual(p.ts, 1004.0,
                         "setMinimized must not reset the negative-verdict re-probe clock")
         try expectEqual(p.isMinimized, true,
