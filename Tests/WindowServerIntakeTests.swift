@@ -104,3 +104,42 @@ func registerWindowServerIntakeTests() {
         try expectEqual(Set(names).count, names.count)
     }
 }
+
+// SpacesCoalescer: one space switch posts 1401, activeSpaceDidChange and
+// often 1325s for windows already on the new space. Every request made
+// while a drain runs (a queued spaces item, a 1325 handler) collapses into
+// one spaces pass at the end of that drain.
+func registerSpacesCoalescerTests() {
+    test("SpacesCoalescer: requests during a drain collapse into one pass at its end") {
+        var c = SpacesCoalescer()
+        c.begin()
+        try expect(!c.request())
+        try expect(!c.request())
+        try expect(!c.request())
+        try expect(c.end())
+    }
+
+    test("SpacesCoalescer: a drain with no request runs no pass") {
+        var c = SpacesCoalescer()
+        c.begin()
+        try expect(!c.end())
+    }
+
+    test("SpacesCoalescer: the pass is consumed, the next drain starts clean") {
+        var c = SpacesCoalescer()
+        c.begin(); _ = c.request(); _ = c.end()
+        c.begin()
+        try expect(!c.end())
+    }
+
+    test("SpacesCoalescer: a request outside a drain asks the caller to post one") {
+        var c = SpacesCoalescer()
+        try expect(c.request())
+    }
+
+    test("SpacesCoalescer: a request after the drain ended is posted, not folded into the old pass") {
+        var c = SpacesCoalescer()
+        c.begin(); _ = c.end()
+        try expect(c.request())
+    }
+}

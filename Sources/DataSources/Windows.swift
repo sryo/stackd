@@ -2161,7 +2161,7 @@ enum WindowEvents {
         let cgWid = CGWindowID(wid)
         if WindowsAXObserver.shared.pidFor(wid: cgWid) != nil
             || WindowsLifecycleObserver.shared.knownWindow(Int(wid)) {
-            SpacesObserver.shared.fire()
+            WindowServerIntake.requestSpaces()
             return
         }
         // Snap from CGWindowList; layer-0 standard candidates only. Title
@@ -2723,7 +2723,7 @@ enum Spaces {
     }
 
     private static func notifySpacesChanged() {
-        DispatchQueue.main.async { SpacesObserver.shared.fire() }
+        WindowServerIntake.post(.spaces)
     }
 }
 
@@ -2768,10 +2768,13 @@ final class SpacesObserver: RefCountedObserver {
 
     override func install() -> Token {
         // Screen reconfig can add/remove displays, which changes the keys —
-        // observe alongside activeSpaceDidChange.
+        // observe alongside activeSpaceDidChange. Both go through the
+        // intake so a switch's 1401 + activeSpaceDidChange + 1325s cost
+        // one spaces pass per drain.
+        let post: (Notification) -> Void = { _ in WindowServerIntake.post(.spaces) }
         let ncToken = installNotifications([
-            (NSWorkspace.shared.notificationCenter, NSWorkspace.activeSpaceDidChangeNotification),
-            (NotificationCenter.default, NSApplication.didChangeScreenParametersNotification)
+            (NSWorkspace.shared.notificationCenter, NSWorkspace.activeSpaceDidChangeNotification, post),
+            (NotificationCenter.default, NSApplication.didChangeScreenParametersNotification, post)
         ])
 
         if !SpacesObserver.cgsRegistered,

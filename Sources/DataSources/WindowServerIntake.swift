@@ -79,6 +79,34 @@ struct IntakeQueue<Payload> {
     }
 }
 
+/// One spaces pass per drain. A space switch posts 1401,
+/// activeSpaceDidChange and often 1325s for windows already on the new
+/// space; each used to cost its own Spaces.all() read on main. Requests
+/// made while a drain runs collapse into one pass at its end; a request
+/// outside a drain tells the caller to post a spaces event instead.
+struct SpacesCoalescer {
+    private var draining = false
+    private var requested = false
+
+    mutating func begin() {
+        draining = true
+        requested = false
+    }
+
+    /// True when the caller must post a spaces event (no drain running).
+    mutating func request() -> Bool {
+        if draining { requested = true; return false }
+        return true
+    }
+
+    /// True when the drain owes one spaces pass.
+    mutating func end() -> Bool {
+        draining = false
+        defer { requested = false }
+        return requested
+    }
+}
+
 /// An event the window-server callbacks hand to the main thread.
 enum IntakeEvent {
     case window(CGSDecodedWindowEvent)
@@ -119,6 +147,8 @@ enum WindowServerIntake {
     private static let lock = NSLock()
     private static var queue = IntakeQueue<IntakeEvent>()
     private static var stats = Stats()
+    // Main thread.
+    private static var spaces = SpacesCoalescer()
 
     struct Stats {
         var offered = 0
@@ -147,13 +177,21 @@ enum WindowServerIntake {
         CFRunLoopWakeUp(main)
     }
 
+    /// Ask for a spaces refresh: folded into the running drain's one
+    /// spaces pass, or posted when no drain is running. Main thread.
+    static func requestSpaces() {
+        if spaces.request() { post(.spaces) }
+    }
+
     private static func drain() {
         lock.lock()
         let batch = queue.take()
         stats.drains += 1
         stats.maxBatch = max(stats.maxBatch, batch.count)
         lock.unlock()
+        spaces.begin()
         for item in batch { handle(item.payload) }
+        if spaces.end() { SpacesObserver.shared.fire() }
     }
 
     private static func handle(_ event: IntakeEvent) {
@@ -161,7 +199,7 @@ enum WindowServerIntake {
         case .window(let e):
             WindowEvents.dispatch(e)
         case .spaces:
-            SpacesObserver.shared.fire()
+            requestSpaces()
         case .missionControlEntered:
             AppDelegate.shared?.host?.bang(name: "sd.missionControl.entered", detail: [:])
         }
