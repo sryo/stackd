@@ -88,11 +88,13 @@ enum ChannelInference {
     /// header doc on `Permissions.inferable`.
     private static let topLevelChannels: [String] = Permissions.inferableSorted
 
-    /// Sub-path entries are kept as an extension hook for permissions whose
-    /// name doesn't match their `sd.` namespace (today: none — composite
-    /// permissions like `menubar.item` are intentionally NOT inferred and
-    /// require explicit manifest opt-in).
-    private static let subPathChannels: [String: String] = [:]
+    /// Sub-path entries map a runtime helper to the permission it relies on
+    /// when the helper's `sd.` path doesn't name it: `sd.gesture.spring`
+    /// ticks on sd.displayLink. Composite permissions like `menubar.item`
+    /// are intentionally NOT inferred and require explicit manifest opt-in.
+    private static let subPathChannels: [String: String] = [
+        "gesture.spring": "displayLink",
+    ]
 
     /// Scan `text` (an HTML/JS/CSS source blob) for sd-channel references
     /// and return the implied permission set. Matches both `{{ sd.x.y }}`

@@ -40,6 +40,7 @@ The complete author-facing JavaScript API. Everything is on the global `sd`. Sou
 | `sd.displayLink` | Vsync frame-tick channel | Global channel | `displayLink` |
 | `sd.events` | Synthesize input + eventtap gating/registration | RPC + slot handlers | `events` |
 | `sd.fs` | File read/write/list/stat/watch + xattr | RPC + watch callbacks | `fs` |
+| `sd.gesture` | Velocity tracking, rubber-band, projected release, catchable spring (pure JS) | Helper | none (`spring` → `displayLink`) |
 | `sd.handlers` | Generic slot-handler registration | Slot handlers | (per-kind) |
 | `sd.host` | Host info, load channel, disk IO | Channel + RPC | `host` |
 | `sd.hotkey` | Dynamic Carbon hotkeys + modal modes + slot handlers | RPC + callbacks | `hotkey` |
@@ -192,6 +193,13 @@ Handle-based; handles are opaque ints owned by this stack — release them.
 - `write(path, contents)` (atomic) · `mkdir(path)` (-p) · `delete(path)` (recursive) · `move(from, to)` (fails if dst exists) `→ Promise`.
 - `watch(path, fn) → Promise<watchId|null>` — `fn` gets `{kind, path}`. · `unwatch(watchId) → Promise`.
 - `xattr.get(path,name)` · `xattr.set(path,name,value)` (base64) · `xattr.list(path)` · `xattr.remove(path,name)` `→ Promise`.
+
+### `sd.gesture` — gesture physics · none
+- `velocityTracker({window?}) → { add(tMs, x, y?), velocity(nowMs?) → {x, y}, reset() }` — least-squares velocity (per second) over a trailing 80–150ms window (default 100); zero once `nowMs` is a window past the last sample.
+- `rubberBand(value, min, max, dimension, coefficient = 0.55)` — pass-through inside `[min, max]`, resistance `(1 − 1/(d·c/dim + 1))·dim` past an edge.
+- `project(position, velocityPerSec, decay = 0.997)` — rest position under per-ms exponential decay. · `snap(position, velocityPerSec, targets, decay?)` — target nearest that projection.
+- `springStep(value, velocity, target, response, dtSec) → {value, velocity}` — exact critically damped step (ω = 2π/response).
+- `spring({from, to, velocity?, response = 0.35, restDelta?, restSpeed?, onUpdate?, onComplete?, ticker?}) → { value, velocity, running, retarget(to), stop() → {value, velocity} }` — ticks on `sd.displayLink` (source mentioning `sd.gesture.spring` infers `displayLink`); `stop()` catches it mid-flight for a gesture to take over.
 
 ### `sd.handlers` — generic slot registration
 - `register(kind, name, fn) → disposer` — generic form of `sd.events.on` / `sd.hotkey.on` (kind e.g. `"Tap"`, `"Hotkey"`).
