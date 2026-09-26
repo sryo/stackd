@@ -76,6 +76,7 @@ final class OverlayHandle: NSObject, WKNavigationDelegate {
     private var navigationReady: Bool = false
     private var pendingTargetJS: String?
     private var lastPushedTargetJS: String?
+    private var targetPush = NewestWinsPush()
     private var resizeDetector = LiveResizeDetector()
     // True after a window-server move AppKit didn't see: `panel.frame` still
     // holds the old origin until syncAppKitFrame() tells it.
@@ -221,10 +222,22 @@ final class OverlayHandle: NSObject, WKNavigationDelegate {
         guard let js = OverlayTickPlan.payloadToPush(payload, lastPushed: lastPushedTargetJS) else { return }
         lastPushedTargetJS = js
         if navigationReady {
-            webView.evaluateJavaScript(js, completionHandler: nil)
+            pushTarget(js)
         } else {
             // Buffer — flushed in webView(_:didFinish:).
             pendingTargetJS = js
+        }
+    }
+
+    private func pushTarget(_ js: String) {
+        guard let now = targetPush.offer(js) else { return }
+        sendTarget(now)
+    }
+
+    private func sendTarget(_ js: String) {
+        webView.evaluateJavaScript(js) { [weak self] _, _ in
+            guard let self = self, !self.released else { return }
+            if let next = self.targetPush.complete() { self.sendTarget(next) }
         }
     }
 
@@ -245,7 +258,7 @@ final class OverlayHandle: NSObject, WKNavigationDelegate {
         navigationReady = true
         if let pending = pendingTargetJS {
             pendingTargetJS = nil
-            webView.evaluateJavaScript(pending, completionHandler: nil)
+            pushTarget(pending)
         }
         if let pending = pendingEvalJS {
             pendingEvalJS = nil
@@ -413,6 +426,40 @@ enum OverlayTickPlan {
     /// outset change — never on a pure move.
     static func payloadToPush(_ js: String, lastPushed: String?) -> String? {
         js == lastPushed ? nil : js
+    }
+}
+
+// MARK: - Target push (pure, testable)
+
+/// At most one `sd.target` evaluateJavaScript in flight per overlay. A
+/// resize changes the payload every vsync, and WebKit queues every eval it
+/// is handed; when the web process falls behind, the backlog makes the
+/// overlay replay stale sizes. Payloads offered while one is outstanding
+/// replace each other, and only the newest is sent once it completes.
+struct NewestWinsPush {
+    private(set) var inFlight = false
+    private var held: String?
+
+    /// The payload to send now, or nil when one is already in flight (the
+    /// payload is held instead, replacing any older held one).
+    mutating func offer(_ js: String) -> String? {
+        if inFlight {
+            held = js
+            return nil
+        }
+        inFlight = true
+        return js
+    }
+
+    /// The in-flight eval finished. Returns the held payload to send next
+    /// (which becomes the one in flight), or nil and goes idle.
+    mutating func complete() -> String? {
+        if let next = held {
+            held = nil
+            return next
+        }
+        inFlight = false
+        return nil
     }
 }
 
