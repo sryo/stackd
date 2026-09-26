@@ -2259,7 +2259,9 @@ final class FrontmostWindowObserver: RefCountedObserver {
 // 806/807: raises of unlisted windows post nothing. With the full list,
 // 808 fires for raises again and overlays follow at window-server time
 // (OverlayEventFollow in Overlay.swift). OverlayRepinPolicy's cadence
-// stays the z-order backstop for any window the list misses.
+// stays the z-order backstop for any window the list misses. The same
+// 806/807 of AX-tracked windows feed sd.window.resizing
+// (WindowResizeObserver in WindowResizing.swift).
 //
 // STACKD_OVERLAY_EVENTS=0 is the kill switch: 806/807 stay unregistered
 // and no interest list is set, so 808 fires for every window and
@@ -2426,8 +2428,8 @@ private let windowEventsCallback: SkyLightWindowEvents.CGSConnectionCallback = {
     WindowDebug.log("cgs evt=\(eventType) → \(event)")
     // Non-actionable events (1326 counted-only, 1322, ignored/malformed)
     // end here — no main-queue hop for a `break`. 806/807 only reach us
-    // when OverlayEventFollow registered them, and are handled on this
-    // thread before any hop.
+    // when OverlayEventFollow registered them; it moves overlay panels on
+    // this thread, then posts them to the intake.
     switch event {
     case .moved, .resized:
         OverlayEventFollow.handle(event)
@@ -2612,12 +2614,14 @@ enum WindowEvents {
             }
             WindowsAXObserver.shared.noteDestroyReported(wid: CGWindowID(wid))
             Overlay.noteTargetDestroyed(wid: CGWindowID(wid))
+            WindowResizeObserver.shared.windowDestroyed(wid: CGWindowID(wid))
             scheduleFrameInterestRefresh()
             host.bang(name: "sd.window.destroyed", detail: ["id": Int(wid)])
         case .moved(let wid), .resized(let wid):
-            // Only overlay targets get here: OverlayEventFollow drops
-            // the rest in the callback.
+            // Any interest-listed window: overlay targets and AX-tracked
+            // windows (the latter feed sd.window.resizing).
             Overlay.followFrameEvent(wid: CGWindowID(wid))
+            WindowResizeObserver.shared.frameEvent(wid: CGWindowID(wid), host: host)
         case .titleChanged:
             // Not registered; AX titleChanged covers titles.
             break

@@ -134,6 +134,7 @@ enum Channels {
         Channel(name: "windowTitleChanged",  jsPath: nil, permission: "windows", replayable: false),
         Channel(name: "windowMoved",         jsPath: nil, permission: "windows", replayable: false),
         Channel(name: "windowResized",       jsPath: nil, permission: "windows", replayable: false),
+        Channel(name: "windowResizing",      jsPath: nil, permission: "windows", replayable: false),
         Channel(name: "windowMinimized",     jsPath: nil, permission: "windows", replayable: false),
         Channel(name: "windowDeminimized",   jsPath: nil, permission: "windows", replayable: false),
         Channel(name: "windowAnimating",     jsPath: nil, permission: "windows", replayable: false),

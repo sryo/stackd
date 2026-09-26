@@ -140,7 +140,7 @@ func registerChannelsRegistryTests() {
         let expected: Set<String> = [
             "appsChanged",
             "windowCreated", "windowDestroyed", "windowTitleChanged",
-            "windowMoved", "windowResized",
+            "windowMoved", "windowResized", "windowResizing",
             "windowMinimized", "windowDeminimized", "windowAnimating",
             "windowReordered", "windowFocusedByMouse",
         ]

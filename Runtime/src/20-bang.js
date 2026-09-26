@@ -13,6 +13,7 @@
   //   sd.window.minimized      { id }                         — AX (after the genie)
   //   sd.window.deminimized    { id }                         — AX
   //   sd.window.animating      { id, frame, visualFrame }     — CGS (genie start)
+  //   sd.window.resizing       { id, phase, frame, startFrame, edges } — CGS 807 + mouse (user edge drag)
   //   sd.window.reordered      { id }                         — CGS (z-order change)
   //   sd.window.focusedByMouse { }                            — CGS (frontmost-app change)
   // Two shapes:

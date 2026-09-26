@@ -61,6 +61,7 @@ SWIFT_SOURCES=(
 
   Sources/DataSources/Windows.swift
   Sources/DataSources/WindowMotion.swift
+  Sources/DataSources/WindowResizing.swift
   Sources/DataSources/WindowServerIntake.swift
   Sources/DataSources/IntakeTrace.swift
 

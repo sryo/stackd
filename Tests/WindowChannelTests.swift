@@ -61,6 +61,21 @@ func registerWindowChannelTests() {
         try expectEqual(out, "800,300")
     }
 
+    test("sd.windows.resizing routes sd.window.resizing with phase, frames and edges") {
+        let out = JSHarness.evalString("""
+        (function() {
+          const seen = [];
+          sd.windows.resizing.subscribe((d) => { if (d && d.id === 11) seen.push(d.phase); });
+          const base = { id: 11, frame: {x:0,y:0,w:820,h:600}, startFrame: {x:0,y:0,w:800,h:600},
+                         edges: {left:false,right:true,top:false,bottom:false} };
+          for (const phase of ['began','changed','ended'])
+            window.onBang_sd_window_resizing(Object.assign({}, base, { phase }));
+          return seen.join(',');
+        })()
+        """)
+        try expectEqual(out, "began,changed,ended")
+    }
+
     test("subscribe receives subsequent dispatches (not just the first)") {
         let out = JSHarness.evalString("""
         (function() {

@@ -41,6 +41,13 @@ sd.windows = {
     //   sd.windows.minimized.subscribe(({id}) => ...);
     //   sd.windows.deminimized.subscribe(({id}) => ...);
     //   sd.windows.animating.subscribe(({id, frame, visualFrame}) => ...);
+    //   sd.windows.resizing.subscribe(({id, phase, frame, startFrame, edges}) => ...);
+    // `resizing` follows a user drag of a window's edge at window-server
+    // rate: phase "began" on the first size change while the left button
+    // is down, "changed" per frame after, "ended" on mouse-up. `startFrame`
+    // is the frame before the drag; `edges` ({left,right,top,bottom}) says
+    // which edges have moved from it. The daemon's own writes never begin
+    // one, and one window is dragged at a time.
     // `animating` fires once per window when a window-server animation
     // (the minimize genie) starts carrying it — ~25ms in, where
     // `minimized` only lands once the genie ends (~500ms). `frame` is the
@@ -54,6 +61,7 @@ sd.windows = {
     minimized:    __windowBang("sd_window_minimized"),
     deminimized:  __windowBang("sd_window_deminimized"),
     animating:    __windowBang("sd_window_animating"),
+    resizing:     __windowBang("sd_window_resizing"),
     // F15 split — granular per-event-type channels alongside the legacy
     // union `focused` channel. Each fires the moment AX reports the matching
     // notification, so stacks can subscribe to exactly what they need.

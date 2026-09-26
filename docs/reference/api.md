@@ -355,7 +355,8 @@ Operates on the stack's own NSPanel; no separate permission.
 - `sd.windows.all` *(channel, default `[]`)* — `[{id,app,pid,title,onscreen,addressable,isStandard,isMinimized,frame,display?}]`.
 - `sd.windows.changed` *(channel, delta)* — `{added, removed, changed}`.
 - `sd.windows.focusedChanged` *(channel)* · `sd.windows.titleChanged` *(channel)*.
-- Lifecycle bang-channels (require manifest `handles`): `created, destroyed, moved, resized, minimized, deminimized` — `.subscribe(fn)` with bang payloads.
+- Lifecycle bang-channels (require manifest `handles`): `created, destroyed, moved, resized, minimized, deminimized, animating, resizing` — `.subscribe(fn)` with bang payloads.
+- `sd.windows.resizing` *(bang-channel, `handles: ["sd.window.resizing"]`)* — a user drag of a window's edge, at window-server rate: `{id, phase("began"|"changed"|"ended"), frame{x,y,w,h}, startFrame{x,y,w,h}, edges{left,right,top,bottom}}`. `began` on the window's first size change while the left button is down (never for the daemon's own writes), `changed` per new frame, `ended` on mouse-up. `startFrame` is the frame before the drag; `edges` marks the edges that moved from it. One window at a time.
 
 **Methods** (no id = AX focused window of frontmost app; numeric id = specific CGWindowID):
 - `setFrame(frame)` or `setFrame(id, frame, opts?) → Promise`. `opts:{duration?, easing?("easeOutCubic"|"linear"|"spring"), respectReduceMotion?(true)}` animates the id form on the daemon's display-link clock and resolves at settle. With the system Reduce Motion setting on, animations become an instant write unless `respectReduceMotion: false`.

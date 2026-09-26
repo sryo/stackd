@@ -310,6 +310,12 @@ final class StackHost {
         }
     }
 
+    /// Whether any loaded stack handles `name`, so a producer can skip
+    /// work nobody would receive.
+    func anyHandles(bang name: String) -> Bool {
+        bridges.values.contains { $0.handles(bang: name) }
+    }
+
     @discardableResult
     func bang(name: String, detail: [String: Any]) -> Int {
         if name.hasPrefix("sd.window.") { Overlay.noteWindowBang(name: name, detail: detail) }

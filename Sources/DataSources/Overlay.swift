@@ -1175,8 +1175,9 @@ enum OverlayEventFollow {
         if logThread {
             log("overlay-events: first 806/807 delivered \(onMain ? "on main" : "off main (\(Thread.current))")")
         }
-        guard isTarget else { return }
-        if !mine.isEmpty {
+        // Every listed window's event still reaches main, where
+        // sd.window.resizing reads it; only targets move panels here.
+        if isTarget && !mine.isEmpty {
             let bounds = Overlay.bounds(of: CGWindowID(wid))
             var moved: [ObjectIdentifier: CGPoint] = [:]
             for (key, entry) in mine {
