@@ -1186,7 +1186,11 @@ enum Overlay {
 
     /// Shared NSPanel recipe for attach() and region(): borderless,
     /// transparent, click-through, never key. `frame` is AppKit coordinates.
-    static func makeOverlayPanel(frame: NSRect) -> NSPanel {
+    /// `attachedToWindow` picks the space behavior: a panel pinned to a
+    /// foreign window is transient so it steps aside with Show Desktop and
+    /// Mission Control along with its target; a free region stays
+    /// stationary like a HUD stack.
+    static func makeOverlayPanel(frame: NSRect, attachedToWindow: Bool) -> NSPanel {
         let panel = OverlayPanel(
             contentRect: frame,
             styleMask: [.borderless, .nonactivatingPanel],
@@ -1201,10 +1205,12 @@ enum Overlay {
         // specific target on the WindowServer side, which is what
         // ultimately wins for foreign-window ordering.
         panel.level = .statusBar
-        // canJoinAllSpaces + stationary + fullScreenAuxiliary + ignoresCycle
-        // match the JankyBorders SLS tag set (sticky across spaces, no
-        // cmd-tab / mission-control surface). Same recipe StackWindow uses.
-        panel.collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary, .ignoresCycle]
+        // Sticky across spaces, usable over full-screen apps, never in the
+        // window cycle. Region panels add .stationary (StackWindow's recipe);
+        // attached panels use .transient instead, which is mutually
+        // exclusive with it.
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .ignoresCycle,
+                                    attachedToWindow ? .transient : .stationary]
         panel.ignoresMouseEvents = true
         panel.unregisterDraggedTypes()
         panel.isMovableByWindowBackground = false
@@ -1266,7 +1272,7 @@ enum Overlay {
 
         let webView = makeOverlayWebView(size: initialFrame.size)
 
-        let panel = makeOverlayPanel(frame: initialFrame)
+        let panel = makeOverlayPanel(frame: initialFrame, attachedToWindow: true)
         panel.contentView = webView
 
         let doc = """
@@ -1457,7 +1463,7 @@ extension Overlay {
 
         let webView = makeOverlayWebView(size: appKit.size)
 
-        let panel = makeOverlayPanel(frame: appKit)
+        let panel = makeOverlayPanel(frame: appKit, attachedToWindow: false)
         panel.contentView = webView
 
         let doc = """

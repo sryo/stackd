@@ -366,10 +366,38 @@ func registerOverlayTests() {
         // Stack reloads (e.g. on a display change) block the main thread
         // while every stack rebuilds; an animated order-out can't run until
         // that finishes, leaving the old outline frozen on screen.
-        let panel = Overlay.makeOverlayPanel(frame: NSRect(x: -9999, y: -9999, width: 1, height: 1))
+        let panel = Overlay.makeOverlayPanel(frame: NSRect(x: -9999, y: -9999, width: 1, height: 1),
+                                             attachedToWindow: true)
         try expect(panel.animationBehavior == .none)
         try expect(panel.ignoresMouseEvents)
         try expect(!panel.canBecomeKey)
+        panel.close()
+    }
+
+    test("Overlay.makeOverlayPanel: a window-attached panel is transient, not stationary") {
+        // Transient panels step aside with Show Desktop / Mission Control
+        // the way their target window does; stationary ones stay pinned
+        // in place over an empty desktop.
+        let panel = Overlay.makeOverlayPanel(frame: NSRect(x: -9999, y: -9999, width: 1, height: 1),
+                                             attachedToWindow: true)
+        let b = panel.collectionBehavior
+        try expect(b.contains(.transient))
+        try expect(!b.contains(.stationary))
+        try expect(b.contains(.canJoinAllSpaces))
+        try expect(b.contains(.fullScreenAuxiliary))
+        try expect(b.contains(.ignoresCycle))
+        panel.close()
+    }
+
+    test("Overlay.makeOverlayPanel: a free region panel stays stationary like a HUD stack") {
+        let panel = Overlay.makeOverlayPanel(frame: NSRect(x: -9999, y: -9999, width: 1, height: 1),
+                                             attachedToWindow: false)
+        let b = panel.collectionBehavior
+        try expect(b.contains(.stationary))
+        try expect(!b.contains(.transient))
+        try expect(b.contains(.canJoinAllSpaces))
+        try expect(b.contains(.fullScreenAuxiliary))
+        try expect(b.contains(.ignoresCycle))
         panel.close()
     }
 }
