@@ -456,6 +456,10 @@ final class FrameLedger {
     // Size the app held the window at after refusing a target size, keyed
     // to that target size.
     private var enforced: [CGWindowID: (target: CGSize, size: CGSize)] = [:]
+    // Per axis, the largest size the app has held the window at after
+    // refusing a smaller one (0 = never seen). Unlike `enforced` it is
+    // not keyed to one target, so writes toward other sizes keep it.
+    private var minSizes: [CGWindowID: CGSize] = [:]
 
     func recordWrite(windowID: CGWindowID, frame: CGRect, now: Double = CFAbsoluteTimeGetCurrent()) {
         lastApplied[windowID] = Applied(frame: frame, at: now)
@@ -479,6 +483,28 @@ final class FrameLedger {
         retryUsed.remove(windowID)
         writeGeneration[windowID] = nil
         enforced[windowID] = nil
+        minSizes[windowID] = nil
+    }
+
+    /// The minimum size learned from the app's refusals, per axis; nil for
+    /// an axis the app never held above a written size. nil when nothing
+    /// is known.
+    func minSize(windowID: CGWindowID) -> (width: CGFloat?, height: CGFloat?)? {
+        guard let m = minSizes[windowID], m.width > 0 || m.height > 0 else { return nil }
+        return (m.width > 0 ? m.width : nil, m.height > 0 ? m.height : nil)
+    }
+
+    /// `refused`: the app held the window at `observed` instead of
+    /// `target` (a grid snap is not a refusal).
+    private func learnMinSize(windowID: CGWindowID, target: CGSize, observed: CGSize, refused: Bool) {
+        var m = minSizes[windowID] ?? .zero
+        // Held above the target: the app's floor is at least this.
+        if refused, observed.width > target.width + Self.sizeToleranceFloor { m.width = max(m.width, observed.width) }
+        if refused, observed.height > target.height + Self.sizeToleranceFloor { m.height = max(m.height, observed.height) }
+        // Accepted below the floor: the floor was wrong (the app changed it).
+        if m.width > 0, observed.width < m.width - Self.sizeToleranceFloor { m.width = 0 }
+        if m.height > 0, observed.height < m.height - Self.sizeToleranceFloor { m.height = 0 }
+        minSizes[windowID] = m
     }
 
     /// The size the app enforced the last time it refused `targetSize` for
@@ -526,6 +552,7 @@ final class FrameLedger {
            dh <= max(Self.sizeToleranceFloor, q.height) {
             retryUsed.remove(windowID)
             enforced[windowID] = nil
+            learnMinSize(windowID: windowID, target: target.size, observed: observed.size, refused: false)
             return .converged
         }
 
@@ -547,11 +574,15 @@ final class FrameLedger {
                 height: max(existing.height, dh.rounded(.up))
             )
             enforced[windowID] = nil
+            learnMinSize(windowID: windowID, target: target.size, observed: observed.size, refused: false)
             return .converged
         }
         if dw > Self.sizeToleranceFloor || dh > Self.sizeToleranceFloor {
             enforced[windowID] = (target: target.size, size: observed.size)
         }
+        // The verdict after the retry, never the first read-back, which may
+        // still show the size from before the write.
+        learnMinSize(windowID: windowID, target: target.size, observed: observed.size, refused: true)
         return .refused
     }
 }

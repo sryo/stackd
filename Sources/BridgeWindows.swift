@@ -175,6 +175,14 @@ extension Bridge {
                     "w": Int(r.size.width), "h": Int(r.size.height)
                 ] as [String: Any]
             },
+            // Minimum size learned from the app refusing probed writes:
+            // { w: number|null, h: number|null }, null when none is known.
+            .ax("windows.byId.minSize",    permission: "windows") { _, body in
+                guard let m = FrameLedger.shared.minSize(windowID: CGWindowID((body["id"] as? Int) ?? 0))
+                else { return nil }
+                func axis(_ v: CGFloat?) -> Any { v.map { Int($0) } ?? NSNull() }
+                return ["w": axis(m.width), "h": axis(m.height)] as [String: Any]
+            },
             .ax("windows.byId.cornerHints", permission: "windows") { _, body in
                 WindowsByID.cornerHints(windowID: CGWindowID((body["id"] as? Int) ?? 0))
             },

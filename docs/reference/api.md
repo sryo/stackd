@@ -363,6 +363,7 @@ Operates on the stack's own NSPanel; no separate permission.
 - `setFrameProbed(id, frame) → Promise<{ok, actual{x,y,w,h}|null}>`.
 - `minimize([id,] value?)` · `fullscreen([id,] value?)` · `raise([id])` · `focus(id)` · `close(id)` `→ Promise`.
 - `focus(id)` fronts the window's app with that window key and raises it. The raise lands asynchronously (at once for a window of the frontmost app, ~100 ms later for another app's), so `true` means fronted and key; z-order read immediately after may not show the raise yet.
+- `minSize(id) → Promise<{w,h}|null>` — minimum size learned from the app refusing probed writes below it (`w`/`h` null for an axis never clamped); clamp before writing.
 - `frame(id) → Promise<{x,y,w,h}>` · `cornerHints(id) → Promise<{toolbarPresent,role,subrole}>`.
 - `buttonFrames(id) → Promise<{close,zoom,minimize}|null>` (traffic-light rects).
 - `info(id) → Promise<{frame,title,role,subrole,isMinimized,isFullscreen,isMain,isStandard,hasToolbar,cornerHints}|null>`.

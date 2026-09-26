@@ -89,3 +89,53 @@ func registerLiveFrameWriteTests() {
         try expectEqual(next[0].callbacks, [2, 3, 4])
     }
 }
+
+func registerFrameLedgerMinSizeTests() {
+    func rect(_ w: CGFloat, _ h: CGFloat) -> CGRect { CGRect(x: 0, y: 0, width: w, height: h) }
+    func refuse(_ l: FrameLedger, _ target: CGRect, _ observed: CGRect) {
+        _ = l.verify(windowID: 5, target: target, observed: observed)
+        _ = l.verify(windowID: 5, target: target, observed: observed)
+    }
+
+    test("minSize: nothing learned, nothing known") {
+        try expect(FrameLedger().minSize(windowID: 5) == nil)
+    }
+
+    test("minSize: a terminal refusal held above the target learns that axis only") {
+        let l = FrameLedger()
+        refuse(l, rect(200, 600), rect(320, 600))
+        let m = l.minSize(windowID: 5)
+        try expectEqual(m?.width, 320)
+        try expectEqual(m?.height, nil)
+    }
+
+    test("minSize: the first read-back before the retry teaches nothing") {
+        let l = FrameLedger()
+        _ = l.verify(windowID: 5, target: rect(200, 600), observed: rect(320, 600))
+        try expect(l.minSize(windowID: 5) == nil)
+    }
+
+    test("minSize: survives writes toward other sizes") {
+        let l = FrameLedger()
+        refuse(l, rect(200, 600), rect(320, 600))
+        _ = l.enforcedSize(windowID: 5, targetSize: CGSize(width: 500, height: 600))
+        _ = l.verify(windowID: 5, target: rect(500, 600), observed: rect(500, 600))
+        try expectEqual(l.minSize(windowID: 5)?.width, 320)
+    }
+
+    test("minSize: an accepted size below the floor forgets it; clear forgets all") {
+        let l = FrameLedger()
+        refuse(l, rect(200, 600), rect(320, 600))
+        _ = l.verify(windowID: 5, target: rect(250, 600), observed: rect(250, 600))
+        try expect(l.minSize(windowID: 5) == nil)
+        refuse(l, rect(200, 600), rect(320, 600))
+        l.clear(windowID: 5)
+        try expect(l.minSize(windowID: 5) == nil)
+    }
+
+    test("minSize: a grid snap above the target is not a floor") {
+        let l = FrameLedger()
+        refuse(l, rect(800, 600), rect(808, 600))
+        try expect(l.minSize(windowID: 5) == nil)
+    }
+}

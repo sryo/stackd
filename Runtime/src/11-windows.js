@@ -142,6 +142,11 @@ sd.windows = {
     focus(id)  { return request({ type: "windows.byId.focus", id }); },
     close(id)  { return request({ type: "windows.byId.close", id }); },
     frame(id)  { return request({ type: "windows.byId.frame", id }); },
+    // The window's minimum size as learned from the app refusing
+    // setFrameProbed writes below it: { w, h } with null for an
+    // axis never clamped, or null when nothing is known yet. Clamp live
+    // writes to it instead of sending sizes the app will refuse.
+    minSize(id) { return request({ type: "windows.byId.minSize", id }); },
     // Raw AX hints for picking a corner radius in stack code. Returns
     //   { toolbarPresent: bool, role: string|null, subrole: string|null }
     // Stacks compose their own 26/16/0 mapping — e.g. an outline stack writes
