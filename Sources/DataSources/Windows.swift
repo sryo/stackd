@@ -1342,6 +1342,10 @@ final class WindowsLifecycleObserver {
                 .map { "\($0.key):\($0.value)" }.joined(separator: " ")
             WindowDebug.log("cgs fire counts: \(summary)")
         }
+        if OverlayEventFollow.enabled {
+            let f = OverlayEventFollow.statsSnapshot()
+            WindowDebug.log("overlay-events: main=\(f.onMain) off-main=\(f.offMain) for-targets=\(f.forTargets) moved-off-main=\(f.movedOffMain) drains=\(f.drains) stepped=\(f.steppedOnMain)")
+        }
 
         // Housekeeping piggybacked on the poll tick: lastAxFire only needs
         // ~12s of history for the missed-by-ax gate; without pruning it
@@ -1781,6 +1785,16 @@ final class FrontmostWindowObserver: RefCountedObserver {
 // So window-server frame events and reliable 808 are mutually exclusive
 // for this process.
 //
+// Opt-in exception, STACKD_OVERLAY_EVENTS=1 (OverlayEventFollow in
+// Overlay.swift): 806/807 are registered per-connection and the interest
+// list holds every AX-tracked window plus every overlay target, re-issued
+// on create / destroy / retarget, so overlays follow their target at
+// window-server time. OmniWM runs the same shape (806/807/808 on the main
+// cid, full sorted managed-window list) with 808 still firing for raises,
+// which suggests 808 only fires for listed windows and the earlier lists
+// were too narrow. The 808 fire counter settles it; if 808 still goes
+// quiet, z-order repair falls back to OverlayRepinPolicy's cadence.
+//
 // The per-code fire counters (logged from the 10s poll tick) are the
 // standing verification that registered codes keep firing across macOS
 // bumps; codes stuck at zero degrade gracefully to AX-only coverage.
@@ -1796,8 +1810,12 @@ private enum SkyLightWindowEvents {
     // (`src/yabai.c:322-334`) is the reference.
     typealias CGSConnectionCallback = @convention(c) (UInt32, UnsafeMutableRawPointer?, Int, UnsafeMutableRawPointer?, Int32) -> Void
     typealias RegisterNotifyProcFn  = @convention(c) (Int32, CGSConnectionCallback, UInt32, UnsafeMutableRawPointer?) -> Int32
+    // SLSRequestNotificationsForWindows(cid, wids, count): the interest
+    // list. Replaces the connection's list in full on every call.
+    typealias RequestNotificationsFn = @convention(c) (Int32, UnsafePointer<UInt32>?, Int32) -> Int32
 
     static let registerNotifyProc: RegisterNotifyProcFn? = SkyLight.sym("SLSRegisterConnectionNotifyProc")
+    static let requestNotifications: RequestNotificationsFn? = SkyLight.sym("SLSRequestNotificationsForWindows")
 }
 
 // CGS window event IDs we register — yabai's canonical set plus the
@@ -1878,15 +1896,32 @@ enum CGSWindowEventDecoder {
 // poll tick logs), decode, then hop to main before touching
 // AppDelegate.shared / host so bang dispatch stays on the runloop it was
 // built on.
+/// The per-window interest list for the flagged overlay-events path: every
+/// AX-tracked window plus every overlay target (a target AX can't observe
+/// still needs its frame events), as one sorted, duplicate-free list.
+/// With a list set, window-server events like 808 only fire for listed
+/// windows, so the list is kept as wide as the tracked set rather than
+/// narrowed to the overlay targets.
+enum WindowFrameInterest {
+    static func list(tracked: [UInt32], targets: [UInt32]) -> [UInt32] {
+        Array(Set(tracked).union(targets)).sorted()
+    }
+}
+
 private let windowEventsCallback: SkyLightWindowEvents.CGSConnectionCallback = { eventType, data, dataLen, _, _ in
     WindowEvents.countFire(eventType)
     let event = CGSWindowEventDecoder.decode(
         eventType: eventType, data: data.map { UnsafeRawPointer($0) }, length: dataLen)
     WindowDebug.log("cgs evt=\(eventType) → \(event)")
-    // Non-actionable events (1326 counted-only, the decoder-only frame
-    // codes, ignored/malformed) end here — no main-queue hop for a `break`.
+    // Non-actionable events (1326 counted-only, 1322, ignored/malformed)
+    // end here — no main-queue hop for a `break`. 806/807 only reach us
+    // when OverlayEventFollow registered them, and are handled on this
+    // thread before any hop.
     switch event {
-    case .spaceWindowDestroyed, .moved, .resized, .titleChanged, .ignored, .malformed:
+    case .moved, .resized:
+        OverlayEventFollow.handle(event)
+        return
+    case .spaceWindowDestroyed, .titleChanged, .ignored, .malformed:
         return
     default:
         WindowEvents.route(event)
@@ -1923,6 +1958,13 @@ enum WindowEvents {
                     kSDWindowAnimationBegan, kSDWindowFocusedByMouse] {
             _ = reg(cid, windowEventsCallback, evt, nil)
         }
+        if OverlayEventFollow.enabled {
+            for evt in [kSDWindowMoved, kSDWindowResized] {
+                _ = reg(cid, windowEventsCallback, evt, nil)
+            }
+            log("overlay-events: 806/807 registered; interest list = AX-tracked windows + overlay targets")
+            DispatchQueue.main.async { scheduleFrameInterestRefresh() }
+        }
         // STACKD_CGS_DEBUG=1 → log every event in [700, 2000) so we can
         // rediscover IDs after a macOS shift. Mirrors JankyBorders'
         // src/events.c debug loop.
@@ -1932,6 +1974,43 @@ enum WindowEvents {
             }
         }
         cgsRegistered = true
+    }
+
+    // MARK: - Per-window interest list (STACKD_OVERLAY_EVENTS only)
+
+    private static var interestRefreshQueued = false
+    private static var lastInterest: [UInt32]?
+
+    /// Re-issue the interest list on the next main run-loop turn, once per
+    /// burst of tracked-window / overlay-target changes. Any thread.
+    static func scheduleFrameInterestRefresh() {
+        guard OverlayEventFollow.enabled else { return }
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { scheduleFrameInterestRefresh() }
+            return
+        }
+        guard !interestRefreshQueued else { return }
+        interestRefreshQueued = true
+        DispatchQueue.main.async {
+            interestRefreshQueued = false
+            refreshFrameInterest()
+        }
+    }
+
+    /// Replace the connection's interest list with WindowFrameInterest's
+    /// list when it differs from the last one issued. Main thread.
+    private static func refreshFrameInterest() {
+        guard let req = SkyLightWindowEvents.requestNotifications, SkyLight.cid != 0 else { return }
+        let wids = WindowFrameInterest.list(tracked: WindowsAXObserver.shared.trackedWIDs,
+                                            targets: OverlayEventFollow.targetList)
+        guard wids != lastInterest else { return }
+        // Until something is listed the connection keeps no list at all.
+        if wids.isEmpty && lastInterest == nil { return }
+        lastInterest = wids
+        let status = wids.withUnsafeBufferPointer { buf in
+            req(SkyLight.cid, buf.baseAddress, Int32(buf.count))
+        }
+        WindowDebug.log("cgs frame interest: \(wids.count) windows (status \(status))")
     }
 
     // MARK: - Fire counters (listener-actually-fires sensor)
@@ -1998,11 +2077,12 @@ enum WindowEvents {
                     WindowsByID.invalidateCache(pid: pid, windowID: CGWindowID(wid))
                 }
                 WindowsAXObserver.shared.noteDestroyReported(wid: CGWindowID(wid))
+                Overlay.noteTargetDestroyed(wid: CGWindowID(wid))
+                scheduleFrameInterestRefresh()
                 host.bang(name: "sd.window.destroyed", detail: ["id": Int(wid)])
             case .moved, .resized, .titleChanged:
-                // Not registered (see the header comment: they need the
-                // interest list, which silences 808). Decoder keeps the
-                // cases so the payload layouts stay documented + tested.
+                // 806/807 are consumed in the callback (OverlayEventFollow);
+                // 1322 is not registered (needs the interest list).
                 break
             case .spaceWindowCreated(let wid, _):
                 handleSpaceWindowCreated(wid: wid, host: host)
@@ -2875,7 +2955,14 @@ final class WindowsAXObserver {
     // per-window AXObserverAddNotification registrations). We hold the
     // window element so per-window AXObserverRemoveNotification can match
     // the original target when the app terminates or the window dies.
-    private var windows: [pid_t: [CGWindowID: (element: AXUIElement, tokens: [Token])]] = [:]
+    private var windows: [pid_t: [CGWindowID: (element: AXUIElement, tokens: [Token])]] = [:] {
+        didSet { WindowEvents.scheduleFrameInterestRefresh() }
+    }
+
+    /// Every wid holding per-window observers, ascending.
+    var trackedWIDs: [UInt32] {
+        windows.values.flatMap { $0.keys }.map { UInt32($0) }.sorted()
+    }
     // Last seen title per (pid, wid). AX's titleChanged callback receives
     // the element but not the previous title; yabai/HS both cache. The
     // `sd.window.titleChanged` bang shape includes `oldTitle`, so stack

@@ -90,6 +90,9 @@ final class OverlayHandle: NSObject, WKNavigationDelegate {
     // holds the old origin until syncAppKitFrame() tells it.
     private var appKitStale: Bool = false
     private var released: Bool = false
+    // Target size the panel was last fitted to; read by the event-follow
+    // entry to tell a pure move from a resize.
+    private var lastTargetSize: CGSize = .zero
 
     init(id: Int, targetWID: CGWindowID, panel: NSPanel, webView: WKWebView,
          outset: CGFloat = 0) {
@@ -112,6 +115,7 @@ final class OverlayHandle: NSObject, WKNavigationDelegate {
         if released { return }
         if newWID == targetWID { return }
         targetWID = newWID
+        OverlayEventFollow.track(self)
         forceRepin()
     }
 
@@ -198,6 +202,31 @@ final class OverlayHandle: NSObject, WKNavigationDelegate {
     /// frame. True when anything visible changed.
     @discardableResult
     func step() -> Bool {
+        let changed = observe()
+        publishFollowEntry()
+        return changed
+    }
+
+    /// A window-server move/resize for the target reached main: step now
+    /// rather than on the next vsync, and keep the tick armed behind it.
+    func followEvent() {
+        if released || !started { return }
+        OverlayEventFollow.countStep()
+        step()
+        arm()
+    }
+
+    private func publishFollowEntry() {
+        guard OverlayEventFollow.enabled, !released else { return }
+        OverlayEventFollow.publish(self, OverlayFollowEntry(
+            wid: UInt32(targetWID),
+            panelWID: lastFrame == .zero ? 0 : UInt32(max(panel.windowNumber, 0)),
+            outset: outset,
+            targetSize: lastTargetSize,
+            visible: panel.isVisible))
+    }
+
+    private func observe() -> Bool {
         if released { return false }
         // Screenshot session in progress: ScreenshotHider ordered the panel
         // out; the re-show branch below would undo that one frame later.
@@ -268,6 +297,7 @@ final class OverlayHandle: NSObject, WKNavigationDelegate {
             lastFrame = .zero
         }
 
+        lastTargetSize = targetFrame.size
         let resizing = resizeDetector.update(size: targetFrame.size, now: now,
                                              buttonDown: Mouse.isLeftButtonDown)
         let fitted = OverlayGeometry.panelFrame(target: targetFrame, outset: outset).size
@@ -362,6 +392,7 @@ final class OverlayHandle: NSObject, WKNavigationDelegate {
         if released { return }
         stop()
         released = true
+        OverlayEventFollow.untrack(self)
         Overlay.orderOutNow(panel)
         panel.orderOut(nil)
         panel.close()
@@ -739,6 +770,228 @@ enum OverlayArmEvents {
     }
 }
 
+// MARK: - Window-server event follow (pure, testable)
+
+/// Which overlays track which target windows. Every mutation reports
+/// whether the set of distinct target wids changed, so the interest list
+/// and the event filter are refreshed only when they have to be.
+struct OverlayFollowTargets<Key: Hashable> {
+    private var byKey: [Key: UInt32] = [:]
+
+    /// Distinct target wids, ascending.
+    var wids: [UInt32] { Array(Set(byKey.values)).sorted() }
+
+    func contains(wid: UInt32) -> Bool { byKey.values.contains(wid) }
+
+    /// Point `key` at `wid` (attach or retarget).
+    mutating func set(_ key: Key, wid: UInt32) -> Bool {
+        let before = Set(byKey.values)
+        byKey[key] = wid
+        return Set(byKey.values) != before
+    }
+
+    /// Forget `key` (detach).
+    mutating func remove(_ key: Key) -> Bool {
+        let before = Set(byKey.values)
+        byKey[key] = nil
+        return Set(byKey.values) != before
+    }
+
+    /// Forget every overlay on `wid` (the target was destroyed). A retarget
+    /// puts the overlay back through `set`.
+    mutating func drop(wid: UInt32) -> Bool {
+        let keys = byKey.filter { $0.value == wid }.map { $0.key }
+        for k in keys { byKey[k] = nil }
+        return !keys.isEmpty
+    }
+}
+
+/// What the main thread last applied for one overlay, readable from the
+/// thread SkyLight delivers events on. `panelWID` 0 = no window-server
+/// window yet; `targetSize` is the target size the panel was last fitted to.
+struct OverlayFollowEntry: Equatable {
+    var wid: UInt32
+    var panelWID: UInt32
+    var outset: CGFloat
+    var targetSize: CGSize
+    var visible: Bool
+}
+
+enum OverlayFollowAction: Equatable {
+    case ignore
+    /// Window-server move of the panel to this CGS top-left origin, no
+    /// reorder: the panel is visible and already above its target.
+    case moveNow(CGPoint)
+    /// Anything that can touch AppKit or the WebView — resize, visibility,
+    /// an unreadable target — runs as a full step on main.
+    case stepOnMain
+}
+
+enum OverlayFollowRoute {
+    /// The target wid of a 806/807, nil for any other event.
+    static func frameEventWID(_ event: CGSDecodedWindowEvent) -> UInt32? {
+        switch event {
+        case .moved(let wid), .resized(let wid): return wid
+        default: return nil
+        }
+    }
+
+    /// `bounds` is SLSGetWindowBounds of the target, read after the event.
+    static func action(for event: CGSDecodedWindowEvent, entry: OverlayFollowEntry,
+                       bounds: CGRect?) -> OverlayFollowAction {
+        guard let wid = frameEventWID(event), wid == entry.wid else { return .ignore }
+        guard case .moved = event,
+              entry.visible, entry.panelWID != 0,
+              let b = bounds,
+              abs(b.width - entry.targetSize.width) < 0.5,
+              abs(b.height - entry.targetSize.height) < 0.5 else { return .stepOnMain }
+        return .moveNow(CGPoint(x: b.minX - entry.outset, y: b.minY - entry.outset))
+    }
+}
+
+// MARK: - Window-server event follow
+
+/// Opt-in (`STACKD_OVERLAY_EVENTS=1`): attached overlays follow their target
+/// on CGS 806 (moved) / 807 (resized) as the window server posts them,
+/// instead of on the next display-link tick. The vsync tick stays armed as
+/// the backstop; this path only gets there first.
+///
+/// 806/807 only fire for wids on the connection's interest list, which
+/// WindowEvents keeps at every AX-tracked window plus every overlay target
+/// (see `WindowFrameInterest`). Events for windows no overlay targets are
+/// counted and dropped here.
+///
+/// Threading: the target set is main-thread state mirrored into the
+/// lock-protected `targetWIDs`/`entries`, so an event delivered off main can
+/// move a visible panel at the window server directly. AppKit state
+/// (`panel.frame`, the tick's lastFrame) is only touched by the main-thread
+/// step each event also queues, which resyncs it. Events are merged per wid
+/// and drained in one main-run-loop block per burst, not one hop per event.
+enum OverlayEventFollow {
+    static func flagEnabled(_ env: [String: String]) -> Bool {
+        env["STACKD_OVERLAY_EVENTS"] == "1"
+    }
+
+    static let enabled = flagEnabled(ProcessInfo.processInfo.environment)
+
+    // Main thread.
+    private static var targets = OverlayFollowTargets<ObjectIdentifier>()
+
+    private static let lock = NSLock()
+    private static var targetWIDs: Set<UInt32> = []
+    private static var entries: [ObjectIdentifier: OverlayFollowEntry] = [:]
+    private static var pending: Set<UInt32> = []
+    private static var drainScheduled = false
+    private static var stats = Stats()
+    private static var threadLogged = false
+
+    struct Stats {
+        var onMain = 0
+        var offMain = 0
+        var forTargets = 0
+        var movedOffMain = 0
+        var drains = 0
+        var steppedOnMain = 0
+    }
+
+    static func statsSnapshot() -> Stats {
+        lock.lock(); defer { lock.unlock() }
+        return stats
+    }
+
+    /// Current overlay target wids, ascending. Main thread.
+    static var targetList: [UInt32] { targets.wids }
+
+    /// Attach or retarget. Main thread.
+    static func track(_ handle: OverlayHandle) {
+        guard enabled else { return }
+        if targets.set(ObjectIdentifier(handle), wid: UInt32(handle.targetWID)) { targetsChanged() }
+    }
+
+    /// Detach. Main thread.
+    static func untrack(_ handle: OverlayHandle) {
+        guard enabled else { return }
+        lock.lock(); entries[ObjectIdentifier(handle)] = nil; lock.unlock()
+        if targets.remove(ObjectIdentifier(handle)) { targetsChanged() }
+    }
+
+    /// The target window is gone. Main thread.
+    static func dropTarget(wid: CGWindowID) {
+        guard enabled else { return }
+        if targets.drop(wid: UInt32(wid)) { targetsChanged() }
+    }
+
+    /// Record what the tick just applied. Main thread.
+    static func publish(_ handle: OverlayHandle, _ entry: OverlayFollowEntry) {
+        guard enabled else { return }
+        lock.lock(); entries[ObjectIdentifier(handle)] = entry; lock.unlock()
+    }
+
+    private static func targetsChanged() {
+        let wids = Set(targets.wids)
+        lock.lock(); targetWIDs = wids; lock.unlock()
+        WindowEvents.scheduleFrameInterestRefresh()
+    }
+
+    /// A decoded 806/807, on whatever thread SkyLight delivered it.
+    static func handle(_ event: CGSDecodedWindowEvent) {
+        guard enabled, let wid = OverlayFollowRoute.frameEventWID(event) else { return }
+        let onMain = Thread.isMainThread
+        lock.lock()
+        if onMain { stats.onMain += 1 } else { stats.offMain += 1 }
+        let logThread = !threadLogged
+        threadLogged = true
+        let isTarget = targetWIDs.contains(wid)
+        if isTarget { stats.forTargets += 1 }
+        let mine = onMain || !isTarget ? [] : entries.values.filter { $0.wid == wid }
+        lock.unlock()
+        if logThread {
+            log("overlay-events: first 806/807 delivered \(onMain ? "on main" : "off main (\(Thread.current))")")
+        }
+        guard isTarget else { return }
+        if !mine.isEmpty {
+            let bounds = Overlay.bounds(of: CGWindowID(wid))
+            var moved = 0
+            for entry in mine {
+                if case .moveNow(let origin) = OverlayFollowRoute.action(for: event, entry: entry, bounds: bounds),
+                   Overlay.serverMove(panelWID: entry.panelWID, cgsOrigin: origin) {
+                    moved += 1
+                }
+            }
+            lock.lock(); stats.movedOffMain += moved; lock.unlock()
+        }
+        enqueue(wid)
+    }
+
+    /// Merge `wid` into the pending set and make sure one drain is queued
+    /// on the main run loop (common modes, so it also runs during tracking).
+    private static func enqueue(_ wid: UInt32) {
+        lock.lock()
+        pending.insert(wid)
+        let schedule = !drainScheduled
+        drainScheduled = true
+        lock.unlock()
+        guard schedule else { return }
+        let main = CFRunLoopGetMain()
+        CFRunLoopPerformBlock(main, CFRunLoopMode.commonModes.rawValue) { drain() }
+        CFRunLoopWakeUp(main)
+    }
+
+    private static func drain() {
+        lock.lock()
+        let wids = pending
+        pending.removeAll()
+        drainScheduled = false
+        stats.drains += 1
+        lock.unlock()
+        for wid in wids.sorted() { Overlay.followFrameEvent(wid: CGWindowID(wid)) }
+    }
+
+    fileprivate static func countStep() {
+        lock.lock(); stats.steppedOnMain += 1; lock.unlock()
+    }
+}
+
 // MARK: - Borderless transparent overlay panel
 
 /// Borderless transparent NSPanel that hosts the overlay's WKWebView.
@@ -767,6 +1020,20 @@ enum Overlay {
     static func register(_ handle: OverlayHandle) {
         liveHandles.add(handle)
         installArmObservers()
+        OverlayEventFollow.track(handle)
+    }
+
+    /// A window-server frame event for `wid` reached main: step every
+    /// overlay tracking it now, and arm its tick as the backstop.
+    static func followFrameEvent(wid: CGWindowID) {
+        for handle in liveHandles.allObjects where handle.targetWID == wid {
+            handle.followEvent()
+        }
+    }
+
+    /// CGS 804 for `wid`. Main thread.
+    static func noteTargetDestroyed(wid: CGWindowID) {
+        OverlayEventFollow.dropTarget(wid: wid)
     }
 
     /// Something about window `wid` may be changing (AX move / resize,
@@ -874,10 +1141,20 @@ enum Overlay {
               let move   = WindowTransaction.moveWithGroup,
               let order  = WindowTransaction.orderWindow,
               let commit = WindowTransaction.commit else { return false }
+        guard panel.windowNumber > 0 else { return false }
+        return serverMove(panelWID: UInt32(panel.windowNumber), cgsOrigin: cgsOrigin, above: above)
+    }
+
+    /// `serverMove` by window-server id, callable off main: it touches no
+    /// AppKit state, only a transaction on the shared connection.
+    static func serverMove(panelWID: UInt32, cgsOrigin: CGPoint, above: CGWindowID? = nil) -> Bool {
+        guard let create = WindowTransaction.create,
+              let move   = WindowTransaction.moveWithGroup,
+              let order  = WindowTransaction.orderWindow,
+              let commit = WindowTransaction.commit else { return false }
         let cid = SkyLight.cid
-        guard cid != 0, panel.windowNumber > 0,
+        guard cid != 0, panelWID != 0,
               let txRef = create(cid)?.takeRetainedValue() else { return false }
-        let panelWID = UInt32(panel.windowNumber)
         _ = move(txRef, panelWID, cgsOrigin)
         if let above = above {
             _ = order(txRef, panelWID, 1, UInt32(above))
