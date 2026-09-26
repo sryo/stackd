@@ -132,6 +132,34 @@ func registerOverlayEventFollowTests() {
                         .stepOnMain)
     }
 
+    test("OverlayFollowRoute: a target under a daemon animation ignores window-server moves") {
+        var commanded = entry
+        commanded.commanded = true
+        try expectEqual(OverlayFollowRoute.action(for: .moved(wid: 100), entry: commanded, bounds: same),
+                        .ignore)
+        try expectEqual(OverlayFollowRoute.action(for: .resized(wid: 100), entry: commanded, bounds: same),
+                        .ignore)
+    }
+
+    // MARK: OverlayFrameSource
+
+    test("OverlayFrameSource: while animating the commanded frame wins and the live read is skipped") {
+        var liveReads = 0
+        let commanded = CGRect(x: 10, y: 20, width: 300, height: 200)
+        let frame = OverlayFrameSource.targetFrame(commanded: commanded) {
+            liveReads += 1
+            return CGRect(x: 0, y: 0, width: 100, height: 100)
+        }
+        try expectEqual(frame, commanded)
+        try expectEqual(liveReads, 0)
+    }
+
+    test("OverlayFrameSource: with no animation the live read is used") {
+        let live = CGRect(x: 5, y: 6, width: 70, height: 80)
+        try expectEqual(OverlayFrameSource.targetFrame(commanded: nil) { live }, live)
+        try expectEqual(OverlayFrameSource.targetFrame(commanded: nil) { nil }, nil)
+    }
+
     test("OverlayFollowRoute: events for another wid are ignored") {
         try expectEqual(OverlayFollowRoute.action(for: .moved(wid: 999), entry: entry, bounds: same),
                         .ignore)

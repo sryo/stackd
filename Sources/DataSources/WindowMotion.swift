@@ -502,6 +502,7 @@ final class WindowMotionEngine {
         if let old = planner.cancel(windowID: windowID) {
             resolve(old)
             elements[windowID] = nil
+            Overlay.endCommandedFrame(wid: windowID)
         }
     }
 
@@ -510,6 +511,7 @@ final class WindowMotionEngine {
         guard let old = planner.cancel(windowID: windowID) else { return false }
         resolve(old)
         elements[windowID] = nil
+        Overlay.endCommandedFrame(wid: windowID)
         return true
     }
 
@@ -557,9 +559,15 @@ final class WindowMotionEngine {
     }
 
     private func apply(_ write: MotionPlanner.FrameWrite) {
-        // The window's own AX moved/resized bangs are swallowed while it
-        // animates, so overlays tracking it are armed from here instead.
-        Overlay.noteWindowActivity(wid: write.windowID)
+        writeFrame(write)
+        // Overlays on the window follow the frame just commanded, in this
+        // same turn, rather than waiting for the window server to report
+        // the move. After the settle frame they go back to live reads.
+        Overlay.followCommandedFrame(wid: write.windowID, frame: write.frame)
+        if write.isFinal { Overlay.endCommandedFrame(wid: write.windowID) }
+    }
+
+    private func writeFrame(_ write: MotionPlanner.FrameWrite) {
         if write.isFinal {
             // Full size→pos→size dance — the settle frame is the one that
             // must stick. Reuses the element every intermediate frame just

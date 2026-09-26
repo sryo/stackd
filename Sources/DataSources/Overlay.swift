@@ -93,6 +93,11 @@ final class OverlayHandle: NSObject, WKNavigationDelegate {
     // Target size the panel was last fitted to; read by the event-follow
     // entry to tell a pure move from a resize.
     private var lastTargetSize: CGSize = .zero
+    // The frame the motion engine last wrote for the target while it
+    // animates it. Non-nil means the panel follows these writes instead of
+    // reading the target's live bounds, which trail the write by the app's
+    // AX round-trip and the compositor.
+    private var commandedFrame: CGRect?
 
     init(id: Int, targetWID: CGWindowID, panel: NSPanel, webView: WKWebView,
          outset: CGFloat = 0) {
@@ -115,6 +120,7 @@ final class OverlayHandle: NSObject, WKNavigationDelegate {
         if released { return }
         if newWID == targetWID { return }
         targetWID = newWID
+        commandedFrame = nil
         OverlayEventFollow.track(self)
         forceRepin()
     }
@@ -216,6 +222,24 @@ final class OverlayHandle: NSObject, WKNavigationDelegate {
         arm()
     }
 
+    /// The motion engine just wrote `frame` for the target: place the panel
+    /// there now, on the same main-thread turn as the write.
+    func followCommanded(_ frame: CGRect) {
+        if released || !started { return }
+        commandedFrame = frame
+        step()
+        arm()
+    }
+
+    /// The target's animation ended or was cancelled: go back to reading its
+    /// live bounds, which the armed tick does from the next vsync on.
+    func releaseCommanded() {
+        guard commandedFrame != nil else { return }
+        commandedFrame = nil
+        publishFollowEntry()
+        arm()
+    }
+
     private func publishFollowEntry() {
         guard OverlayEventFollow.enabled, !released else { return }
         OverlayEventFollow.publish(self, OverlayFollowEntry(
@@ -223,7 +247,8 @@ final class OverlayHandle: NSObject, WKNavigationDelegate {
             panelWID: lastFrame == .zero ? 0 : UInt32(max(panel.windowNumber, 0)),
             outset: outset,
             targetSize: lastTargetSize,
-            visible: panel.isVisible))
+            visible: panel.isVisible,
+            commanded: commandedFrame != nil))
     }
 
     private func observe() -> Bool {
@@ -239,7 +264,8 @@ final class OverlayHandle: NSObject, WKNavigationDelegate {
         // ordered in at its unwarped frame.
         guard Overlay.isOrderedIn(targetWID),
               !WindowEvents.isAnimating(windowID: targetWID),
-              let frame = Overlay.bounds(of: targetWID) else {
+              let frame = OverlayFrameSource.targetFrame(
+                  commanded: commandedFrame, live: { Overlay.bounds(of: targetWID) }) else {
             if panel.isVisible {
                 panel.orderOut(nil)
                 return true
@@ -645,6 +671,19 @@ enum OverlayTickPlan {
     }
 }
 
+// MARK: - Frame source (pure, testable)
+
+/// Where a tick takes the target frame from. While the daemon animates the
+/// target, the frame it commanded is ahead of anything the window server can
+/// report yet, so the panel follows the command and never reads live bounds
+/// mid-animation (reading them would pull it back to the lagging window).
+enum OverlayFrameSource {
+    static func targetFrame(commanded: CGRect?, live: () -> CGRect?) -> CGRect? {
+        if let c = commanded { return c }
+        return live()
+    }
+}
+
 // MARK: - Target push (pure, testable)
 
 /// At most one `sd.target` evaluateJavaScript in flight per overlay. A
@@ -834,6 +873,9 @@ struct OverlayFollowEntry: Equatable {
     var outset: CGFloat
     var targetSize: CGSize
     var visible: Bool
+    /// The target is under a daemon animation and the panel follows the
+    /// commanded frame; window-server frame events for it are ignored.
+    var commanded: Bool = false
 }
 
 enum OverlayFollowAction: Equatable {
@@ -858,7 +900,7 @@ enum OverlayFollowRoute {
     /// `bounds` is SLSGetWindowBounds of the target, read after the event.
     static func action(for event: CGSDecodedWindowEvent, entry: OverlayFollowEntry,
                        bounds: CGRect?) -> OverlayFollowAction {
-        guard let wid = frameEventWID(event), wid == entry.wid else { return .ignore }
+        guard let wid = frameEventWID(event), wid == entry.wid, !entry.commanded else { return .ignore }
         guard case .moved = event,
               entry.visible, entry.panelWID != 0,
               let b = bounds,
@@ -1056,6 +1098,22 @@ enum Overlay {
     /// CGS 804 for `wid`. Main thread.
     static func noteTargetDestroyed(wid: CGWindowID) {
         OverlayEventFollow.dropTarget(wid: wid)
+    }
+
+    /// The motion engine wrote `frame` for `wid`: every overlay tracking it
+    /// moves there now. Main thread only.
+    static func followCommandedFrame(wid: CGWindowID, frame: CGRect) {
+        for handle in liveHandles.allObjects where handle.targetWID == wid {
+            handle.followCommanded(frame)
+        }
+    }
+
+    /// The motion engine stopped animating `wid` (settled, cancelled or
+    /// overridden by an instant write). Main thread only.
+    static func endCommandedFrame(wid: CGWindowID) {
+        for handle in liveHandles.allObjects where handle.targetWID == wid {
+            handle.releaseCommanded()
+        }
     }
 
     /// Something about window `wid` may be changing (AX move / resize,
