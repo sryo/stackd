@@ -408,7 +408,41 @@ final class EventTapRegistry {
     // Reset to false when the rects are cleared so a re-arm starts cold.
     private var insideByKey: [String: Bool] = [:]
 
+    // The single active trackpad-scroll claim (last claimant wins), decided
+    // in the consuming tap. Owners that already have an unload cleanup.
+    private(set) var scrollClaim: ScrollClaim?
+    private var scrollClaimCleanupOwners: Set<String> = []
+
     private init() {}
+
+    // MARK: - Scroll claim
+
+    /// Swallow the current trackpad session of `senderId` (nil = any
+    /// trackpad) until its next scroll begins. Needs the consuming tap;
+    /// returns false when it can't be installed.
+    func claimScroll(senderId: UInt64?, owner: String) -> Bool {
+        guard ensureConsumeTap(adding: .scrollWheel) else { return false }
+        scrollClaim = ScrollClaim(senderId: senderId, owner: owner)
+        return true
+    }
+
+    /// Drop `owner`'s claim if it still holds it. Returns whether it did.
+    @discardableResult
+    func releaseScroll(owner: String) -> Bool {
+        guard scrollClaim?.owner == owner else { return false }
+        scrollClaim = nil
+        return true
+    }
+
+    /// A Token that releases `owner`'s claim on unload — returned once per
+    /// owner, nil on later calls, so repeated claims don't pile up tokens.
+    func scrollClaimCleanup(owner: String) -> Token? {
+        guard scrollClaimCleanupOwners.insert(owner).inserted else { return nil }
+        return Token { [weak self] in
+            self?.releaseScroll(owner: owner)
+            self?.scrollClaimCleanupOwners.remove(owner)
+        }
+    }
 
     // Returns false if Accessibility isn't granted. Idempotent.
     @discardableResult
@@ -733,6 +767,13 @@ final class EventTapRegistry {
     }
 
     private func dispatchConsume(type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
+        if type == .scrollWheel, let claim = scrollClaim {
+            switch ScrollClaim.decide(claim: claim, ScrollWheel.read(event)) {
+            case .swallow: return nil
+            case .release: scrollClaim = nil
+            case .pass:    break
+            }
+        }
         guard let snap = consumers[type] else { return Unmanaged.passUnretained(event) }
         var matched = false
         // Same snapshot-then-iterate discipline as dispatch(). A consumer whose
@@ -1762,6 +1803,38 @@ enum ScrollWheel {
         case 3:  return "ended"
         default: return "unknown"
         }
+    }
+}
+
+/// A stack's claim on the current trackpad scroll session. While held, the
+/// consuming tap swallows the session's remaining scroll events and its
+/// momentum tail; the next scroll that begins a new gesture passes through
+/// and ends the claim. `senderId == nil` claims every trackpad sender.
+struct ScrollClaim: Equatable {
+    enum Decision: Equatable {
+        case pass
+        case swallow
+        /// Pass the event and drop the claim.
+        case release
+    }
+
+    var senderId: UInt64?
+    var owner: String
+
+    /// A sender-scoped claim takes every continuous event of that sender,
+    /// including phase-less ones posted around a gesture; a wildcard claim
+    /// takes only phased or momentum events, whatever their sender. Discrete
+    /// wheel events and events of other senders always pass. `mayBegin` can
+    /// interleave with a momentum tail, so only `began` ends the claim.
+    static func decide(claim: ScrollClaim?, _ f: ScrollWheel.Fields) -> Decision {
+        guard let claim = claim else { return .pass }
+        let phased = f.phase != 0 || f.momentumPhase != 0
+        if let sender = claim.senderId {
+            guard f.senderId == sender, phased || f.isContinuous else { return .pass }
+        } else {
+            guard phased else { return .pass }
+        }
+        return f.phase == 1 ? .release : .swallow
     }
 }
 

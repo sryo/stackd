@@ -84,6 +84,29 @@ extension Bridge {
                 EventTapRegistry.shared.setConsumerRects(key: key, rects: rects)
                 return true
             },
+            // Claim the current trackpad scroll session: the consuming tap
+            // swallows that sender's scroll + momentum events until its next
+            // scroll begins. Body `{ senderId: number | null }` — the id a
+            // scrollWheel tap reports as `senderId` or sd.touchdevice as
+            // `device`; null claims every trackpad. One claim is active at
+            // a time (last caller wins); unload releases this stack's.
+            .syncBridge("events.claimScroll", permission: "events", denyValue: false) { bridge, body in
+                let owner = Bridge.scrollClaimOwner(bridge)
+                let sender = (body["senderId"] as? NSNumber)?.uint64Value
+                guard EventTapRegistry.shared.claimScroll(
+                    senderId: sender == 0 ? nil : sender, owner: owner) else { return false }
+                bridge.scope.adopt(EventTapRegistry.shared.scrollClaimCleanup(owner: owner))
+                return true
+            },
+            .syncBridge("events.releaseScroll", permission: "events", denyValue: false) { bridge, _ in
+                EventTapRegistry.shared.releaseScroll(owner: Bridge.scrollClaimOwner(bridge))
+            },
         ]
+    }
+
+    /// Per-Bridge claim owner. A stack shown on several displays runs one
+    /// Bridge per display, so the stack id alone doesn't identify it.
+    private static func scrollClaimOwner(_ bridge: Bridge) -> String {
+        "\(bridge.stackId)#\(UInt(bitPattern: ObjectIdentifier(bridge).hashValue))"
     }
 }

@@ -22,6 +22,18 @@ sd.events = {
     setTapRects(callback, rects) {
       return request({ type: "events.setTapRects", callback, rects: rects ?? null });
     },
+    // Claim the current trackpad scroll session so the gesture's remaining
+    // scroll events and its momentum tail never reach apps. Pass the
+    // senderId from a scrollWheel tap payload (or `device` from an
+    // sd.touchdevice frame); omit it to claim every trackpad. The daemon
+    // decides synchronously in its consuming tap and drops the claim on its
+    // own when that sender's next scroll begins. One claim is active at a
+    // time (last caller wins); stack unload releases yours.
+    //   sd.events.on("swipe", (e) => { if (committed) sd.events.claimScroll(e.senderId); });
+    claimScroll(senderId) {
+      return request({ type: "events.claimScroll", senderId: senderId ?? null });
+    },
+    releaseScroll() { return request({ type: "events.releaseScroll" }); },
     // Register the handler for a manifest-declared eventtap callback name.
     // Replaces the `window.onTap_<name> = (e) => {...}` global-mutation
     // pattern; returns a disposer that clears the slot on dispose. The
