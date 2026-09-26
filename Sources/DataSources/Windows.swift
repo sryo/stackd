@@ -4207,6 +4207,8 @@ final class WindowsAXObserver {
         WindowMotionEngine.shared.cancel(windowID: wid)
         FrameLedger.shared.clear(windowID: wid)
         dropFrameBangState(wid: wid)
+        titleReads.purge { $0 == wid }
+        titleTargets[wid] = nil
         WindowDebug.log("ax: window destroyed pid=\(pid) wid=\(wid)")
         let snap = WindowsLifecycleObserver.Snap(
             id: Int(wid), pid: Int(pid), app: app, title: title, frame: .zero
@@ -4214,12 +4216,57 @@ final class WindowsAXObserver {
         WindowsLifecycleObserver.shared.onDestroy?(snap)
     }
 
+    /// The title and frame reads run on the app's AXAppQueues queue, one per
+    /// window at a time (AddressabilityReads): a change that lands while a
+    /// read is running marks it stale, so its result is dropped and one
+    /// fresh read follows. A synchronous read here blocked main for the AX
+    /// messaging timeout whenever the app was stuck mid-retitle.
+    private struct TitleTarget {
+        let pid: pid_t
+        let app: String
+        let window: AXUIElement
+    }
+    private var titleReads = AddressabilityReads<CGWindowID>()
+    private var titleTargets: [CGWindowID: TitleTarget] = [:]
+
     private func onTitleChanged(pid: pid_t, wid: CGWindowID, app: String, window: AXUIElement) {
-        let newTitle = axWindowString(window, kAXTitleAttribute as String) ?? ""
+        titleTargets[wid] = TitleTarget(pid: pid, app: app, window: window)
+        if let generation = titleReads.request(wid) {
+            startTitleRead(wid: wid, generation: generation)
+        } else {
+            titleReads.markStale { $0 == wid }
+        }
+    }
+
+    private func startTitleRead(wid: CGWindowID, generation: UInt64) {
+        guard let target = titleTargets[wid] else { return }
+        AXAppQueues.queue(for: target.pid).async { [weak self] in
+            let title = Self.readString(target.window, kAXTitleAttribute as String) ?? ""
+            let frame = Self.readWindowFrame(target.window) ?? .zero
+            DispatchQueue.main.async {
+                self?.titleReadResolved(wid: wid, generation: generation, target: target,
+                                        newTitle: title, frame: frame)
+            }
+        }
+    }
+
+    private func titleReadResolved(wid: CGWindowID, generation: UInt64, target: TitleTarget,
+                                   newTitle: String, frame: CGRect) {
+        switch titleReads.resolved(wid, generation: generation) {
+        case .discard:
+            return
+        case .rerun(let next):
+            startTitleRead(wid: wid, generation: next)
+            return
+        case .apply:
+            titleTargets[wid] = nil
+        }
+        let pid = target.pid, app = target.app
+        // Destroyed while the read ran: no title bang for a dead window.
+        guard windows[pid]?[wid] != nil else { return }
         let oldTitle = lastTitle[pid]?[wid] ?? ""
         if newTitle == oldTitle { return }
         lastTitle[pid, default: [:]][wid] = newTitle
-        let frame = axWindowFrame(window) ?? .zero
         let snap = WindowsLifecycleObserver.Snap(
             id: Int(wid), pid: Int(pid), app: app, title: newTitle, frame: frame
         )
@@ -4381,7 +4428,10 @@ final class WindowsAXObserver {
     // MARK: - AX helpers (window-scoped, to avoid colliding with the
     // app-scoped helpers used by FrontmostWindowObserver above)
 
-    private func axWindowString(_ el: AXUIElement, _ attr: String) -> String? {
+    private func axWindowString(_ el: AXUIElement, _ attr: String) -> String? { Self.readString(el, attr) }
+
+    /// Thread-agnostic: the title path calls it from the app's AX queue.
+    private static func readString(_ el: AXUIElement, _ attr: String) -> String? {
         var ref: CFTypeRef?
         guard AXUIElementCopyAttributeValue(el, attr as CFString, &ref) == .success else { return nil }
         return ref as? String
