@@ -1276,6 +1276,95 @@ enum Gesture {
 }
 
 // MARK: ============================================================
+// MARK: ScrollWheel — scroll-event field decoding
+// MARK: ============================================================
+
+// CoreGraphics private SPI. CGEventCopyIOHIDEvent returns the IOHIDEvent a
+// CGEvent was built from (+1, nil for synthesized events);
+// IOHIDEventGetSenderID returns the IORegistry entry ID of the HID service
+// that produced it, which is the same ID for every scroll, momentum and
+// gesture event of one physical device.
+@_silgen_name("CGEventCopyIOHIDEvent")
+private func CGEventCopyIOHIDEvent(_ event: CGEvent) -> Unmanaged<CFTypeRef>?
+
+@_silgen_name("IOHIDEventGetSenderID")
+private func IOHIDEventGetSenderID(_ event: CFTypeRef) -> UInt64
+
+enum ScrollWheel {
+
+    /// Raw scroll fields of one scrollWheel CGEvent. Axis 1 is vertical and
+    /// axis 2 horizontal; signs are the raw CoreGraphics values, so they
+    /// already include the user's natural-scrolling preference.
+    struct Fields: Equatable {
+        var pointDeltaX: Double
+        var pointDeltaY: Double
+        var fixedDeltaX: Double
+        var fixedDeltaY: Double
+        /// CGScrollPhase: 1 began, 2 changed, 4 ended, 8 cancelled,
+        /// 128 mayBegin. 0 for wheel mice and momentum events.
+        var phase: Int64
+        /// CGMomentumScrollPhase: 0 none, 1 begin, 2 continue, 3 end.
+        var momentumPhase: Int64
+        var isContinuous: Bool
+        /// HID sender (0 = unknown / synthesized).
+        var senderId: UInt64
+    }
+
+    static func read(_ event: CGEvent) -> Fields {
+        Fields(
+            pointDeltaX: event.getDoubleValueField(.scrollWheelEventPointDeltaAxis2),
+            pointDeltaY: event.getDoubleValueField(.scrollWheelEventPointDeltaAxis1),
+            fixedDeltaX: event.getDoubleValueField(.scrollWheelEventFixedPtDeltaAxis2),
+            fixedDeltaY: event.getDoubleValueField(.scrollWheelEventFixedPtDeltaAxis1),
+            phase: event.getIntegerValueField(.scrollWheelEventScrollPhase),
+            momentumPhase: event.getIntegerValueField(.scrollWheelEventMomentumPhase),
+            isContinuous: event.getIntegerValueField(.scrollWheelEventIsContinuous) != 0,
+            senderId: senderId(of: event))
+    }
+
+    static func senderId(of event: CGEvent) -> UInt64 {
+        guard let hid = CGEventCopyIOHIDEvent(event)?.takeRetainedValue() else { return 0 }
+        return IOHIDEventGetSenderID(hid)
+    }
+
+    /// Payload keys merged into a scrollWheel eventtap callback.
+    static func payload(_ f: Fields) -> [String: Any] {
+        [
+            "deltaX": f.pointDeltaX,
+            "deltaY": f.pointDeltaY,
+            "fixedDeltaX": f.fixedDeltaX,
+            "fixedDeltaY": f.fixedDeltaY,
+            "scrollPhase": phaseName(f.phase),
+            "momentumPhase": momentumPhaseName(f.momentumPhase),
+            "isContinuous": f.isContinuous,
+            "senderId": f.senderId == 0 ? NSNull() : f.senderId as Any
+        ]
+    }
+
+    static func phaseName(_ raw: Int64) -> String {
+        switch raw {
+        case 0:   return "none"
+        case 1:   return "began"
+        case 2:   return "changed"
+        case 4:   return "ended"
+        case 8:   return "cancelled"
+        case 128: return "mayBegin"
+        default:  return "unknown"
+        }
+    }
+
+    static func momentumPhaseName(_ raw: Int64) -> String {
+        switch raw {
+        case 0:  return "none"
+        case 1:  return "began"
+        case 2:  return "changed"
+        case 3:  return "ended"
+        default: return "unknown"
+        }
+    }
+}
+
+// MARK: ============================================================
 // MARK: Hotkey — Carbon hotkey registry + modal modes
 // MARK: ============================================================
 

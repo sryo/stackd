@@ -1278,6 +1278,8 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         case .mouseMoved, .leftMouseDragged, .rightMouseDragged, .otherMouseDragged:
             payload["deltaX"] = event.getDoubleValueField(.mouseEventDeltaX)
             payload["deltaY"] = event.getDoubleValueField(.mouseEventDeltaY)
+        case .scrollWheel:
+            for (k, v) in ScrollWheel.payload(ScrollWheel.read(event)) { payload[k] = v }
         default: break
         }
         if type.rawValue == Gesture.cgEventType.rawValue,

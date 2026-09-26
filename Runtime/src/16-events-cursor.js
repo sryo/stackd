@@ -28,6 +28,12 @@ sd.events = {
     // daemon still dispatches via window.onTap_<name>, so legacy assignments
     // keep working untouched.
     //   sd.events.on("snapshotsScroll", (e) => handleScroll(e));
+    // scrollWheel payloads carry { deltaX, deltaY, fixedDeltaX, fixedDeltaY,
+    // scrollPhase, momentumPhase, isContinuous, senderId }. scrollPhase is
+    // "none"|"mayBegin"|"began"|"changed"|"ended"|"cancelled", momentumPhase
+    // "none"|"began"|"changed"|"ended"; wheel mice report isContinuous:false
+    // and "none" for both. senderId names the physical device (null when
+    // synthesized).
     on(name, fn) { return __registerSlotHandler("Tap", name, fn); }
   };
   // Cursor — warp / read. Top-left global coords by default (same convention

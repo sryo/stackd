@@ -94,6 +94,8 @@ Lowercased, split on `+`. Modifiers (any order): `cmd`/`command`/`meta` (⌘), `
 
 **Callback payload:** `{ type, keyCode, flags, x, y }`, plus `deltaX`/`deltaY` for `mouseMoved` and dragged variants, gesture fields for `gesture`, and `phase` only when `emitLeave` is active.
 
+`scrollWheel` adds `{ deltaX, deltaY, fixedDeltaX, fixedDeltaY, scrollPhase, momentumPhase, isContinuous, senderId }`. `deltaX`/`deltaY` are point deltas and `fixedDelta*` the fixed-point line deltas, both with raw CoreGraphics signs (natural scrolling already applied). `scrollPhase` is `"none"|"mayBegin"|"began"|"changed"|"ended"|"cancelled"`; `momentumPhase` is `"none"|"began"|"changed"|"ended"`. Wheel mice report `isContinuous:false` and both phases `"none"`. `senderId` identifies the physical HID device (the same value for a gesture's scroll and momentum events; `null` for synthesized events).
+
 ## `defaults.json` (repo-wide, not per-stack)
 
 A `defaults.json` next to the `stacks/` directory supplies manifest defaults merged *under* every stack's `stack.json` (per-stack keys win). It's a sibling file, not a manifest field. (Pattern from SketchyBar's `--default`.)
