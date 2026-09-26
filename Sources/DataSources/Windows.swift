@@ -3472,6 +3472,69 @@ struct FrameBangCoalescer<Source> {
 
 extension FrameBangCoalescer.TickAction: Equatable where Source: Equatable {}
 
+/// Off-main read schedule for dispatched moved/resized bangs. The frame
+/// read goes to the app's AXAppQueues queue, so a stuck app (AX messaging
+/// timeout) blocks only its own queue, not the daemon's main thread.
+///
+/// At most one read in flight per key: a dispatch that lands while one is
+/// running parks its source (last wins) and chains once the running read
+/// resolves — a hung app accrues one pending read per key, not one per
+/// 80ms tick. Each read carries a generation; `purge` (window destroyed)
+/// forgets the key, so a result that comes back afterwards resolves to
+/// .discard instead of banging a dead window, and can't free a read
+/// started after the purge. Pure; the caller owns queues and main hops.
+struct FrameBangReads<Source> {
+    typealias Key = FrameBangCoalescer<Source>.Key
+    struct Start {
+        let generation: UInt64
+        let source: Source
+    }
+    enum Resolution {
+        /// Deliver the result; start `next` (the parked source) if non-nil.
+        case deliver(next: Start?)
+        case discard
+    }
+
+    private struct Slot {
+        var generation: UInt64
+        var parked: Source?
+    }
+    private var inFlight: [Key: Slot] = [:]
+    private var nextGeneration: UInt64 = 0
+
+    /// A read to start now, or nil when one is already in flight for the
+    /// key (the source is parked and chains on resolve).
+    mutating func request(_ key: Key, source: Source) -> Start? {
+        if inFlight[key] != nil {
+            inFlight[key]?.parked = source
+            return nil
+        }
+        return start(key, source: source)
+    }
+
+    mutating func resolved(_ key: Key, generation: UInt64) -> Resolution {
+        guard let slot = inFlight[key], slot.generation == generation else { return .discard }
+        guard let parked = slot.parked else {
+            inFlight[key] = nil
+            return .deliver(next: nil)
+        }
+        return .deliver(next: start(key, source: parked))
+    }
+
+    mutating func purge(windowID: CGWindowID) {
+        inFlight = inFlight.filter { $0.key.windowID != windowID }
+    }
+
+    private mutating func start(_ key: Key, source: Source) -> Start {
+        nextGeneration += 1
+        inFlight[key] = Slot(generation: nextGeneration, parked: nil)
+        return Start(generation: nextGeneration, source: source)
+    }
+}
+
+extension FrameBangReads.Start: Equatable where Source: Equatable {}
+extension FrameBangReads.Resolution: Equatable where Source: Equatable {}
+
 // Per-app `AXObserver` (one per pid) listens for
 // `kAXWindowCreatedNotification` on the application AXUIElement. On every
 // new window we install a per-window observer for destroy / title / move /
@@ -4030,11 +4093,11 @@ final class WindowsAXObserver {
     }
 
     private func onMoved(pid: pid_t, wid: CGWindowID, window: AXUIElement) {
-        fireFrameBang(.moved, wid: wid, window: window)
+        fireFrameBang(.moved, wid: wid, target: FrameBangTarget(pid: pid, window: window))
     }
 
     private func onResized(pid: pid_t, wid: CGWindowID, window: AXUIElement) {
-        fireFrameBang(.resized, wid: wid, window: window)
+        fireFrameBang(.resized, wid: wid, target: FrameBangTarget(pid: pid, window: window))
     }
 
     /// Shared moved/resized dispatch: self-echo classification, then
@@ -4054,33 +4117,66 @@ final class WindowsAXObserver {
     /// held AXUIElement, and the frame is read once the trailing tick
     /// dispatches. A user drag emits (and reads AX) at ~12Hz instead of
     /// on every AX callback.
-    private var frameBangCoalescer = FrameBangCoalescer<AXUIElement>()
+    ///
+    /// The read itself runs on the app's AXAppQueues queue (FrameBangReads
+    /// owns the schedule): a synchronous read here blocked main for the
+    /// full AX messaging timeout whenever the target app's main thread was
+    /// stuck, stalling every overlay and stack push with it.
+    private struct FrameBangTarget {
+        let pid: pid_t
+        let window: AXUIElement
+    }
+    private typealias FrameBangKey = FrameBangCoalescer<FrameBangTarget>.Key
+    private var frameBangCoalescer = FrameBangCoalescer<FrameBangTarget>()
+    private var frameBangReads = FrameBangReads<FrameBangTarget>()
 
-    private func fireFrameBang(_ kind: FrameBangCoalescer<AXUIElement>.Kind, wid: CGWindowID, window: AXUIElement) {
+    private func fireFrameBang(_ kind: FrameBangCoalescer<FrameBangTarget>.Kind, wid: CGWindowID, target: FrameBangTarget) {
         lastAxFire[wid] = Date().timeIntervalSince1970
         // Checked before the frame read: during an animation every tick
-        // echoes back here, and the two synchronous AX reads would be
-        // discarded anyway.
+        // echoes back here, and the two AX reads would be discarded anyway.
         if WindowMotionEngine.shared.isAnimating(windowID: wid) {
             WindowDebug.log("ax: \(kind.rawValue) swallowed (animating) wid=\(wid)")
             return
         }
-        let key = FrameBangCoalescer<AXUIElement>.Key(windowID: wid, kind: kind)
-        switch frameBangCoalescer.onEvent(key, now: CFAbsoluteTimeGetCurrent(), source: window) {
+        let key = FrameBangKey(windowID: wid, kind: kind)
+        switch frameBangCoalescer.onEvent(key, now: CFAbsoluteTimeGetCurrent(), source: target) {
         case .emit:
-            dispatchFrameBang(key, window: window)
+            dispatchFrameBang(key, target: target)
             scheduleFrameBangTick(key)
         case .hold:
             break
         }
     }
 
-    /// Reads the frame and classifies it against the ledger at dispatch
-    /// time, so the echo check always sees the frame the bang carries.
-    private func dispatchFrameBang(_ key: FrameBangCoalescer<AXUIElement>.Key, window: AXUIElement) {
-        let frame = axWindowFrame(window) ?? .zero
+    /// Starts the off-main frame read, or parks the target behind the one
+    /// already in flight for this key.
+    private func dispatchFrameBang(_ key: FrameBangKey, target: FrameBangTarget) {
+        guard let start = frameBangReads.request(key, source: target) else { return }
+        startFrameBangRead(key, start)
+    }
+
+    private func startFrameBangRead(_ key: FrameBangKey, _ start: FrameBangReads<FrameBangTarget>.Start) {
+        let window = start.source.window
+        AXAppQueues.queue(for: start.source.pid).async { [weak self] in
+            let frame = WindowsAXObserver.readWindowFrame(window) ?? .zero
+            let readAt = CFAbsoluteTimeGetCurrent()
+            DispatchQueue.main.async {
+                self?.frameBangReadResolved(key, generation: start.generation, frame: frame, readAt: readAt)
+            }
+        }
+    }
+
+    /// Main thread. Classifies the frame against the ledger as of the
+    /// moment it was read, so the echo check sees the frame the bang
+    /// carries even when the hop back to main lagged.
+    private func frameBangReadResolved(_ key: FrameBangKey, generation: UInt64, frame: CGRect, readAt: Double) {
+        guard case .deliver(let next) = frameBangReads.resolved(key, generation: generation) else {
+            WindowDebug.log("ax: \(key.kind.rawValue) read dropped (stale) wid=\(key.windowID)")
+            return
+        }
+        if let next = next { startFrameBangRead(key, next) }
         let isSelf = FrameLedger.shared.isSelf(
-            windowID: key.windowID, observed: frame, now: CFAbsoluteTimeGetCurrent()
+            windowID: key.windowID, observed: frame, now: readAt
         )
         WindowDebug.log("ax: window \(key.kind.rawValue) wid=\(key.windowID) self=\(isSelf)")
         AppDelegate.shared?.host?.bang(name: key.kind.bangName, detail: [
@@ -4095,16 +4191,17 @@ final class WindowsAXObserver {
 
     private func dropFrameBangState(wid: CGWindowID) {
         frameBangCoalescer.purge(windowID: wid)
+        frameBangReads.purge(windowID: wid)
     }
 
-    private func scheduleFrameBangTick(_ key: FrameBangCoalescer<AXUIElement>.Key) {
+    private func scheduleFrameBangTick(_ key: FrameBangKey) {
         // +5ms past the quiet window so the tick lands on the far side of
         // the gate despite main-queue timer jitter.
-        DispatchQueue.main.asyncAfter(deadline: .now() + FrameBangCoalescer<AXUIElement>.quietWindow + 0.005) { [weak self] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + FrameBangCoalescer<FrameBangTarget>.quietWindow + 0.005) { [weak self] in
             guard let self = self else { return }
             switch self.frameBangCoalescer.onTick(key, now: CFAbsoluteTimeGetCurrent()) {
-            case .emitHeld(let window):
-                self.dispatchFrameBang(key, window: window)
+            case .emitHeld(let target):
+                self.dispatchFrameBang(key, target: target)
                 self.scheduleFrameBangTick(key)
             case .close:
                 break
@@ -4158,7 +4255,11 @@ final class WindowsAXObserver {
         return ref as? Bool
     }
 
-    private func axWindowFrame(_ el: AXUIElement) -> CGRect? {
+    /// Thread-agnostic (static, touches no observer state): the moved/
+    /// resized path calls it from the app's AX queue.
+    private func axWindowFrame(_ el: AXUIElement) -> CGRect? { Self.readWindowFrame(el) }
+
+    private static func readWindowFrame(_ el: AXUIElement) -> CGRect? {
         var posRef: CFTypeRef?
         var sizeRef: CFTypeRef?
         guard AXUIElementCopyAttributeValue(el, kAXPositionAttribute as CFString, &posRef) == .success,
