@@ -84,6 +84,9 @@
   // Inclusion verdicts pushed in by other stacks (windowscape etc.). Missing
   // entries default to `true` so an unknown window paints the included color.
   const inclusionByWinId = new Map();
+  // cornerHints per window id. Only answers that resolved the AX element
+  // (non-null role) are kept; dropped when the window is destroyed.
+  const hintsByWinId = new Map();
 
   // Fullscreen detection — sd.spaces.all entries (L10) carry displayID, so
   // we index per-screen fullscreen state by display id directly. When the
@@ -117,6 +120,14 @@
   function colorForWin(winId) {
     const included = inclusionByWinId.has(winId) ? inclusionByWinId.get(winId) : true;
     return included ? cfg.colorIncluded : cfg.colorExcluded;
+  }
+
+  async function hintsFor(winId) {
+    const cached = hintsByWinId.get(winId);
+    if (cached) return cached;
+    const hints = await sd.windows.cornerHints(winId).catch(() => null);
+    if (hints && hints.role != null) hintsByWinId.set(winId, hints);
+    return hints;
   }
 
   function radiusFromHints(h) {
@@ -204,19 +215,20 @@
     if (!win || typeof win.id !== "number") return hideOnce();
     const winId = win.id;
 
+    // One AX read answers both the standard-window gate and the radius.
+    const hints = await hintsFor(winId);
+
     // Non-standard windows (palettes, ephemeral AX junk): hide the border
     // but keep the overlay attached. Re-target to the next real window on
-    // focus change without paying for a fresh attach.
-    let standard = true;
-    try { standard = await sd.windows.isStandard(winId); } catch (_) { standard = true; }
-    if (!standard) return hideOnce();
+    // focus change without paying for a fresh attach. A failed read counts
+    // as standard.
+    if (hints && hints.subrole !== "AXStandardWindow") return hideOnce();
 
     // Fullscreen-space gate: when the focused window lives on a display
     // whose active space is fullscreen, the fullscreen app owns the chrome.
     if (isWindowInFullscreenSpace(win)) return hideOnce();
 
     const color = colorForWin(winId);
-    const hints = await sd.windows.cornerHints(winId).catch(() => null);
     const radius = radiusFromHints(hints);
     const thickness = cfg.thickness;
 
@@ -291,6 +303,10 @@
       : null;
     inclusionByWinId.set(detail.winId, next);
     if (focusedWin && detail.winId === focusedWin.id && prev !== next) refreshStyle();
+  });
+
+  sd.windows.destroyed.subscribe((detail) => {
+    if (detail && typeof detail.id === "number") hintsByWinId.delete(detail.id);
   });
 
   // --- main subscription -------------------------------------------------

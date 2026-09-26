@@ -5,5 +5,5 @@
   "size": { "h": 0 },
   "clickThrough": true,
   "permissions": [],
-  "handles": ["overlay-border.inclusion"]
+  "handles": ["overlay-border.inclusion", "sd.window.destroyed"]
 }
