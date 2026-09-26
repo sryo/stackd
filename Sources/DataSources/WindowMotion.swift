@@ -92,6 +92,40 @@ enum MotionRouting {
         guard duration > 0 || easing == .spring else { return false }
         return !(reduceMotion && respectReduceMotion)
     }
+
+    enum Route: Equatable {
+        /// The motion engine's display-link animation.
+        case animate
+        /// Through the app's AX writer mailbox: off main, latest frame
+        /// wins per window, no read-back.
+        case live
+        /// A synchronous AX write on main (queued behind the mailbox only
+        /// when writes for the window are already in it).
+        case instant
+    }
+
+    /// A requested animation wins over `live`; `live` only changes how an
+    /// instant write is delivered.
+    static func route(duration: Double, easing: MotionEasing?, live: Bool,
+                      reduceMotion: Bool, respectReduceMotion: Bool) -> Route {
+        if animates(duration: duration, easing: easing, reduceMotion: reduceMotion,
+                    respectReduceMotion: respectReduceMotion) { return .animate }
+        return live ? .live : .instant
+    }
+}
+
+/// One `{live: true}` setFrame as a mailbox write: an intermediate write
+/// (bounded timeout, no read-back), ordered so a growing window moves
+/// before it grows. When the app refused this exact size before, the size
+/// is left at what the app enforces and only the position is written.
+enum LiveFrameWrite {
+    static func plan(windowID: CGWindowID, frame: CGRect, previous: CGRect?,
+                     enforcedSize: CGSize?) -> MotionPlanner.FrameWrite? {
+        let target = frame.motionRounded
+        return MotionPlanner.FrameWrite(windowID: windowID, frame: target, isFinal: false,
+                                        order: .pick(current: previous, target: target))
+            .honoring(enforcedSize: enforcedSize)
+    }
 }
 
 /// Which display's refresh drives a window's animation: the display
@@ -453,12 +487,20 @@ final class FrameLedger {
     /// the app rejects every frame. Asking with a different target size
     /// forgets the refusal: the new size may well be honored.
     func enforcedSize(windowID: CGWindowID, targetSize: CGSize) -> CGSize? {
-        guard let e = enforced[windowID] else { return nil }
-        if abs(e.target.width - targetSize.width) < 0.5, abs(e.target.height - targetSize.height) < 0.5 {
-            return e.size
-        }
+        guard enforced[windowID] != nil else { return nil }
+        if let size = peekEnforcedSize(windowID: windowID, targetSize: targetSize) { return size }
         enforced[windowID] = nil
         return nil
+    }
+
+    /// `enforcedSize` without forgetting on a different target: a stream
+    /// of live writes, each at a new size, leaves the refusal in place for
+    /// the next animation toward the refused size.
+    func peekEnforcedSize(windowID: CGWindowID, targetSize: CGSize) -> CGSize? {
+        guard let e = enforced[windowID],
+              abs(e.target.width - targetSize.width) < 0.5,
+              abs(e.target.height - targetSize.height) < 0.5 else { return nil }
+        return e.size
     }
 
     func isSelf(windowID: CGWindowID, observed: CGRect, now: Double) -> Bool {
@@ -583,7 +625,7 @@ struct MotionWriteMailbox {
     }
 }
 
-private extension CGRect {
+extension CGRect {
     /// AX frames are integral; rounding here is also what powers the
     /// skip-unchanged write suppression (most ticks near the end of an
     /// ease-out land on the same pixel).
@@ -742,11 +784,17 @@ final class WindowMotionEngine {
         duration: Double,
         easing: MotionEasing?,
         respectReduceMotion: Bool = true,
+        live: Bool = false,
         completion: @escaping (FrameWriteOutcome) -> Void
     ) {
-        guard MotionRouting.animates(duration: duration, easing: easing,
-                                     reduceMotion: ReduceMotion.enabled,
-                                     respectReduceMotion: respectReduceMotion) else {
+        let route = MotionRouting.route(duration: duration, easing: easing, live: live,
+                                        reduceMotion: ReduceMotion.enabled,
+                                        respectReduceMotion: respectReduceMotion)
+        if route == .live {
+            liveWrite(windowID: windowID, frame: frame) { ok in completion(.instant(ok: ok)) }
+            return
+        }
+        guard route == .animate else {
             instantWriteWins(windowID: windowID)
             let cached = elements.removeValue(forKey: windowID)
             // Animation writes for this window still queued or in flight
@@ -771,6 +819,35 @@ final class WindowMotionEngine {
                 easing: easing ?? .easeOutCubic) { settled in
             completion(.animated(settled: settled))
         }
+    }
+
+    /// `{live: true}`: the instant write through the app's mailbox. The
+    /// ledger records it before it is queued, so the window's frame echoes
+    /// classify as self; `completion` runs when the write (or the newer
+    /// live write that replaced it) lands.
+    private func liveWrite(windowID: CGWindowID, frame: CGRect, completion: @escaping (Bool) -> Void) {
+        instantWriteWins(windowID: windowID)
+        // A batch collects frames for one commit; a live write joins it.
+        if WindowsByID.batchSink != nil {
+            completion(WindowsByID.setFrame(windowID: windowID, x: frame.origin.x, y: frame.origin.y,
+                                            w: frame.size.width, h: frame.size.height))
+            return
+        }
+        let cached = elements.removeValue(forKey: windowID)
+        guard let el = cached ?? WindowsByID.elementFor(windowID: windowID),
+              let writer = writer(for: el) else {
+            completion(false)
+            return
+        }
+        let enforced = FrameLedger.shared.peekEnforcedSize(windowID: windowID, targetSize: frame.size)
+        guard let write = LiveFrameWrite.plan(windowID: windowID, frame: frame,
+                                              previous: Overlay.bounds(of: windowID),
+                                              enforcedSize: enforced) else {
+            completion(true)
+            return
+        }
+        FrameLedger.shared.recordWrite(windowID: windowID, frame: write.frame)
+        post(write, element: el, writer: writer, generation: 0, callback: completion)
     }
 
     func animate(

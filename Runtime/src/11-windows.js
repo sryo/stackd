@@ -88,13 +88,22 @@ sd.windows = {
     // With the system Reduce Motion setting on, the animation collapses to
     // an instant write (the promise resolves with the instant result) unless
     // the options carry { respectReduceMotion: false }.
+    //
+    // Live form, for writes that follow input frame by frame (a neighbor
+    // tracking a dragged edge):
+    //   sd.windows.setFrame(id, frame, { live: true })
+    // The write goes through the app's AX writer off the daemon's main
+    // thread; a newer live write for the same window replaces one still
+    // queued, so a slow app lags by at most one relayout instead of a
+    // backlog. No read-back. The promise resolves when the write (or the
+    // one that replaced it) lands. A duration still animates.
     setFrame(arg1, arg2, arg3) {
       if (typeof arg1 === "number") {
         const f = arg2 || {};
         const o = arg3 || {};
         return request({ type: "windows.byId.setFrame", id: arg1, x: f.x, y: f.y, w: f.w, h: f.h,
                          duration: o.duration, easing: o.easing,
-                         respectReduceMotion: o.respectReduceMotion });
+                         respectReduceMotion: o.respectReduceMotion, live: o.live });
       }
       const f = arg1 || {};
       return request({ type: "windows.setFrame", x: f.x, y: f.y, w: f.w, h: f.h });
