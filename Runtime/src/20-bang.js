@@ -10,8 +10,9 @@
   //   sd.window.titleChanged   { id, app, title, oldTitle, frame, pid } — 1Hz poll
   //   sd.window.moved          { id, frame }                  — CGS (high rate during drag)
   //   sd.window.resized        { id, frame }                  — CGS (high rate during resize)
-  //   sd.window.minimized      { id }                         — CGS
-  //   sd.window.deminimized    { id }                         — CGS
+  //   sd.window.minimized      { id }                         — AX (after the genie)
+  //   sd.window.deminimized    { id }                         — AX
+  //   sd.window.animating      { id, frame, visualFrame }     — CGS (genie start)
   //   sd.window.reordered      { id }                         — CGS (z-order change)
   //   sd.window.focusedByMouse { }                            — CGS (frontmost-app change)
   // Two shapes:

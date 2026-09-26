@@ -40,6 +40,11 @@ func registerCGSDecodeTests() {
         try expectEqual(decode(1508, u32(1)), .frontmostByMouse)
     }
 
+    test("1327 decodes as animationBegan whatever the payload (a counter, not a wid)") {
+        try expectEqual(decode(1327, u32(12345)), .animationBegan)
+        try expectEqual(decode(1327, []), .animationBegan)
+    }
+
     test("short buffers are malformed, not crashes") {
         try expectEqual(decode(806, []), .malformed)
         try expectEqual(decode(806, [0x01, 0x02]), .malformed)

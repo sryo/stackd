@@ -48,6 +48,19 @@ func registerWindowChannelTests() {
         try expectEqual(out, "function,function,function,function")
     }
 
+    test("sd.windows.animating routes sd.window.animating with both frames") {
+        let out = JSHarness.evalString("""
+        (function() {
+          let seen = null;
+          sd.windows.animating.subscribe((d) => { if (d && d.id === 9) seen = d; });
+          window.onBang_sd_window_animating({ id: 9,
+            frame: {x:0,y:0,w:800,h:600}, visualFrame: {x:20,y:400,w:300,h:200} });
+          return seen ? (seen.frame.w + ',' + seen.visualFrame.w) : 'null';
+        })()
+        """)
+        try expectEqual(out, "800,300")
+    }
+
     test("subscribe receives subsequent dispatches (not just the first)") {
         let out = JSHarness.evalString("""
         (function() {

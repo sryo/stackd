@@ -82,7 +82,8 @@ The daemon fires these as windows change. Subscribe via `sd.windows.<name>.subsc
 | `sd.window.titleChanged` | `{ id, app, title, oldTitle, frame, pid }` |
 | `sd.window.moved` | `{ id, frame }` (high rate during drag) |
 | `sd.window.resized` | `{ id, frame }` (high rate during resize) |
-| `sd.window.minimized` / `.deminimized` | `{ id }` |
+| `sd.window.minimized` / `.deminimized` | `{ id }` (minimized lands once the genie ends) |
+| `sd.window.animating` | `{ id, frame, visualFrame }` (a window-server animation such as the minimize genie started; `visualFrame` is the warped on-screen bounds) |
 | `sd.window.reordered` | `{ id }` (z-order change) |
 | `sd.window.focusedByMouse` | `{ }` |
 

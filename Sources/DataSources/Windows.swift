@@ -880,7 +880,9 @@ enum WindowsByID {
     @discardableResult
     static func minimize(windowID: CGWindowID, _ value: Bool) -> Bool {
         guard let el = elementFor(windowID: windowID) else { return false }
-        return AXUIElementSetAttributeValue(el, kAXMinimizedAttribute as CFString, value as CFTypeRef) == .success
+        let ok = AXUIElementSetAttributeValue(el, kAXMinimizedAttribute as CFString, value as CFTypeRef) == .success
+        if ok && value { WindowAnimationObserver.shared.noteMinimizing(windowID: windowID) }
+        return ok
     }
 
     @discardableResult
@@ -1812,6 +1814,9 @@ private enum SkyLightWindowEvents {
 //   1326 — window removed from space (same payload; destroy is covered by
 //                                  804, space-moves by 1325 on the new
 //                                  space — counted, not routed)
+//   1327 — window animation began (payload is a counter, not a wid; the
+//                                  genie into the Dock posts it ~25ms in,
+//                                  long before AX reports the minimize)
 //   1508 — frontmost app changed  (surfaced as sd.window.focusedByMouse)
 private let kSDWindowClosed:         UInt32 = 804
 private let kSDWindowMoved:          UInt32 = 806
@@ -1820,6 +1825,7 @@ private let kSDWindowReordered:      UInt32 = 808
 private let kSDWindowTitleChanged:   UInt32 = 1322
 private let kSDSpaceWindowCreated:   UInt32 = 1325
 private let kSDSpaceWindowDestroyed: UInt32 = 1326
+private let kSDWindowAnimationBegan: UInt32 = 1327
 private let kSDWindowFocusedByMouse: UInt32 = 1508
 
 /// Decoded CGS window event. Pure decode so the offset arithmetic is
@@ -1832,6 +1838,7 @@ enum CGSDecodedWindowEvent: Equatable {
     case titleChanged(wid: UInt32)
     case spaceWindowCreated(wid: UInt32, spaceID: UInt64)
     case spaceWindowDestroyed(wid: UInt32, spaceID: UInt64)
+    case animationBegan
     case frontmostByMouse
     case ignored
     case malformed
@@ -1859,6 +1866,7 @@ enum CGSWindowEventDecoder {
         case kSDSpaceWindowDestroyed:
             guard let s = space(at: 0), let w = wid(at: 8) else { return .malformed }
             return .spaceWindowDestroyed(wid: w, spaceID: s)
+        case kSDWindowAnimationBegan: return .animationBegan
         case kSDWindowFocusedByMouse: return .frontmostByMouse
         default:                      return .ignored
         }
@@ -1912,7 +1920,7 @@ enum WindowEvents {
         let cid = SkyLight.cid
         for evt in [kSDWindowClosed, kSDWindowReordered,
                     kSDSpaceWindowCreated, kSDSpaceWindowDestroyed,
-                    kSDWindowFocusedByMouse] {
+                    kSDWindowAnimationBegan, kSDWindowFocusedByMouse] {
             _ = reg(cid, windowEventsCallback, evt, nil)
         }
         // STACKD_CGS_DEBUG=1 → log every event in [700, 2000) so we can
@@ -1946,6 +1954,15 @@ enum WindowEvents {
         fireCountLock.lock()
         defer { fireCountLock.unlock() }
         return fireCounts
+    }
+
+    /// True while a window-server animation (the genie into the Dock, and
+    /// any other animation that warps a window's listed bounds) is
+    /// carrying `windowID`, from the first frame it is seen warped until
+    /// `WindowAnimationWatch.holdDuration` after. A minimize reads true
+    /// ~25ms in, long before AX reports the window minimized. Main thread.
+    static func isAnimating(windowID: CGWindowID) -> Bool {
+        WindowAnimationObserver.shared.isAnimating(windowID: windowID)
     }
 
     // MARK: - Routing
@@ -1993,6 +2010,8 @@ enum WindowEvents {
                 break
             case .frontmostByMouse:
                 host.bang(name: "sd.window.focusedByMouse", detail: [:])
+            case .animationBegan:
+                WindowAnimationObserver.shared.animationBegan()
             case .ignored, .malformed:
                 break
             }
@@ -2054,6 +2073,141 @@ enum WindowEvents {
         )
         WindowDebug.log("cgs 1325 create trigger: wid=\(wid) app=\(snap.app)")
         WindowLifecycleFanout.fireCreated(host: host, snap: snap)
+    }
+}
+
+// =====================================================================
+// MARK: - Window animations (CGS 1327)
+// =====================================================================
+
+/// Pure bookkeeping for the early "animating" signal. The window server
+/// reports a minimize through AX only after the ~500ms genie, but posts
+/// CGS 1327 (animation began) within a few frames. 1327 carries no window
+/// id, so each one opens a short watch; while it's open, a window whose
+/// window-list bounds (which show the genie's warp) differ in size from
+/// SkyLight's own frame (which doesn't) is animating.
+struct WindowAnimationWatch {
+    /// How long a 1327 keeps the per-frame comparison running.
+    static let watchDuration: Double = 0.35
+    /// How long a sighting keeps `isAnimating` true — past the end of the
+    /// genie, after which AX's minimized state takes over.
+    static let holdDuration: Double = 0.8
+    /// Listed-vs-own size difference below this is rounding, not a warp.
+    static let sizeTolerance: CGFloat = 1
+
+    private var watchEnd: Double = 0
+    private var animatingUntil: [CGWindowID: Double] = [:]
+
+    static func isAnimating(listed: CGRect, own: CGRect) -> Bool {
+        abs(listed.size.width - own.size.width) > sizeTolerance
+            || abs(listed.size.height - own.size.height) > sizeTolerance
+    }
+
+    /// Opens (or extends) the watch. True when a new watch opened, i.e.
+    /// the caller should start its frame clock.
+    mutating func begin(now: Double) -> Bool {
+        let opened = !isWatching(now: now)
+        watchEnd = now + Self.watchDuration
+        return opened
+    }
+
+    func isWatching(now: Double) -> Bool { now < watchEnd }
+
+    /// Records a sighting; true when it is the first of this animation
+    /// (the window wasn't already held), i.e. the caller should announce it.
+    mutating func noteAnimating(_ windowID: CGWindowID, now: Double) -> Bool {
+        let first = !isAnimating(windowID, now: now)
+        animatingUntil[windowID] = now + Self.holdDuration
+        return first
+    }
+
+    func isAnimating(_ windowID: CGWindowID, now: Double) -> Bool {
+        guard let until = animatingUntil[windowID] else { return false }
+        return now < until
+    }
+
+    mutating func prune(now: Double) {
+        animatingUntil = animatingUntil.filter { now < $0.value }
+    }
+}
+
+/// Impure shell for `WindowAnimationWatch`: runs the per-frame
+/// window-list vs SkyLight comparison on the shared display link while a
+/// watch is open, and fires `sd.window.animating { id, frame, visualFrame }`
+/// once per window per animation. `frame` is the window's own frame,
+/// `visualFrame` the warped bounds on screen. Only AX-tracked windows are
+/// compared. Main-thread only.
+final class WindowAnimationObserver {
+    static let shared = WindowAnimationObserver()
+    private init() {}
+
+    // SLSGetWindowBounds(cid, wid, &rect) → CGError. The window's own
+    // frame, top-left global coordinates like kCGWindowBounds.
+    private typealias GetWindowBoundsFn = @convention(c) (Int32, UInt32, UnsafeMutablePointer<CGRect>) -> Int32
+    private static let getWindowBounds: GetWindowBoundsFn? = SkyLight.sym("SLSGetWindowBounds")
+
+    private var watch = WindowAnimationWatch()
+    private var clock: Token?
+
+    func animationBegan() {
+        let now = CFAbsoluteTimeGetCurrent()
+        _ = watch.begin(now: now)
+        guard clock == nil else { return }
+        // subscribe primes the callback, so the first comparison runs now.
+        clock = DisplayLinkObserver.shared.subscribe { [weak self] in self?.tick() }
+    }
+
+    func isAnimating(windowID: CGWindowID) -> Bool {
+        watch.isAnimating(windowID, now: CFAbsoluteTimeGetCurrent())
+    }
+
+    /// Announces a minimize stackd itself started, at the call rather than
+    /// when the window server's animation shows up. Frame and visual frame
+    /// are the same: the warp hasn't begun.
+    func noteMinimizing(windowID: CGWindowID) {
+        guard let own = Self.ownBounds(windowID) else { return }
+        report(windowID, frame: own, visualFrame: own)
+    }
+
+    private func tick() {
+        let now = CFAbsoluteTimeGetCurrent()
+        guard watch.isWatching(now: now) else {
+            clock?.cancel()
+            clock = nil
+            watch.prune(now: now)
+            return
+        }
+        guard let info = CGWindowListCopyWindowInfo(
+            [.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]]
+        else { return }
+        for entry in info {
+            guard (entry[kCGWindowLayer as String] as? Int) == 0,
+                  let wid = entry[kCGWindowNumber as String] as? CGWindowID,
+                  WindowsAXObserver.shared.pidFor(wid: wid) != nil,
+                  let dict = entry[kCGWindowBounds as String] as? NSDictionary,
+                  let listed = CGRect(dictionaryRepresentation: dict),
+                  let own = Self.ownBounds(wid),
+                  WindowAnimationWatch.isAnimating(listed: listed, own: own)
+            else { continue }
+            report(wid, frame: own, visualFrame: listed)
+        }
+    }
+
+    private func report(_ wid: CGWindowID, frame: CGRect, visualFrame: CGRect) {
+        guard watch.noteAnimating(wid, now: CFAbsoluteTimeGetCurrent()) else { return }
+        func rect(_ r: CGRect) -> [String: Int] {
+            ["x": Int(r.origin.x), "y": Int(r.origin.y), "w": Int(r.size.width), "h": Int(r.size.height)]
+        }
+        WindowDebug.log("animating wid=\(wid) frame=\(frame) visual=\(visualFrame)")
+        AppDelegate.shared?.host?.bang(name: "sd.window.animating", detail: [
+            "id": Int(wid), "frame": rect(frame), "visualFrame": rect(visualFrame)
+        ])
+    }
+
+    private static func ownBounds(_ wid: CGWindowID) -> CGRect? {
+        guard let fn = getWindowBounds, SkyLight.cid != 0 else { return nil }
+        var rect = CGRect.zero
+        return fn(SkyLight.cid, UInt32(wid), &rect) == 0 ? rect : nil
     }
 }
 

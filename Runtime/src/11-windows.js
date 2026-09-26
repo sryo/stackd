@@ -40,6 +40,11 @@ sd.windows = {
     //   sd.windows.resized.subscribe(({id, frame}) => ...);
     //   sd.windows.minimized.subscribe(({id}) => ...);
     //   sd.windows.deminimized.subscribe(({id}) => ...);
+    //   sd.windows.animating.subscribe(({id, frame, visualFrame}) => ...);
+    // `animating` fires once per window when a window-server animation
+    // (the minimize genie) starts carrying it — ~25ms in, where
+    // `minimized` only lands once the genie ends (~500ms). `frame` is the
+    // window's own frame, `visualFrame` the warped bounds on screen.
     // The underlying bang names are still legal; this just removes the
     // window.onBang_sd_window_* boilerplate.
     created:      __windowBang("sd_window_created"),
@@ -48,6 +53,7 @@ sd.windows = {
     resized:      __windowBang("sd_window_resized"),
     minimized:    __windowBang("sd_window_minimized"),
     deminimized:  __windowBang("sd_window_deminimized"),
+    animating:    __windowBang("sd_window_animating"),
     // F15 split — granular per-event-type channels alongside the legacy
     // union `focused` channel. Each fires the moment AX reports the matching
     // notification, so stacks can subscribe to exactly what they need.

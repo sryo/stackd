@@ -141,7 +141,7 @@ func registerChannelsRegistryTests() {
             "appsChanged",
             "windowCreated", "windowDestroyed", "windowTitleChanged",
             "windowMoved", "windowResized",
-            "windowMinimized", "windowDeminimized",
+            "windowMinimized", "windowDeminimized", "windowAnimating",
             "windowReordered", "windowFocusedByMouse",
         ]
         try expectEqual(nonReplayable, expected)
