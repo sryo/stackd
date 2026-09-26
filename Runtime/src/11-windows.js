@@ -15,7 +15,9 @@ sd.windows = {
     focused: channel("focusedWindow"),
     // Each entry: { id, app, pid, title, onscreen, addressable,
     //   isStandard, isMinimized, frame: {x,y,w,h},
-    //   display: { id, frame } | undefined }
+    //   display: { id, frame } | undefined,
+    //   isResizable, canFullscreen }  — the last two once read, standard
+    //   windows only
     // The `display` field mirrors the focused-channel enrichment so per-
     // display tiling / switcher stacks don't paginate sd.display.forPoint
     // calls. `space` deliberately omitted from the list entries (the
@@ -171,7 +173,7 @@ sd.windows = {
     // Batch reader: one round-trip → all curated properties at once.
     // Returns null when the window is unaddressable; otherwise:
     //   { frame, title, role, subrole, isMinimized, isFullscreen, isMain,
-    //     isStandard, hasToolbar, cornerHints }
+    //     isStandard, hasToolbar, cornerHints, isResizable, canFullscreen }
     // Use this instead of 4-9 sequential calls (`frame`, `title`,
     // `isStandard`, `cornerHints`, ...) when a stack needs several
     // properties at attach/render time. overlay-border was 4 RPCs

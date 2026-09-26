@@ -360,9 +360,60 @@ enum Windows {
             if let d = Display.forPoint(CGPoint(x: originX, y: originY)) {
                 out["display"] = d
             }
+            if let t = probe.traits { out.merge(t.fields) { $1 } }
             return out
         }
     }
+}
+
+// MARK: - WindowTraits
+//
+// Whether a window can take an arbitrary size. Tilers read these to tell a
+// document window from a fixed-size panel that still reports
+// AXStandardWindow (Calculator, About This Mac, an app's Settings, Finder's
+// Get Info).
+struct WindowTraits: Equatable {
+    /// kAXSizeAttribute is settable.
+    let isResizable: Bool
+    /// The window has an enabled AXFullScreenButton.
+    let canFullscreen: Bool
+
+    enum Button { case enabled, disabled, absent, unreadable }
+
+    /// `sizeSettable == nil` is an unreadable attribute. Unreadable readings
+    /// fail open (resizable, fullscreen-capable) so an AX timeout never
+    /// treats an ordinary window as a panel.
+    static func from(sizeSettable: Bool?, fullscreenButton: Button) -> WindowTraits {
+        WindowTraits(isResizable: sizeSettable ?? true,
+                     canFullscreen: fullscreenButton == .enabled || fullscreenButton == .unreadable)
+    }
+
+    /// Blocks for up to the element's AX messaging timeout per read.
+    static func read(_ el: AXUIElement) -> WindowTraits {
+        var settable: DarwinBoolean = false
+        let sizeErr = AXUIElementIsAttributeSettable(el, kAXSizeAttribute as CFString, &settable)
+        var btnRef: AnyObject?
+        let btnErr = AXUIElementCopyAttributeValue(el, kAXFullScreenButtonAttribute as CFString, &btnRef)
+        let button: Button
+        switch btnErr {
+        case .success:
+            var enabledRef: AnyObject?
+            if let btn = btnRef, CFGetTypeID(btn) == AXUIElementGetTypeID(),
+               AXUIElementCopyAttributeValue(btn as! AXUIElement, kAXEnabledAttribute as CFString, &enabledRef) == .success,
+               let enabled = enabledRef as? Bool {
+                button = enabled ? .enabled : .disabled
+            } else {
+                button = .unreadable
+            }
+        case .noValue, .attributeUnsupported:
+            button = .absent
+        default:
+            button = .unreadable
+        }
+        return from(sizeSettable: sizeErr == .success ? settable.boolValue : nil, fullscreenButton: button)
+    }
+
+    var fields: [String: Any] { ["isResizable": isResizable, "canFullscreen": canFullscreen] }
 }
 
 // MARK: - WindowAddressabilityCache
@@ -386,9 +437,12 @@ enum WindowAddressabilityCache {
         let isStandard: Bool
         let isMinimized: Bool
         let ts: TimeInterval
-        /// Consecutive failed probes of an unaddressable window; scales its
-        /// re-probe gate (failTtl(after:)).
+        /// Consecutive failed probes of an unaddressable window, or failed
+        /// trait reads of a standard one; scales its re-probe gate
+        /// (failTtl(after:)).
         var failures: Int = 0
+        /// nil until a read of the live element has taken them.
+        var traits: WindowTraits? = nil
     }
     private static var cache: [String: Probe] = [:]
     /// Live (uncached) probes since the last `takeLiveProbeCount()`, for the
@@ -448,7 +502,11 @@ enum WindowAddressabilityCache {
     /// live. Pure so the expiry rules above are unit-testable.
     static func cacheVerdictUsable(_ p: Probe, now: TimeInterval, windowID: CGWindowID = 0) -> Bool {
         if p.addressable {
-            return p.isStandard || (now - p.ts) < nonStandardTtl
+            guard p.isStandard else { return (now - p.ts) < nonStandardTtl }
+            // A standard window without traits (seeded by confirm(), or its
+            // trait read failed) reads them now, then backs off per failure.
+            return p.traits != nil
+                || (p.failures > 0 && (now - p.ts) < failTtl(after: p.failures, windowID: windowID))
         }
         return (now - p.ts) < failTtl(after: p.failures, windowID: windowID)
     }
@@ -465,6 +523,7 @@ enum WindowAddressabilityCache {
     struct Reading: Equatable {
         let isStandard: Bool
         let isMinimized: Bool
+        var traits: WindowTraits? = nil
         var subroleError: Int32 = 0
     }
 
@@ -513,7 +572,8 @@ enum WindowAddressabilityCache {
         let shouldCache: Bool
         if let r = reading {
             // Success — cache true permanently.
-            probe = Probe(addressable: true, isStandard: r.isStandard, isMinimized: r.isMinimized, ts: now)
+            probe = Probe(addressable: true, isStandard: r.isStandard, isMinimized: r.isMinimized, ts: now,
+                          traits: r.traits)
             shouldCache = true
         } else if let e = existing, e.addressable {
             // Sticky-success: established-true never flips to false on a
@@ -523,7 +583,8 @@ enum WindowAddressabilityCache {
             // ts=now also paces an expired negative-isStandard entry: each
             // failed re-probe buys one more nonStandardTtl of patience
             // instead of re-reading AX on every Windows.all() pass.
-            probe = Probe(addressable: true, isStandard: e.isStandard, isMinimized: e.isMinimized, ts: now)
+            probe = Probe(addressable: true, isStandard: e.isStandard, isMinimized: e.isMinimized, ts: now,
+                          failures: e.traits == nil ? e.failures + 1 : 0, traits: e.traits)
             shouldCache = true
         } else {
             // No success yet. Time-based optimism: report the pending
@@ -553,6 +614,7 @@ enum WindowAddressabilityCache {
         let changed = before.addressable != probe.addressable
             || before.isStandard != probe.isStandard
             || before.isMinimized != probe.isMinimized
+            || before.traits != probe.traits
         // Verdict flips are rare and are what silently drops a window from
         // every tiler — say why.
         if shouldCache, let old = existing,
@@ -580,8 +642,10 @@ enum WindowAddressabilityCache {
             }
             var subroleRef: AnyObject?
             let subroleErr = AXUIElementCopyAttributeValue(e, kAXSubroleAttribute as CFString, &subroleRef)
-            let reading = Reading(isStandard: standardVerdict(subrole: subroleRef as? String, isMinimized: isMin),
-                                  isMinimized: isMin, subroleError: subroleErr.rawValue)
+            let isStd = standardVerdict(subrole: subroleRef as? String, isMinimized: isMin)
+            let reading = Reading(isStandard: isStd, isMinimized: isMin,
+                                  traits: isStd ? WindowTraits.read(e) : nil,
+                                  subroleError: subroleErr.rawValue)
             guard StaleElementRetry.shouldReResolve(readError: subroleErr, attempt: attempt) else { return reading }
             // The cached element may be dead while the window lives on
             // (sleep/wake): drop it so elementFor re-walks kAXWindows.
@@ -730,10 +794,14 @@ enum WindowAddressabilityCache {
     /// successful probe would, so the next `Windows.all()` pass includes the
     /// window as soon as CGWindowList lists it.
     static func confirm(pid: pid_t, windowID: CGWindowID, isStandard: Bool, isMinimized: Bool,
+                        traits: WindowTraits? = nil,
                         now: TimeInterval = Date().timeIntervalSince1970) {
         let key = "\(pid)|\(windowID)"
         lock.lock(); defer { lock.unlock() }
-        cache[key] = Probe(addressable: true, isStandard: isStandard, isMinimized: isMinimized, ts: now)
+        // A standard window's traits don't change; keep any a list read took.
+        let kept = isStandard ? (traits ?? cache[key]?.traits) : traits
+        cache[key] = Probe(addressable: true, isStandard: isStandard, isMinimized: isMinimized, ts: now,
+                           traits: kept)
     }
 
     /// Live isMinimized update from AX miniaturize/deminiaturize events.
@@ -750,7 +818,8 @@ enum WindowAddressabilityCache {
         let key = "\(pid)|\(windowID)"
         lock.lock(); defer { lock.unlock() }
         guard let p = cache[key], p.addressable else { return }
-        cache[key] = Probe(addressable: true, isStandard: p.isStandard, isMinimized: value, ts: p.ts)
+        cache[key] = Probe(addressable: true, isStandard: p.isStandard, isMinimized: value, ts: p.ts,
+                           failures: p.failures, traits: p.traits)
     }
 
     /// Subrole reading → isStandard verdict, minimize-aware. A minimized
@@ -1543,7 +1612,7 @@ enum WindowsByID {
             "isStandard":   isStd,
             "hasToolbar":   hasToolbar,
             "cornerHints":  cornerHints(windowID: windowID)
-        ]
+        ].merging(WindowTraits.read(el).fields) { $1 }
     }
 
     /// Traffic-light button frames in the same global, top-left-origin coord

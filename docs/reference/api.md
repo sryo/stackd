@@ -352,7 +352,7 @@ Operates on the stack's own NSPanel; no separate permission.
 ### `sd.windows` — all windows · `windows`
 **Channels:**
 - `sd.windows.focused` *(channel)* — `{id,pid,app,bundleId,title,frame,display?,space?}`.
-- `sd.windows.all` *(channel, default `[]`)* — `[{id,app,pid,title,onscreen,addressable,isStandard,isMinimized,frame,display?}]`.
+- `sd.windows.all` *(channel, default `[]`)* — `[{id,app,pid,title,onscreen,addressable,isStandard,isMinimized,isResizable?,canFullscreen?,frame,display?}]`. `isResizable` (size can be set) and `canFullscreen` (enabled fullscreen button) appear on standard windows once read; panels like Calculator or an app's Settings report `isResizable: false`.
 - `sd.windows.changed` *(channel, delta)* — `{added, removed, changed}`.
 - `sd.windows.focusedChanged` *(channel)* · `sd.windows.titleChanged` *(channel)*.
 - Lifecycle bang-channels (require manifest `handles`): `created, destroyed, moved, resized, minimized, deminimized, animating, resizing` — `.subscribe(fn)` with bang payloads.
@@ -366,7 +366,7 @@ Operates on the stack's own NSPanel; no separate permission.
 - `minSize(id) → Promise<{w,h}|null>` — minimum size learned from the app refusing probed writes below it (`w`/`h` null for an axis never clamped); clamp before writing.
 - `frame(id) → Promise<{x,y,w,h}>` · `cornerHints(id) → Promise<{toolbarPresent,role,subrole}>`.
 - `buttonFrames(id) → Promise<{close,zoom,minimize}|null>` (traffic-light rects).
-- `info(id) → Promise<{frame,title,role,subrole,isMinimized,isFullscreen,isMain,isStandard,hasToolbar,cornerHints}|null>`.
+- `info(id) → Promise<{frame,title,role,subrole,isMinimized,isFullscreen,isMain,isStandard,hasToolbar,cornerHints,isResizable,canFullscreen}|null>`.
 - `title(id)` · `role(id)` · `subrole(id)` · `isMinimized(id)` · `isFullscreen(id)` · `hasToolbar(id)` · `isStandard(id)` `→ Promise`.
 - `tabs(id) → Promise<[{title,selected}]|null>` · `focusTab(id, index) → Promise`.
 - `snapshot(id, opts?) → Promise<{dataURL,width,height}|null>` — `opts:{format?,quality?(0.85)}`. SPI capture (works for hidden/minimized).

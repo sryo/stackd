@@ -442,9 +442,10 @@ func registerWindowsTests() {
     test("WindowAddressabilityCache.cacheVerdictUsable — expiry rules per verdict class") {
         typealias P = WindowAddressabilityCache.Probe
         let ttl = WindowAddressabilityCache.nonStandardTtl
-        // Positive verdicts (addressable + standard) never expire.
+        // Positive verdicts (addressable + standard, traits read) never expire.
         try expectEqual(WindowAddressabilityCache.cacheVerdictUsable(
-            P(addressable: true, isStandard: true, isMinimized: false, ts: 0), now: 1e9), true)
+            P(addressable: true, isStandard: true, isMinimized: false, ts: 0,
+              traits: .init(isResizable: true, canFullscreen: true)), now: 1e9), true)
         // Negative isStandard: usable while fresh, must re-probe once the
         // TTL elapses — the permanent-poison guard.
         let neg = P(addressable: true, isStandard: false, isMinimized: false, ts: 1000.0)
