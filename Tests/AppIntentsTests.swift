@@ -49,6 +49,14 @@ func registerAppIntentsTests() {
         try expectEqual(kv["off"], "false")
     }
 
+    test("parsePayload keeps numeric 0 and 1 as numbers, not booleans") {
+        let kv = RunStackdBangHelpers.parsePayload(#"{"one":1,"zero":0,"t":true,"f":false}"#)
+        try expectEqual(kv["one"], "1")
+        try expectEqual(kv["zero"], "0")
+        try expectEqual(kv["t"], "true")
+        try expectEqual(kv["f"], "false")
+    }
+
     test("parsePayloadThrowing rejects non-object, malformed, and '='-keyed payloads") {
         // A key containing '=' is rejected because the CLI argv parser
         // splits on the first '=' and would deliver the wrong key=value.

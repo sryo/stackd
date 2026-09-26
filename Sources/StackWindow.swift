@@ -386,7 +386,12 @@ final class StackWindow: NSPanel, WKNavigationDelegate {
     /// Returns nil for missing / non-numeric / non-finite input — the bridge
     /// then responds `false` rather than silently clamping garbage to 0.
     static func parseSetAlpha(_ body: [String: Any]) -> CGFloat? {
-        guard let raw = body["value"] as? Double, raw.isFinite else { return nil }
+        // Bridge values are NSNumber; `as? Double` would also accept a JS
+        // boolean (true → 1.0), so reject CFBoolean first.
+        guard let n = body["value"] as? NSNumber,
+              CFGetTypeID(n) != CFBooleanGetTypeID() else { return nil }
+        let raw = n.doubleValue
+        guard raw.isFinite else { return nil }
         return CGFloat(max(0.0, min(1.0, raw)))
     }
 
@@ -442,7 +447,11 @@ final class StackWindow: NSPanel, WKNavigationDelegate {
     /// Parse a `window.setClickThrough` body into a Bool. Returns nil if the
     /// `value` field is missing or not a Bool — bridge responds false.
     static func parseSetClickThrough(_ body: [String: Any]) -> Bool? {
-        return body["value"] as? Bool
+        // `as? Bool` also accepts NSNumber 0/1 from a JS number; only a
+        // CFBoolean is a JS boolean.
+        guard let n = body["value"] as? NSNumber,
+              CFGetTypeID(n) == CFBooleanGetTypeID() else { return nil }
+        return n.boolValue
     }
 
     /// Parse a `window.setInteractiveRects` body: `rects` is an array of

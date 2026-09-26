@@ -133,8 +133,12 @@ enum RunStackdBangHelpers {
 
     private static func stringify(_ v: Any) -> String {
         if let s = v as? String { return s }
-        if let b = v as? Bool { return b ? "true" : "false" }
-        if let n = v as? NSNumber { return n.stringValue }
+        // JSONSerialization boxes both JSON numbers and booleans as NSNumber,
+        // and `as? Bool` accepts 0/1 — only the CFBoolean type ID tells them apart.
+        if let n = v as? NSNumber {
+            if CFGetTypeID(n) == CFBooleanGetTypeID() { return n.boolValue ? "true" : "false" }
+            return n.stringValue
+        }
         // Nested object / array — round-trip through JSON so the receiver
         // can re-parse it if they want structure back. Stack JS can call
         // JSON.parse(detail.foo) when this happens.

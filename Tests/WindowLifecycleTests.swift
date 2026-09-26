@@ -141,6 +141,15 @@ func registerWindowLifecycleTests() {
     test("setAlpha: above 1 clamps to 1") {
         try expectEqual(StackWindow.parseSetAlpha(["value": 1.7]), 1.0)
     }
+    test("setAlpha: JS boolean → nil (true is not 1.0)") {
+        // WKScriptMessage delivers JS booleans as CFBoolean-backed NSNumber.
+        try expect(StackWindow.parseSetAlpha(["value": kCFBooleanTrue as NSNumber]) == nil)
+        try expect(StackWindow.parseSetAlpha(["value": kCFBooleanFalse as NSNumber]) == nil)
+    }
+    test("setAlpha: JS number 0 / 1 as NSNumber passes through") {
+        try expectEqual(StackWindow.parseSetAlpha(["value": NSNumber(value: 1.0)]), 1.0)
+        try expectEqual(StackWindow.parseSetAlpha(["value": NSNumber(value: 0.0)]), 0.0)
+    }
 
     // MARK: setFrame body parsing
     //
@@ -209,6 +218,14 @@ func registerWindowLifecycleTests() {
         // Bridge bodies arrive as NSNumber, not Swift Int.
         try expect(StackWindow.parseSetClickThrough(["value": NSNumber(value: 2)]) == nil)
         try expect(StackWindow.parseSetClickThrough(["value": NSNumber(value: 0.5)]) == nil)
+    }
+    test("setClickThrough: JS number 0 / 1 → nil (not a boolean)") {
+        try expect(StackWindow.parseSetClickThrough(["value": NSNumber(value: 1.0)]) == nil)
+        try expect(StackWindow.parseSetClickThrough(["value": NSNumber(value: 0.0)]) == nil)
+    }
+    test("setClickThrough: CFBoolean NSNumber passes through") {
+        try expectEqual(StackWindow.parseSetClickThrough(["value": kCFBooleanTrue as NSNumber]), true)
+        try expectEqual(StackWindow.parseSetClickThrough(["value": kCFBooleanFalse as NSNumber]), false)
     }
     test("setClickThrough: string value → nil") {
         try expect(StackWindow.parseSetClickThrough(["value": "true"]) == nil)
