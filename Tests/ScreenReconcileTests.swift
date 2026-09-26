@@ -7,14 +7,7 @@ import CoreGraphics
 // target displays changed).
 
 func registerScreenReconcileTests() {
-    test("ScreenReconcile keeps a single-display stack when its display survives") {
-        let plan = ScreenReconcile.plan(id: "windowscape",
-                                        instances: ["windowscape": 1],
-                                        targets: [(0, 1)])
-        try expect(plan == .relayout([.init(key: "windowscape", screenIndex: 0)]))
-    }
-
-    test("ScreenReconcile keeps a primary stack when a second display is added") {
+    test("ScreenReconcile keeps a single-display stack whose display survives (e.g. a second display added)") {
         // display:"primary" still resolves to display 1 — no reload, so the
         // stack keeps its in-memory state (windowscape's learned minimums).
         let plan = ScreenReconcile.plan(id: "windowscape",

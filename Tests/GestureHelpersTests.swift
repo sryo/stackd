@@ -152,12 +152,20 @@ func registerGestureHelpersTests() {
         try expectEqual(out, "true,-50")
     }
 
-    test("gesture.spring: defaults to sd.displayLink") {
+    test("gesture.spring: without a ticker, advances on sd.displayLink pushes") {
+        // Frames arrive through the same window.__sd_push path the daemon
+        // uses; after stop() further pushes must not move it.
         let out = str("""
-        (() => { const s = sd.gesture.spring({ from: 0, to: 1 });
-          const r = s.running; s.stop(); return r + ',' + s.running; })()
+        (() => { let updates = 0;
+          const s = sd.gesture.spring({ from: 0, to: 1, onUpdate: () => updates++ });
+          window.__sd_push('displayLink', { timestamp: 5000 });
+          window.__sd_push('displayLink', { timestamp: 5000 + 1 / 60 });
+          const moved = s.value > 0 && updates > 0;
+          const r = s.running; s.stop(); const frozen = s.value;
+          window.__sd_push('displayLink', { timestamp: 5000 + 2 / 60 });
+          return [moved, r, s.running, s.value === frozen].join(','); })()
         """)
-        try expectEqual(out, "true,false")
+        try expectEqual(out, "true,true,false,true")
     }
 
     test("gesture.spring in stack source infers the displayLink permission") {

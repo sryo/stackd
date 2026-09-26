@@ -74,8 +74,17 @@ func registerNLPTests() {
         try expect(s == 1.0 || s == 0.0)
     }
 
-    test("similarity output is always within [0, 1]") {
-        let s = NLP.similarity("the cat sat on the mat", "completely unrelated phrase")
-        try expect(s >= 0.0 && s <= 1.0)
+    test("similarity ranks a paraphrase above an unrelated sentence, within [0, 1]") {
+        // Full sentences so language ID confidently picks English — short
+        // phrases can be misidentified, and similarity() then looks up the
+        // wrong (often missing) embedding model.
+        let base  = "The weather is sunny and warm today."
+        let close = NLP.similarity(base, "It is a bright and hot day outside.")
+        let far   = NLP.similarity(base, "The quarterly tax filing deadline is next week.")
+        try expect(close >= 0.0 && close <= 1.0, "similarity out of [0, 1]: \(close)")
+        try expect(far   >= 0.0 && far   <= 1.0, "similarity out of [0, 1]: \(far)")
+        // Without the on-device English model both collapse to 0 — nothing to rank.
+        guard NLP.similarity("hello world", "hello world") == 1.0 else { return }
+        try expect(close > far, "paraphrase (\(close)) should outrank unrelated text (\(far))")
     }
 }

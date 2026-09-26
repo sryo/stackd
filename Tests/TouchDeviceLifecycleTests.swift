@@ -17,10 +17,12 @@ func registerTouchDeviceLifecycleTests() {
         }
     }
 
-    test("TouchDeviceRefcon: generation 0 and out-of-range slots don't encode") {
+    test("TouchDeviceRefcon: generation 0, oversized generations and out-of-range slots don't encode") {
         try expect(TouchDeviceRefcon.encode(generation: 0, slot: 0) == nil, "gen 0 is the null pointer")
         try expect(TouchDeviceRefcon.encode(generation: 1, slot: 256) == nil, "slot must fit a byte")
         try expect(TouchDeviceRefcon.encode(generation: 1, slot: -1) == nil, "negative slot")
+        try expect(TouchDeviceRefcon.encode(generation: UInt.max, slot: 0) == nil,
+                   "a generation that would lose bits to the slot byte")
         try expect(TouchDeviceRefcon.decode(nil) == nil, "nil refcon")
     }
 

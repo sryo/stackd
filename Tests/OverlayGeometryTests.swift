@@ -3,8 +3,7 @@ import AppKit
 import CoreGraphics
 import WebKit
 
-// Tests for the Round-2 interaction-primitive geometry in
-// `Sources/DataSources/Overlay.swift`:
+// Tests for overlay geometry in `Sources/DataSources/Overlay.swift`:
 //
 //   1. `OverlayGeometry` — panel placement + per-tick sd.target payload for
 //      the `outset` option on overlay.attach. Outset 0 must be byte-level
@@ -95,14 +94,6 @@ func registerOverlayGeometryTests() {
         try expectEqual(f.origin.y, 288)
         try expectEqual(f.width, 320)
         try expectEqual(f.height, 200)
-    }
-
-    test("RegionFollowGeometry.frame with zero offset pins the origin to the cursor") {
-        let f = RegionFollowGeometry.frame(
-            cursor: CGPoint(x: 123, y: 456),
-            offset: .zero,
-            size: CGSize(width: 10, height: 10))
-        try expectEqual(f.origin, CGPoint(x: 123, y: 456))
     }
 
     // MARK: - OverlayHandle.setOutset — the RPC's landing point

@@ -10,28 +10,14 @@ import Foundation
 //   - malformed format → nil, errorOut populated with NSException reason
 //   - nil errorOut parameter is allowed and doesn't crash
 //
-// Verified production callers in Spotlight.swift:60 + :135 both use the
-// non-throwing trampoline form; if either path stops using it, this file
-// is still the first place a regression would surface.
+// Production callers: Spotlight's one-shot and live queries.
 func registerSafePredicateTests() {
-    test("SafePredicate: valid format returns a non-nil predicate") {
-        var error: NSString? = nil
-        let p = StackdSafeNSPredicate("kMDItemFSName == 'test'", &error)
-        try expect(p != nil, "expected non-nil predicate for valid format")
-        try expect(error == nil, "errorOut should not be populated on success, got: \(error ?? "")")
-    }
-
-    test("SafePredicate: malformed format returns nil") {
+    test("SafePredicate: malformed format returns nil with the NSException reason in errorOut") {
         // `kMDItemFSName == ==` is syntactically invalid — predicateWithFormat
         // raises NSInvalidArgumentException, which the trampoline catches.
         var error: NSString? = nil
         let p = StackdSafeNSPredicate("kMDItemFSName == ==", &error)
         try expect(p == nil, "expected nil predicate for malformed format")
-    }
-
-    test("SafePredicate: malformed format populates errorOut with the NSException reason") {
-        var error: NSString? = nil
-        _ = StackdSafeNSPredicate("$$$ totally not a predicate $$$", &error)
         try expect(error != nil, "errorOut should carry the NSException reason on failure")
         // Don't pin the exact message — Foundation's format-parser wording is
         // not API. Just confirm it's non-empty so callers have something to log.
@@ -57,7 +43,7 @@ func registerSafePredicateTests() {
         try expect(error != nil, "errorOut should carry the reason")
     }
 
-    test("SafePredicate: predicate evaluates against an NSDictionary on success") {
+    test("SafePredicate: valid format returns a usable predicate and leaves errorOut nil") {
         // Witness that the returned object IS a usable NSPredicate, not just
         // a stand-in. Spotlight ultimately hands the predicate to
         // NSMetadataQuery which evaluates it — proving evaluatability here
@@ -66,6 +52,7 @@ func registerSafePredicateTests() {
         guard let p = StackdSafeNSPredicate("name == 'demo'", &error) else {
             throw Expectation(message: "predicate construction failed: \(error ?? "")")
         }
+        try expect(error == nil, "errorOut should not be populated on success, got: \(error ?? "")")
         try expect(p.evaluate(with: ["name": "demo"]),  "predicate should match the target dict")
         try expect(!p.evaluate(with: ["name": "other"]), "predicate should reject non-matching dict")
     }

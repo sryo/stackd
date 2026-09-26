@@ -12,10 +12,6 @@ import Foundation
 //   - resolveOwner(pid:cache:resolver:) — owner-name fallback chain
 //     (bundleId → name → "pid:NNNN"). Same dict-shape contract stacks
 //     consume.
-//
-// Pattern mirrors HostDiskIOTests + UpdateParserTests: extract the
-// classification + fallback as static helpers, hammer them here, leave
-// the AX traversal uncovered by design.
 
 func registerMenubarItemsTests() {
     // MARK: - isHidden
@@ -41,6 +37,19 @@ func registerMenubarItemsTests() {
         try expectEqual(
             MenubarItems.isHidden(itemX: 1500, itemWidth: 24, screenLeft: 0, screenRight: 1440),
             true
+        )
+        // Left edge exactly at screenRight: zero visible width.
+        try expectEqual(
+            MenubarItems.isHidden(itemX: 1440, itemWidth: 24, screenLeft: 0, screenRight: 1440),
+            true
+        )
+    }
+
+    test("isHidden returns false for an item only partly off the left edge") {
+        // Any visible sliver counts as shown.
+        try expectEqual(
+            MenubarItems.isHidden(itemX: -10, itemWidth: 24, screenLeft: 0, screenRight: 1440),
+            false
         )
     }
 
@@ -80,6 +89,7 @@ func registerMenubarItemsTests() {
             (bundleId: nil, name: "Helper")
         }
         try expectEqual(owner, "Helper")
+        try expectEqual(cache[99], "Helper")
     }
 
     test("resolveOwner falls back to 'pid:N' when both bundleId and name are absent") {
@@ -115,30 +125,13 @@ func registerMenubarItemsTests() {
 
     // MARK: - MenubarItemsObserver subscriber-gating
     //
-    // 2026-06-02: with the lazy-fire refactor, MenubarItemsObserver computes
-    // a snapshot + hash every tick inside its 2s timer. The whole point of
-    // RefCountedObserver gating is that the timer only runs while a stack
-    // is subscribed. A regression that installs the timer at module-load
-    // time (e.g. a stray `MenubarItemsObserver.shared.subscribe(...)` in
-    // AppDelegate) would silently leak the AX walk + jsonify every 2s
-    // even with no consumers. Pin the contract here so that regression
-    // surfaces in CI.
+    // MenubarItemsObserver walks every app's AX menubar items on a timer; it
+    // must stay idle until a stack subscribes. The generic
+    // subscribe/debounce/teardown lifecycle is covered by
+    // RefCountedObserverTests (subscribing here would run a live AX walk).
 
     test("MenubarItemsObserver: inactive at startup (no subscribers)") {
         try expect(!MenubarItemsObserver.shared.isActive,
                    "MenubarItemsObserver must not be active before any stack subscribes")
-    }
-
-    test("MenubarItemsObserver: activates on subscribe, deactivates after debounce") {
-        let token = MenubarItemsObserver.shared.subscribe { }
-        try expect(MenubarItemsObserver.shared.isActive,
-                   "subscribe should activate the observer")
-        token.cancel()
-        let deadline = Date().addingTimeInterval(5.2)
-        while MenubarItemsObserver.shared.isActive && Date() < deadline {
-            RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.05))
-        }
-        try expect(!MenubarItemsObserver.shared.isActive,
-                   "MenubarItemsObserver must deactivate ≤5.2s after last unsubscribe")
     }
 }

@@ -105,30 +105,26 @@ func registerFrameCoalescerTests() {
     // is running parks its source (last wins) and chains after, so a hung
     // app backs up one read per key, never a queue of them. Generations
     // drop results for windows purged (destroyed) mid-read.
-    func readKey(_ wid: CGWindowID, _ kind: FrameBangCoalescer<Int>.Kind) -> FrameBangCoalescer<Int>.Key {
-        FrameBangCoalescer<Int>.Key(windowID: wid, kind: kind)
-    }
-
     test("reads: idle key starts a read immediately") {
         var r = FrameBangReads<Int>()
-        let start = r.request(readKey(1, .moved), source: 5)
+        let start = r.request(key(1, .moved), source: 5)
         try expectEqual(start?.source, 5)
     }
 
     test("reads: a dispatch while a read is in flight parks, it does not stack a second read") {
         var r = FrameBangReads<Int>()
-        _ = r.request(readKey(1, .moved), source: 5)
-        try expect(r.request(readKey(1, .moved), source: 6) == nil,
+        _ = r.request(key(1, .moved), source: 5)
+        try expect(r.request(key(1, .moved), source: 6) == nil,
                    "a stuck app must not queue a read per tick")
-        try expect(r.request(readKey(1, .moved), source: 7) == nil)
+        try expect(r.request(key(1, .moved), source: 7) == nil)
     }
 
     test("reads: resolving delivers and chains the LAST parked source") {
         var r = FrameBangReads<Int>()
-        let first = r.request(readKey(1, .moved), source: 5)!
-        _ = r.request(readKey(1, .moved), source: 6)
-        _ = r.request(readKey(1, .moved), source: 7)
-        guard case .deliver(let next) = r.resolved(readKey(1, .moved), generation: first.generation) else {
+        let first = r.request(key(1, .moved), source: 5)!
+        _ = r.request(key(1, .moved), source: 6)
+        _ = r.request(key(1, .moved), source: 7)
+        guard case .deliver(let next) = r.resolved(key(1, .moved), generation: first.generation) else {
             throw Expectation(message: "in-flight read's result must deliver")
         }
         try expectEqual(next?.source, 7, "the parked read runs with the newest source")
@@ -137,45 +133,45 @@ func registerFrameCoalescerTests() {
 
     test("reads: resolving with nothing parked frees the key") {
         var r = FrameBangReads<Int>()
-        let first = r.request(readKey(1, .moved), source: 5)!
-        guard case .deliver(let next) = r.resolved(readKey(1, .moved), generation: first.generation) else {
+        let first = r.request(key(1, .moved), source: 5)!
+        guard case .deliver(let next) = r.resolved(key(1, .moved), generation: first.generation) else {
             throw Expectation(message: "expected deliver")
         }
         try expect(next == nil)
-        try expectEqual(r.request(readKey(1, .moved), source: 8)?.source, 8,
+        try expectEqual(r.request(key(1, .moved), source: 8)?.source, 8,
                         "a free key starts the next read at once")
     }
 
     test("reads: purge drops the in-flight result and the parked source") {
         var r = FrameBangReads<Int>()
-        let moved = r.request(readKey(1, .moved), source: 5)!
-        _ = r.request(readKey(1, .moved), source: 6)
-        let other = r.request(readKey(2, .moved), source: 9)!
+        let moved = r.request(key(1, .moved), source: 5)!
+        _ = r.request(key(1, .moved), source: 6)
+        let other = r.request(key(2, .moved), source: 9)!
         r.purge(windowID: 1)
-        try expectEqual(r.resolved(readKey(1, .moved), generation: moved.generation), .discard,
+        try expectEqual(r.resolved(key(1, .moved), generation: moved.generation), .discard,
                         "a destroyed window's frame must not bang")
-        guard case .deliver = r.resolved(readKey(2, .moved), generation: other.generation) else {
+        guard case .deliver = r.resolved(key(2, .moved), generation: other.generation) else {
             throw Expectation(message: "other windows keep their reads")
         }
     }
 
     test("reads: a pre-purge result cannot resolve a read started after the purge") {
         var r = FrameBangReads<Int>()
-        let old = r.request(readKey(1, .moved), source: 5)!
+        let old = r.request(key(1, .moved), source: 5)!
         r.purge(windowID: 1)
-        let fresh = r.request(readKey(1, .moved), source: 6)!
-        try expectEqual(r.resolved(readKey(1, .moved), generation: old.generation), .discard,
+        let fresh = r.request(key(1, .moved), source: 6)!
+        try expectEqual(r.resolved(key(1, .moved), generation: old.generation), .discard,
                         "stale generation must not deliver or free the new read")
-        try expect(r.request(readKey(1, .moved), source: 7) == nil, "fresh read still in flight")
-        guard case .deliver = r.resolved(readKey(1, .moved), generation: fresh.generation) else {
+        try expect(r.request(key(1, .moved), source: 7) == nil, "fresh read still in flight")
+        guard case .deliver = r.resolved(key(1, .moved), generation: fresh.generation) else {
             throw Expectation(message: "fresh read delivers")
         }
     }
 
     test("reads: keys are independent per kind") {
         var r = FrameBangReads<Int>()
-        _ = r.request(readKey(1, .moved), source: 5)
-        try expectEqual(r.request(readKey(1, .resized), source: 6)?.source, 6,
+        _ = r.request(key(1, .moved), source: 5)
+        try expectEqual(r.request(key(1, .resized), source: 6)?.source, 6,
                         "an in-flight move read must not park a resize read")
     }
 }

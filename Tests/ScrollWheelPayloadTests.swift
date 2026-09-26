@@ -12,7 +12,7 @@ func registerScrollWheelPayloadTests() {
                 wheelCount: 2, wheel1: dy, wheel2: dx, wheel3: 0)!
     }
 
-    test("ScrollWheel.payload: maps axis 1 to Y and axis 2 to X") {
+    test("ScrollWheel.payload: exposes point and fixed-point deltas per axis") {
         let f = ScrollWheel.Fields(
             pointDeltaX: 3, pointDeltaY: -7,
             fixedDeltaX: 0.25, fixedDeltaY: -1.5,
@@ -56,17 +56,19 @@ func registerScrollWheelPayloadTests() {
         try expectEqual(ScrollWheel.payload(known)["senderId"] as? UInt64, 0x1000_0000_0abc)
     }
 
-    test("ScrollWheel.payload: serializes to JSON with every documented key") {
-        let f = ScrollWheel.Fields(pointDeltaX: 1, pointDeltaY: 2, fixedDeltaX: 0.5, fixedDeltaY: 1,
-                                   phase: 2, momentumPhase: 0, isContinuous: true, senderId: 42)
-        let json = Bridge.jsonify(ScrollWheel.payload(f))
-        for key in ["deltaX", "deltaY", "fixedDeltaX", "fixedDeltaY", "scrollPhase",
-                    "momentumPhase", "isContinuous", "senderId"] {
-            try expect(json.contains("\"\(key)\""), "missing \(key) in \(json)")
+    test("ScrollWheel.payload: serializes to JSON with exactly the documented keys") {
+        let keys: Set<String> = ["deltaX", "deltaY", "fixedDeltaX", "fixedDeltaY", "scrollPhase",
+                                 "momentumPhase", "isContinuous", "senderId"]
+        for sender: UInt64 in [0, 42] {
+            let f = ScrollWheel.Fields(pointDeltaX: 1, pointDeltaY: 2, fixedDeltaX: 0.5, fixedDeltaY: 1,
+                                       phase: 2, momentumPhase: 0, isContinuous: true, senderId: sender)
+            let json = Bridge.jsonify(ScrollWheel.payload(f))
+            let parsed = (try? JSONSerialization.jsonObject(with: Data(json.utf8))) as? [String: Any]
+            try expectEqual(parsed.map { Set($0.keys) }, keys, "sender \(sender): \(json)")
         }
     }
 
-    test("ScrollWheel.read: pulls deltas and phase fields off a CGEvent") {
+    test("ScrollWheel.read: wheel 1 reads as Y, wheel 2 as X, plus phase fields") {
         let ev = makeScroll(dy: 5, dx: -2)
         ev.setIntegerValueField(.scrollWheelEventScrollPhase, value: 2)
         ev.setIntegerValueField(.scrollWheelEventMomentumPhase, value: 0)

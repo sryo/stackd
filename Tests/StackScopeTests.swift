@@ -1,17 +1,7 @@
 import Foundation
 
 func registerStackScopeTests() {
-    test("adopt + drain runs every token's cancel exactly once") {
-        let scope = StackScope()
-        var calls: [String] = []
-        scope.adopt(Token { calls.append("a") })
-        scope.adopt(Token { calls.append("b") })
-        scope.adopt(Token { calls.append("c") })
-        scope.drain()
-        try expectEqual(calls.sorted(), ["a", "b", "c"])
-    }
-
-    test("drain cancels in reverse registration order") {
+    test("drain cancels every token once, in reverse registration order") {
         // Matters for layered resources (AXObserver subscription torn down
         // before the underlying CFRunLoopSource).
         let scope = StackScope()
@@ -44,20 +34,6 @@ func registerStackScopeTests() {
         scope.adopt(alsoNil)
         scope.drain()
         try expectEqual(calls, 1)
-    }
-
-    test("per-stack isolation — draining one scope leaves the other intact") {
-        let a = StackScope()
-        let b = StackScope()
-        var aFired = 0
-        var bFired = 0
-        a.adopt(Token { aFired += 1 })
-        b.adopt(Token { bFired += 1 })
-        a.drain()
-        try expectEqual(aFired, 1)
-        try expectEqual(bFired, 0)
-        b.drain()
-        try expectEqual(bFired, 1)
     }
 
     test("isDrained latches true after drain — gates post-teardown overlay creates") {

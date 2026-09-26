@@ -241,16 +241,15 @@ func registerStorageTests() {
 
     // MARK: - PasteboardObserver
     //
-    // 2026-06-02: the 0.2s polling timer was replaced with a distributed
-    // notification (`com.apple.pasteboard.notify.changed`) plus a 1.5s
-    // safety-net timer. These tests pin the subscriber-gating contract that
-    // makes the whole RefCountedObserver pattern load-bearing — if a future
-    // refactor accidentally installs the timer at module-load time, idle
-    // CPU regresses silently.
+    // The observer (distributed notification + safety-net timer) must only
+    // run while a stack is subscribed. If it were installed at module load,
+    // idle CPU would regress silently.
 
     test("PasteboardObserver: inactive at startup (no subscribers)") {
         // RefCountedObserver only installs native plumbing on 0→1 subscribe.
         // If something module-loads the singleton's listener, this fails.
+        // Order-sensitive: must run before the activate/deactivate test
+        // below (or ≥5s after it).
         try expect(!PasteboardObserver.shared.isActive,
                    "PasteboardObserver must not be active before any stack subscribes")
     }
@@ -276,18 +275,11 @@ func registerStorageTests() {
 
     // MARK: - FSWatch (FSEvents callback path-decoding)
 
-    test("FSWatch decodes paths from CFArray-typed FSEvents callback (no SIGSEGV)") {
-        // Regression for the crash logged 2026-06-03: FSEventStreamCreate was
-        // called WITHOUT kFSEventStreamCreateFlagUseCFTypes, so evPaths was a
-        // C-string array, but the callback did `unsafeBitCast(evPaths, to:
-        // NSArray.self)` → `objc_msgSend(copy)` interpreted the first 8 bytes
-        // of a path string as an object pointer and faulted.
-        //
-        // This test creates a real FSWatch on a temp dir, writes a file, spins
-        // the runloop for the callback to fire, and asserts: (a) the daemon
-        // doesn't crash, (b) the decoded path is a valid UTF-8 string under
-        // the watched dir (not garbage). Pre-fix the process SEGFAULTs in
-        // the bridge call before any assertion runs.
+    test("FSWatch delivers decoded event paths under the watched dir") {
+        // The FSEvents callback bridges evPaths as a CFArray of CFStrings,
+        // which requires kFSEventStreamCreateFlagUseCFTypes at stream
+        // creation; without it the paths arrive as a C-string array and the
+        // bridge faults. A real watch on a temp dir exercises that decode.
 
         let tmp = FileManager.default.temporaryDirectory
             .appendingPathComponent("fswatch-test-\(UUID().uuidString)")
@@ -298,6 +290,7 @@ func registerStorageTests() {
         let watch = FSWatch(paths: [tmp.path]) { events in
             for e in events { received.append(e.path) }
         }
+        defer { watch?.stop() }
         try expect(watch != nil, "FSWatch.init should succeed for a valid temp dir")
 
         // Touch a file inside the watched dir so FSEvents fires.
@@ -315,14 +308,10 @@ func registerStorageTests() {
         // The path must be a valid UTF-8 string under the watched dir. macOS
         // canonicalizes /var → /private/var so FSEvents may return the
         // /private-prefixed form; resolve both sides before comparing.
-        // (Pre-fix, the bridge produced garbage strings or crashed before this
-        // point — surviving with a decodable path == the fix is wired.)
         let any = received.first!
         let watchedResolved = URL(fileURLWithPath: tmp.path).resolvingSymlinksInPath().path
         let receivedResolved = URL(fileURLWithPath: any).resolvingSymlinksInPath().path
         try expect(receivedResolved.hasPrefix(watchedResolved),
                    "decoded path '\(receivedResolved)' should be under watched dir '\(watchedResolved)'")
-
-        watch?.stop()
     }
 }

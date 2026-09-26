@@ -1,10 +1,9 @@
 import Foundation
 
 /// Tests for `Bridge.windowsDelta` — the pure diff between two window
-/// snapshots that drives `sd.windows.changed`. Stacks pay diff-size
-/// instead of full-list-size; we pin the comparison rules here so a
-/// title flicker doesn't fire `added` and a frame nudge doesn't
-/// silently disappear.
+/// snapshots that drives `sd.windows.changed`. Generic added/removed routing
+/// is covered by ComputeDeltaTests; these pin the window-specific rules:
+/// identity is `id`, and only title and frame transitions count as changed.
 func registerWindowsChangedTests() {
     // Helper: build a synthetic window dict in the shape Windows.all() returns.
     func win(_ id: Int, app: String = "App", title: String = "Title", frame: (Int, Int, Int, Int) = (0, 0, 100, 100)) -> [String: Any] {
@@ -14,31 +13,6 @@ func registerWindowsChangedTests() {
             "title": title,
             "frame": ["x": frame.0, "y": frame.1, "w": frame.2, "h": frame.3]
         ]
-    }
-
-    test("empty → empty: no changes, no nowByID entries") {
-        let d = Bridge.windowsDelta(snapshot: [], previous: [:])
-        try expectEqual(d.added.count, 0)
-        try expectEqual(d.removed.count, 0)
-        try expectEqual(d.changed.count, 0)
-        try expectEqual(d.nowByID.count, 0)
-    }
-
-    test("first snapshot from empty previous: all entries are added") {
-        let d = Bridge.windowsDelta(snapshot: [win(10), win(11)], previous: [:])
-        try expectEqual(d.added.count, 2)
-        try expectEqual(d.removed.count, 0)
-        try expectEqual(d.changed.count, 0)
-        try expectEqual(d.nowByID.count, 2)
-    }
-
-    test("removed: previous id missing from snapshot lands in `removed`") {
-        let prev: [Int: [String: Any]] = [10: win(10), 11: win(11)]
-        let d = Bridge.windowsDelta(snapshot: [win(10)], previous: prev)
-        try expectEqual(d.added.count, 0)
-        try expectEqual(d.removed.count, 1)
-        try expectEqual(d.removed.first?["id"] as? Int, 11)
-        try expectEqual(d.changed.count, 0)
     }
 
     test("title change lands in `changed` (consumers like windowscape track rename)") {
@@ -80,14 +54,23 @@ func registerWindowsChangedTests() {
             win(13)  // newly added
         ]
         let d = Bridge.windowsDelta(snapshot: snapshot, previous: prev)
-        try expectEqual(d.added.first?["id"] as? Int, 13)
-        try expectEqual(d.removed.first?["id"] as? Int, 12)
-        try expectEqual(d.changed.first?["id"] as? Int, 11)
+        try expectEqual(d.added.map { $0["id"] as? Int }, [13])
+        try expectEqual(d.removed.map { $0["id"] as? Int }, [12])
+        try expectEqual(d.changed.map { $0["id"] as? Int }, [11])
     }
 
-    test("nowByID returned by windowsDelta replaces the caller's cache without re-walk") {
-        // Avoids the caller building the dictionary a second time — the
-        // delta already walked the snapshot once.
+    test("fields other than title and frame don't fire `changed`") {
+        var before = win(10)
+        before["onscreen"] = true
+        var after = win(10, app: "Renamed App")
+        after["onscreen"] = false
+        let d = Bridge.windowsDelta(snapshot: [after], previous: [10: before])
+        try expectEqual(d.changed.count, 0)
+        try expectEqual(d.nowByID[10]?["app"] as? String, "Renamed App",
+                        "the cache still takes the newest row")
+    }
+
+    test("nowByID keys every snapshot row by its window id") {
         let d = Bridge.windowsDelta(snapshot: [win(10), win(20)], previous: [:])
         try expectEqual(d.nowByID.count, 2)
         try expectEqual(d.nowByID[10]?["id"] as? Int, 10)

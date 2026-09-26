@@ -17,18 +17,46 @@ func registerBangRegistryTests() {
         try expectEqual(out, "test.brt.shape|function|function")
     }
 
-    test("declare: emit dispatches a bang RPC carrying the declared name") {
+    test("declare: emit dispatches a bang RPC carrying the declared name and detail") {
         let out = JSHarness.context.evaluateScript("""
         (function() {
-          window.__brt_emit = null;
+          const real = window.webkit.messageHandlers.sd.postMessage;
+          let seen = null;
           window.webkit.messageHandlers.sd.postMessage = (p) => {
-            if (p.type === "bang") window.__brt_emit = p.name;
+            if (p.type === "bang") seen = p.name + "|" + p.detail.x;
           };
-          sd.bang.declare("test.brt.emit").emit({ x: 1 });
-          return window.__brt_emit;
+          try {
+            sd.bang.declare("test.brt.emit").emit({ x: 1 });
+          } finally {
+            window.webkit.messageHandlers.sd.postMessage = real;
+          }
+          return seen;
         })()
         """)?.toString()
-        try expectEqual(out, "test.brt.emit")
+        try expectEqual(out, "test.brt.emit|1")
+    }
+
+    test("declare: registers the unslugged name with the daemon once per name") {
+        // declare() sends `bang.handle` so the daemon routes this bang to the
+        // stack without a manifest `handles` entry. Re-declaring the same
+        // name must not re-send.
+        let out = JSHarness.context.evaluateScript("""
+        (function() {
+          const real = window.webkit.messageHandlers.sd.postMessage;
+          const handles = [];
+          window.webkit.messageHandlers.sd.postMessage = (p) => {
+            if (p.type === "bang.handle") handles.push(p.name);
+          };
+          try {
+            sd.bang.declare("Test.BRT-Handle");
+            sd.bang.declare("Test.BRT-Handle");
+          } finally {
+            window.webkit.messageHandlers.sd.postMessage = real;
+          }
+          return handles.join(",");
+        })()
+        """)?.toString()
+        try expectEqual(out, "Test.BRT-Handle")
     }
 
     test("declare: on() listener fires when the daemon dispatches via onBang_<slug>") {
@@ -89,7 +117,7 @@ func registerBangRegistryTests() {
         try expectEqual(out, "11")
     }
 
-    test("declare: slugging matches Bridge.swift (lowercase + non-alphanumeric → _)") {
+    test("declare: on() listens on the slugged slot (lowercase, non-alphanumeric → _)") {
         // 'Foo.Bar-Baz' → 'foo_bar_baz'. The daemon will dispatch to
         // window.onBang_foo_bar_baz; on() must register against that slot.
         let out = JSHarness.context.evaluateScript("""
@@ -106,12 +134,17 @@ func registerBangRegistryTests() {
     test("legacy: sd.bang(name, detail) still emits with the same RPC shape") {
         let out = JSHarness.context.evaluateScript("""
         (function() {
-          window.__brt_legacy = null;
+          const real = window.webkit.messageHandlers.sd.postMessage;
+          let seen = null;
           window.webkit.messageHandlers.sd.postMessage = (p) => {
-            if (p.type === "bang") window.__brt_legacy = p.name + "|" + (p.detail && p.detail.k);
+            if (p.type === "bang") seen = p.name + "|" + (p.detail && p.detail.k);
           };
-          sd.bang("test.brt.legacy", { k: "v" });
-          return window.__brt_legacy;
+          try {
+            sd.bang("test.brt.legacy", { k: "v" });
+          } finally {
+            window.webkit.messageHandlers.sd.postMessage = real;
+          }
+          return seen;
         })()
         """)?.toString()
         try expectEqual(out, "test.brt.legacy|v")

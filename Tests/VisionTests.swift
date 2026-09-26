@@ -4,43 +4,42 @@ import AppKit
 
 // Tests for `Sources/DataSources/Vision.swift`.
 //
-// Vision.swift wraps Apple's Vision framework — OCR, face rectangles, feature
-// prints, subject mask, body pose. Every public entrypoint funnels through
-// `runRequest(...)` which decodes the input image, dispatches to a global
-// queue, runs `VNImageRequestHandler.perform([...])`, and shapes results on
-// main. Six public entrypoints + a shared decoder + a pure-ish helper.
+// Every public request entry point funnels through a private `runRequest`
+// that decodes the input image, runs VNImageRequestHandler on a global
+// queue, and completes on main. Running real Vision requests is expensive
+// and model-dependent, so the tests cover:
+//   1. `Vision.decodeImage(_:)` — the gatekeeper for every request: dataURL
+//      strings and filesystem paths → CGImage, everything else → nil.
+//   2. `Vision.featurePrintDistance(a:b:)` — synchronous; its rejection
+//      paths (nil, non-base64, non-archive) need no Vision run.
+//   3. The request entry points' undecodable-input bail: completion(nil),
+//      delivered asynchronously on main.
 //
-// What we can't test here:
-//   - Anything that calls `VNImageRequestHandler.perform([...])`. That hop
-//     actually runs OCR / face detection / pose estimation on the supplied
-//     pixels — expensive, GPU-bound, and the result shape depends on what
-//     Apple's models see in the image. The test suite is hermetic and
-//     synchronous (no RunLoop spins; see NetworkTests.swift preamble), so
-//     even if we wanted to feed it a real CGImage we couldn't await the
-//     async completion.
-//   - `runRequest`, `decodeDataURL`, `pngDataURL`, `elementTypeName`,
-//     `jointName` — all `private static`, not reachable from the test
-//     target. The bounding-box y-flip, the .fast/.accurate level mapping,
-//     and the joint-name normalization all live inside private decode
-//     closures wrapped by the public entrypoints. We don't change
-//     production visibility just for tests.
-//
-// What we CAN test (the observable surface):
-//   1. `Vision.decodeImage(_:)` — internal static, the gatekeeper every
-//      Vision.* call funnels through. Accepts dataURL strings, filesystem
-//      paths, returns CGImage or nil. This is the only synchronous,
-//      pure-ish entry point in the file.
-//   2. `Vision.featurePrintDistance(a:b:)` — internal static, synchronous.
-//      Both args are base64-encoded NSKeyedArchiver blobs. The error path
-//      (nil args, empty strings, non-base64, base64 that isn't a valid
-//      archive) is reachable without ever running Vision.
-//   3. The async entrypoints (`ocr`, `faces`, `featurePrint`, `subjectMask`,
-//      `bodyPose`) on the early-bail path: `runRequest` calls
-//      `decodeImage(source)` first and fires `completion(nil)` synchronously
-//      if decoding fails. That branch is observable without running VN.
-//
-// Wire-up: caller will add `registerVisionTests()` to Tests/main.swift and
-// append this file to TEST_SOURCES in tests.sh.
+// Not covered: request results (bounding-box y-flip, OCR level mapping,
+// joint names) — private decode closures reachable only through a real
+// VNImageRequestHandler run.
+
+private func visionSpin(timeout: TimeInterval, until done: () -> Bool) {
+    let deadline = Date().addingTimeInterval(timeout)
+    while !done() && Date() < deadline {
+        RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.01))
+    }
+}
+
+/// 4x4 opaque red PNG, encoded in memory.
+private func visionTestPNG() -> Data? {
+    guard let ctx = CGContext(data: nil, width: 4, height: 4, bitsPerComponent: 8,
+                              bytesPerRow: 16, space: CGColorSpaceCreateDeviceRGB(),
+                              bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
+    ctx.setFillColor(CGColor(red: 1, green: 0, blue: 0, alpha: 1))
+    ctx.fill(CGRect(x: 0, y: 0, width: 4, height: 4))
+    guard let image = ctx.makeImage() else { return nil }
+    let data = NSMutableData()
+    guard let dest = CGImageDestinationCreateWithData(data as CFMutableData, "public.png" as CFString, 1, nil)
+    else { return nil }
+    CGImageDestinationAddImage(dest, image, nil)
+    return CGImageDestinationFinalize(dest) ? data as Data : nil
+}
 
 func registerVisionTests() {
     // ── decodeImage: rejection paths ───────────────────────────────────────
@@ -85,44 +84,29 @@ func registerVisionTests() {
         try expect(Vision.decodeImage("data:image/png;base64,\(payload)") == nil)
     }
 
-    // ── decodeImage: success path (round-trip a real image) ────────────────
+    // ── decodeImage: success paths ─────────────────────────────────────────
     test("decodeImage round-trips a valid PNG data: URL into a CGImage") {
-        // Build a 4x4 RGBA PNG in-memory, base64-encode it, hand it in.
-        // The success path is the only positive assertion we can make about
-        // decodeImage without touching the filesystem.
-        let cs = CGColorSpaceCreateDeviceRGB()
-        let ctx = CGContext(
-            data: nil, width: 4, height: 4, bitsPerComponent: 8,
-            bytesPerRow: 16, space: cs,
-            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
-        )
-        ctx?.setFillColor(CGColor(red: 1, green: 0, blue: 0, alpha: 1))
-        ctx?.fill(CGRect(x: 0, y: 0, width: 4, height: 4))
-        guard let src = ctx?.makeImage() else {
-            try expect(false, "failed to build source CGImage")
-            return
+        guard let png = visionTestPNG() else {
+            throw Expectation(message: "failed to build source PNG")
         }
-        let data = NSMutableData()
-        guard let dest = CGImageDestinationCreateWithData(
-            data as CFMutableData, "public.png" as CFString, 1, nil
-        ) else {
-            try expect(false, "failed to build CGImageDestination")
-            return
-        }
-        CGImageDestinationAddImage(dest, src, nil)
-        guard CGImageDestinationFinalize(dest) else {
-            try expect(false, "failed to finalize PNG")
-            return
-        }
-        let base64 = (data as Data).base64EncodedString()
-        let dataURL = "data:image/png;base64,\(base64)"
-
-        guard let decoded = Vision.decodeImage(dataURL) else {
-            try expect(false, "decodeImage returned nil for a valid PNG dataURL")
-            return
+        guard let decoded = Vision.decodeImage("data:image/png;base64,\(png.base64EncodedString())") else {
+            throw Expectation(message: "decodeImage returned nil for a valid PNG dataURL")
         }
         try expectEqual(decoded.width, 4)
         try expectEqual(decoded.height, 4)
+    }
+
+    test("decodeImage reads an image from a filesystem path") {
+        guard let png = visionTestPNG() else {
+            throw Expectation(message: "failed to build source PNG")
+        }
+        let path = NSTemporaryDirectory() + "stackd-vision-test-\(UUID().uuidString).png"
+        defer { try? FileManager.default.removeItem(atPath: path) }
+        try png.write(to: URL(fileURLWithPath: path))
+        guard let decoded = Vision.decodeImage(path) else {
+            throw Expectation(message: "decodeImage returned nil for a PNG on disk")
+        }
+        try expect(decoded.width > 0 && decoded.height > 0, "decoded image should have positive size")
     }
 
     // ── featurePrintDistance: rejection paths ──────────────────────────────
@@ -146,45 +130,32 @@ func registerVisionTests() {
         try expect(Vision.featurePrintDistance(a: junk, b: junk) == nil)
     }
 
-    // ── async entrypoints: early-bail on undecodable input ─────────────────
-    test("ocr with a non-existent image path queues completion on main, not inline") {
-        // runRequest calls decodeImage first; on failure it fires
-        // completion(nil) — but the entry point itself doesn't dispatch
-        // that callback inline. Same async contract as Thumbnails.generate.
-        // If a future change made this synchronous, Bridge.swift's respond
-        // handling would deadlock.
-        var fired = false
-        Vision.ocr(
-            image: "/var/empty/missing-\(UUID().uuidString).png",
-            languages: ["en-US"],
-            level: "accurate"
-        ) { _ in fired = true }
-        try expect(!fired, "ocr completion must not fire synchronously on the calling thread")
-    }
-
-    test("faces with a nil image queues completion on main, not inline") {
-        // nil source → decodeImage returns nil → completion(nil) on main.
-        // We assert the negative (no inline fire) — same tracer-bullet
-        // pattern as ThumbnailsTests.
-        var fired = false
-        Vision.faces(image: nil) { _ in fired = true }
-        try expect(!fired)
-    }
-
-    test("featurePrint with a malformed data: URL queues completion on main, not inline") {
-        // Verifies the early-bail path through the generic VNRequest entry
-        // — featurePrint takes the same `image:` shape as ocr/faces and
-        // funnels through the same runRequest.
-        var fired = false
-        Vision.featurePrint(image: "data:image/png;base64,not-base64") { _ in fired = true }
-        try expect(!fired)
-    }
-
-    test("bodyPose with a non-string image source queues completion on main, not inline") {
-        // JS could hand a number or dict — decodeImage rejects, runRequest
-        // bails via completion(nil). Must not fire inline.
-        var fired = false
-        Vision.bodyPose(image: 12345) { _ in fired = true }
-        try expect(!fired)
+    // ── request entry points: bail on undecodable input ───────────────────
+    test("request entry points complete with nil on undecodable input, asynchronously on main") {
+        // Each call passes an input decodeImage rejects: a missing path,
+        // nil, a malformed data: URL, a non-string. Completion must be
+        // queued on main (never inline — Bridge's respond path assumes it)
+        // and carry nil.
+        var results: [String: [String: Any]?] = [:]
+        var offMain: [String] = []
+        func record(_ name: String) -> ([String: Any]?) -> Void {
+            return { r in
+                if !Thread.isMainThread { offMain.append(name) }
+                results[name] = .some(r)
+            }
+        }
+        Vision.ocr(image: "/var/empty/missing-\(UUID().uuidString).png",
+                   languages: ["en-US"], level: "accurate", completion: record("ocr"))
+        Vision.faces(image: nil, completion: record("faces"))
+        Vision.featurePrint(image: "data:image/png;base64,not-base64", completion: record("featurePrint"))
+        Vision.subjectMask(image: ["not": "an image"], completion: record("subjectMask"))
+        Vision.bodyPose(image: 12345, completion: record("bodyPose"))
+        try expect(results.isEmpty, "completions fired inline: \(results.keys.sorted())")
+        visionSpin(timeout: 2) { results.count == 5 }
+        try expectEqual(results.keys.sorted(), ["bodyPose", "faces", "featurePrint", "ocr", "subjectMask"])
+        for (name, r) in results {
+            try expect(r == nil, "\(name) should complete with nil")
+        }
+        try expectEqual(offMain, [], "completions delivered off main")
     }
 }

@@ -143,12 +143,14 @@ func registerWindowAnimationTests() {
         try expectEqual(w.sample(warped: [1], listed: [1], now: 3.1), [1])
     }
 
-    test("prune drops finished animations only") {
+    test("prune keeps animations still in progress") {
+        // Dropping finished entries is bookkeeping only: isAnimating is
+        // already time-gated, so what prune must not break is a live warp.
         var w = WindowAnimationWatch()
         _ = w.begin(now: 0)
         _ = w.sample(warped: [1, 2], listed: [1, 2], now: 0.1)
         _ = w.sample(warped: [2], listed: [2], now: 0.2)
-        w.prune(now: 0.2 + 0.01)
+        w.prune(now: 0.21)
         try expect(!w.isAnimating(1, now: 0.21))
         try expect(w.isAnimating(2, now: 0.21))
     }

@@ -30,10 +30,15 @@ func registerSymbolsTests() {
                    "empty name should render nil")
     }
 
-    test("unknown weight / scale fall back instead of failing") {
-        // A real symbol with bogus weight/scale strings must still render —
-        // the maps default to .regular / .medium rather than dropping the glyph.
-        try expect(Symbols.render(name: "circle", pointSize: 13, weight: "nonsense", scale: "nonsense") != nil,
-                   "bogus weight/scale should fall back, not nil out a valid symbol")
+    test("unknown weight / scale fall back to regular / medium") {
+        // Bogus strings must not drop the glyph; they render exactly like the
+        // documented defaults.
+        guard let bogus = Symbols.render(name: "circle", pointSize: 13, weight: "nonsense", scale: "nonsense") else {
+            throw Expectation(message: "bogus weight/scale should fall back, not nil out a valid symbol")
+        }
+        let defaults = Symbols.render(name: "circle", pointSize: 13, weight: "regular", scale: "medium")
+        try expectEqual(bogus["width"] as? Int, defaults?["width"] as? Int)
+        try expectEqual(bogus["height"] as? Int, defaults?["height"] as? Int)
+        try expectEqual(bogus["dataURL"] as? String, defaults?["dataURL"] as? String)
     }
 }

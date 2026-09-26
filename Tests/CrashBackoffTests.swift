@@ -22,14 +22,6 @@ func registerCrashBackoffTests() {
         try expectEqual(b.crashed(now: 4), .reload(afterSeconds: 30))
     }
 
-    test("CrashBackoff: sixth consecutive crash gives up") {
-        var b = CrashBackoff()
-        for t in 0..<5 {
-            _ = b.crashed(now: TimeInterval(t))
-        }
-        try expectEqual(b.crashed(now: 5), .giveUp)
-    }
-
     test("CrashBackoff: stable uptime resets the ladder") {
         var b = CrashBackoff()
         try expectEqual(b.crashed(now: 0), .reload(afterSeconds: 0))
@@ -39,17 +31,21 @@ func registerCrashBackoffTests() {
         try expectEqual(b.crashed(now: 110), .reload(afterSeconds: 2))
     }
 
-    test("CrashBackoff: just under the stable threshold does NOT reset") {
-        var b = CrashBackoff()
-        try expectEqual(b.crashed(now: 0), .reload(afterSeconds: 0))
-        try expectEqual(b.crashed(now: 59.9), .reload(afterSeconds: 2))
+    test("CrashBackoff: stable threshold is inclusive at 60s, exclusive below") {
+        var under = CrashBackoff()
+        _ = under.crashed(now: 0)
+        try expectEqual(under.crashed(now: 59.9), .reload(afterSeconds: 2))
+        var at = CrashBackoff()
+        _ = at.crashed(now: 0)
+        try expectEqual(at.crashed(now: 60), .reload(afterSeconds: 0))
     }
 
-    test("CrashBackoff: give-up persists for closely-spaced crashes") {
+    test("CrashBackoff: sixth consecutive crash gives up, and give-up persists") {
         var b = CrashBackoff()
-        for t in 0..<6 {
+        for t in 0..<5 {
             _ = b.crashed(now: TimeInterval(t))
         }
+        try expectEqual(b.crashed(now: 5), .giveUp)
         try expectEqual(b.crashed(now: 6), .giveUp)
         try expectEqual(b.crashed(now: 7), .giveUp)
     }

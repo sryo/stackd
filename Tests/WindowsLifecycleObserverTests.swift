@@ -1,25 +1,12 @@
 import CoreGraphics
 import Foundation
 
-/// Pure-diff tests for the safety-backstop `WindowsLifecycleObserver.diff`.
-///
-/// The observer itself is impure (CGWindowListCopyWindowInfo + Timer +
-/// stderr logging), but the create / destroy / titleChanged classification
-/// is pure key-set math we can unit-test in isolation. Slice 2 of the
-/// 2026-06-05 window-events rework extracted the diff out of `tick()` so
-/// the math could be locked here — without coupling tests to the live
-/// macOS state the observer otherwise runs against.
-///
-/// We pin the contract behavior, not the implementation:
-///   - new key in `next` → created
-///   - dropped key in `prev` → destroyed
-///   - same key + changed title → titleChanged with the OLD title
-///   - same key + same title → nothing emitted
-///
-/// `axCoveredRecently` (Slice 4's missed-by-ax gate) lives on the observer
-/// instance and reads `WindowsAXObserver.shared.lastAxFire`, which needs a
-/// live AX-observer install — that path is verified manually per the plan's
-/// Slice 6 ("user is ground truth" per memory feedback_user_confirms_fixed).
+/// Tests for the pure decisions behind the safety-backstop
+/// `WindowsLifecycleObserver` poll: the snapshot diff (new key → created,
+/// dropped key → destroyed, same key with a new title → titleChanged carrying
+/// the OLD title), the bounded re-pump ladder, and which poll-detected
+/// creates/destroys still fire. The observer's timer, CGWindowList read and
+/// `axCoveredRecently` (which needs a live AX observer) are not exercised.
 func registerWindowsLifecycleObserverTests() {
 
     func snap(id: Int, title: String, pid: Int = 100, app: String = "App", frame: CGRect = .zero)
@@ -100,18 +87,6 @@ func registerWindowsLifecycleObserverTests() {
             "second tuple element is the OLD title (for detail[\"oldTitle\"])")
     }
 
-    test("diff: title change without id change does not fire create/destroy") {
-        // Regression guard — a previous draft tried to "re-create" the
-        // window on title change. Bang authors expect titleChanged for
-        // title flips, not destroyed+created.
-        let prev: [Int: WindowsLifecycleObserver.Snap] = [1: snap(id: 1, title: "A")]
-        let next: [Int: WindowsLifecycleObserver.Snap] = [1: snap(id: 1, title: "B")]
-        let result = WindowsLifecycleObserver.diff(prev: prev, next: next)
-        try expect(result.created.isEmpty)
-        try expect(result.destroyed.isEmpty)
-        try expectEqual(result.titleChanged.count, 1)
-    }
-
     test("diff: simultaneous create + destroy + title change all surface") {
         // Pathological-but-real case: the user Cmd-Q'd one app, opened
         // another, and renamed a third's window between two 10s poll
@@ -171,13 +146,10 @@ func registerWindowsLifecycleObserverTests() {
 
     // MARK: - WindowsPumpRetry: the bounded sd.windows.all re-pump decision
     //
-    // Pure core of the create/destroy → channel-consistency loop. The
-    // scheduling around it (DispatchQueue.asyncAfter in StackHost.verifyPump
-    // and WindowLifecycleFanout.fireCreated) is impure and verified live;
-    // these tests pin the decision math so a refactor can't silently turn
-    // "retry until the snapshot reflects the event" into "fire once and
-    // hope" — which was the exact bug: a created window absent from the
-    // pumped CGWindowList snapshot was dropped until the next focus event.
+    // Pure core of the create/destroy → channel-consistency loop: re-pump
+    // until the snapshot reflects the event, within a bounded ladder. The
+    // scheduling around it (StackHost.verifyPump,
+    // WindowLifecycleFanout.fireCreated) is not exercised here.
 
     test("pumpRetry: .present satisfied only when the wid is in the snapshot") {
         try expect(WindowsPumpRetry.satisfied(ids: [1, 2, 3], expectation: .present(2)),

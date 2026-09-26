@@ -201,6 +201,16 @@ func registerTouchFrameMailboxTests() {
         try expectEqual(mb.checkWatchdog(now: 1.15), .rearm(at: 1.1 + 0.12))
     }
 
+    test("TouchFrameMailbox: a forgotten device drops its pending frames and gets no synthesized release") {
+        let mb = TouchFrameMailbox()
+        _ = mb.offer(frame(1, [contact(1, makeTouch)], device: 1), now: 1.0)
+        _ = mb.offer(frame(1, [contact(1, makeTouch)], device: 2), now: 1.0)
+        mb.forget(device: 1)
+        try expectEqual(mb.take().map(\.device), [2])
+        try expectEqual(mb.checkWatchdog(now: 2.0), .fired)
+        try expectEqual(mb.take().map(\.device), [2])
+    }
+
     test("TouchFrame.payload: marks synthesized releases") {
         var f = frame(1, [], t: 1.0)
         f.synthetic = true

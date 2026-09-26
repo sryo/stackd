@@ -2,22 +2,11 @@ import AppKit
 import ApplicationServices
 import Foundation
 
-// Characterization tests for Sources/DataSources/AX.swift.
-//
-// Scope: the parts of the AX wrapper that don't need TCC Accessibility
-// permission or a live AX tree — namely the per-Bridge HandleStore and the
-// process-wide AXObserverPool's diagnostic counter. Element creation
-// (`application(pid:store:)`, `systemWide(store:)`) is testable too: those
-// AXUIElementCreate* calls don't probe AX, they just allocate refs and mint.
-//
-// Skipped (would need access changes or AX/TCC):
-// - marshal(_:store:) and toCFType(_:store:) — fileprivate.
-// - focusedElement(), focusedElementHandle(store:),
-//   focusedElementSystemWideHandle(store:) — frontmost app + AX trust.
-// - attributeNames/attribute/children/parent/role/setAttribute/performAction —
-//   require AXUIElementCopy* against a real element, which needs TCC.
-// - AXAppObserver init — succeeds without TCC but installs a CFRunLoopSource
-//   on the main runloop, which the harness runs off-main.
+// Tests for Sources/DataSources/AX.swift that need neither Accessibility
+// permission nor a live AX tree: the per-Bridge HandleStore, element-handle
+// minting (AXUIElementCreate* only allocates, it doesn't query AX), and
+// AXAppObserver's notification routing rule. Attribute reads/writes,
+// actions and focused-element lookups need TCC and a real target.
 
 func registerAXTests() {
     test("AX.HandleStore.mint returns sequential ids starting at 1") {
@@ -49,11 +38,11 @@ func registerAXTests() {
 
     test("AX.HandleStore.releaseAll clears every handle") {
         let store = AX.HandleStore()
-        _ = store.mint(AXUIElementCreateSystemWide())
-        _ = store.mint(AXUIElementCreateSystemWide())
-        let stray = store.mint(AXUIElementCreateSystemWide())
+        let handles = (0..<3).map { _ in store.mint(AXUIElementCreateSystemWide()) }
         store.releaseAll()
-        try expect(store.get(stray) == nil, "releaseAll should drop all slots")
+        for h in handles {
+            try expect(store.get(h) == nil, "releaseAll should drop handle \(h)")
+        }
     }
 
     test("AX.HandleStore handle ids keep advancing after release") {
@@ -80,28 +69,6 @@ func registerAXTests() {
         let h = AX.systemWide(store: store)
         try expect(h >= 1, "minted handle should be positive")
         try expect(store.get(h) != nil, "minted handle should resolve in the store")
-    }
-
-    test("AX.focusedElementSystemWideHandle returns nil-or-valid (TCC-gated, never crashes)") {
-        // Without Accessibility permission the AXUIElementCopyAttributeValue
-        // call returns an error and we yield nil. With permission it mints
-        // a handle. Both outcomes are valid; what we're testing is that the
-        // function doesn't crash and that any returned handle is well-formed.
-        let store = AX.HandleStore()
-        let h = AX.focusedElementSystemWideHandle(store: store)
-        if let h = h {
-            try expect(h >= 1, "minted handle should be positive")
-            try expect(store.get(h) != nil, "minted handle should resolve in the store")
-        }
-        // nil is the expected outcome in the test harness, which doesn't
-        // have Accessibility permission — pass-through.
-    }
-
-    test("AXObserverPool.liveObserverCount is non-negative at rest") {
-        // The pool is process-wide and may legitimately be non-zero if another
-        // test or the host process installed an observer. Just assert the
-        // invariant: counts are never negative.
-        try expect(AXObserverPool.liveObserverCount() >= 0, "pool count must be non-negative")
     }
 
     test("AXAppObserver.routes — app-scope broadcasts, element-scope matches only itself") {

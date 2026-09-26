@@ -21,9 +21,12 @@ func registerBridgeJsonifyTests() {
         try expectEqual(out, "[1,\"two\",true]")
     }
 
-    test("jsonify dictionary with string value") {
-        let out = Bridge.jsonify(["k": "v"])
-        try expectEqual(out, "{\"k\":\"v\"}")
+    test("jsonify dictionary keys are sorted, including nested dicts") {
+        // Channel dedupe string-compares against the last pushed payload, so
+        // two dicts with equal contents must serialize identically regardless
+        // of insertion order.
+        let out = Bridge.jsonify(["zeta": 1, "alpha": ["y": "b", "x": "a"]] as [String: Any])
+        try expectEqual(out, "{\"alpha\":{\"x\":\"a\",\"y\":\"b\"},\"zeta\":1}")
     }
 
     test("jsonify NSNull becomes null") {

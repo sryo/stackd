@@ -11,19 +11,12 @@ func registerRuntimePathTests() {
         try expectEqual(got.first, "/repo/.build/Runtime")
     }
 
-    test("bundle layout: Contents/Resources/Runtime is a candidate") {
+    test("bundle layout: next-to-binary first, then Contents/Resources/Runtime") {
+        // Next-to-binary outranks Resources so a dev symlink wins.
         let exeDir = URL(fileURLWithPath: "/Applications/stackd.app/Contents/MacOS")
-        let got = runtimeCandidates(executableDir: exeDir)
-        try expect(got.contains("/Applications/stackd.app/Contents/Resources/Runtime"),
-                   "Resources/Runtime must be probed for the .app layout; got \(got)")
-    }
-
-    test("next-to-binary outranks Resources so a dev symlink wins") {
-        let exeDir = URL(fileURLWithPath: "/Applications/stackd.app/Contents/MacOS")
-        let got = runtimeCandidates(executableDir: exeDir)
-        let nextTo = got.firstIndex(of: "/Applications/stackd.app/Contents/MacOS/Runtime")
-        let resources = got.firstIndex(of: "/Applications/stackd.app/Contents/Resources/Runtime")
-        try expect(nextTo != nil && resources != nil && nextTo! < resources!,
-                   "next-to-binary must precede Resources; got \(got)")
+        try expectEqual(runtimeCandidates(executableDir: exeDir), [
+            "/Applications/stackd.app/Contents/MacOS/Runtime",
+            "/Applications/stackd.app/Contents/Resources/Runtime",
+        ])
     }
 }

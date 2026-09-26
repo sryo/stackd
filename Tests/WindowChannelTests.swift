@@ -39,13 +39,19 @@ func registerWindowChannelTests() {
         try expectEqual(out, "1,7")
     }
 
-    test("sd.windows.{moved,resized,minimized,deminimized} all exist as channels") {
+    test("sd.windows.{moved,resized,minimized,deminimized} each route their own bang") {
         let out = JSHarness.evalString("""
-        ['moved','resized','minimized','deminimized']
-          .map(n => typeof sd.windows[n].subscribe)
-          .join(',')
+        (function() {
+          const names = ['moved','resized','minimized','deminimized'];
+          const seen = {};
+          names.forEach((n, i) => {
+            sd.windows[n].subscribe((d) => { if (d && d.id === 7100 + i) seen[n] = (seen[n] || 0) + 1; });
+          });
+          names.forEach((n, i) => window['onBang_sd_window_' + n]({ id: 7100 + i }));
+          return names.map(n => n + ':' + (seen[n] || 0)).join(',');
+        })()
         """)
-        try expectEqual(out, "function,function,function,function")
+        try expectEqual(out, "moved:1,resized:1,minimized:1,deminimized:1")
     }
 
     test("sd.windows.animating routes sd.window.animating with both frames") {
@@ -80,10 +86,12 @@ func registerWindowChannelTests() {
         let out = JSHarness.evalString("""
         (function() {
           let count = 0;
-          sd.windows.moved.subscribe((d) => { if (d) count++; });
-          window.onBang_sd_window_moved({ id: 1, frame: {x:0,y:0,w:100,h:100} });
-          window.onBang_sd_window_moved({ id: 1, frame: {x:50,y:0,w:100,h:100} });
-          window.onBang_sd_window_moved({ id: 2, frame: {x:0,y:0,w:100,h:100} });
+          // Ids unique to this test: the shared context may replay a value
+          // another test dispatched.
+          sd.windows.moved.subscribe((d) => { if (d && d.id >= 7201 && d.id <= 7202) count++; });
+          window.onBang_sd_window_moved({ id: 7201, frame: {x:0,y:0,w:100,h:100} });
+          window.onBang_sd_window_moved({ id: 7201, frame: {x:50,y:0,w:100,h:100} });
+          window.onBang_sd_window_moved({ id: 7202, frame: {x:0,y:0,w:100,h:100} });
           return count;
         })()
         """)

@@ -62,7 +62,7 @@ func registerGestureMotionTests() {
                    "no motion keys: \(m)")
     }
 
-    test("Gesture.motion: reads fields set directly on a gesture CGEvent") {
+    test("Gesture.motion: reads subtype, magnification and phase straight off the CGEvent fields") {
         let ev = CGEvent(source: nil)!
         ev.type = Gesture.cgEventType
         ev.setIntegerValueField(CGEventField(rawValue: 110)!, value: 0x08)

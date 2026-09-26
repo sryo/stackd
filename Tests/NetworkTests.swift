@@ -3,145 +3,50 @@ import Network
 
 // Tests for `Sources/DataSources/Network.swift`.
 //
-// Network.swift is thin — three enums (NetLAN / NetWiFi / NetPath) plus one
-// RefCountedObserver (NetworkObserver). The testable surface is the dict
-// shape each `current()` / `snapshot()` returns, since JS subscribers in
-// Bridge.swift depend on exact key names + value types.
+// The testable surface is the dict shape each `current()` / `snapshot()`
+// returns (JS subscribers destructure these keys) plus the pure throughput
+// rate math.
 //
-// What we can't test in a sync, side-effect-free harness:
-//   - The IPv4 value itself (depends on whether the user is on a network).
-//   - SSID (returns nil unless Location TCC is granted to stackd).
-//   - NetPath.snapshot(from:) directly — NWPath has no public initializer.
-//     We exercise the static name maps indirectly by verifying the keys
-//     produced by NetworkObserver.shared.latestPath when present.
-//
-// What we deliberately avoid:
-//   - CWInterface.scan() / associate() / disassociate() — would interfere
-//     with the user's real wifi.
-//   - Triggering NWPathMonitor and blocking on its async callback — no test
-//     in this suite uses RunLoop spins; we keep that contract.
+// Not covered:
+//   - The IPv4 / SSID values themselves (depend on the host's network and on
+//     Location TCC for SSID).
+//   - NetPath.snapshot(from:) — NWPath has no public initializer, and getting
+//     a real one means installing NetworkObserver's NWPathMonitor.
+//   - CWInterface.scan() / associate() — would interfere with the user's wifi.
 
 func registerNetworkTests() {
     // MARK: - NetLAN.current()
 
-    test("NetLAN.current returns a dict with ipv4 + hostname keys") {
-        // Bridge.swift jsonifies this dict for sd.net.lan subscribers — both
-        // keys must always be present so the JS side can destructure safely.
-        let dict = NetLAN.current()
-        try expect(dict["ipv4"] != nil, "ipv4 key must exist (NSNull if no primary service)")
-        try expect(dict["hostname"] != nil, "hostname key must exist")
-    }
-
-    test("NetLAN.current hostname is a String (possibly empty)") {
-        // localizedName is nil-coalesced to "" in the producer — never NSNull,
-        // never absent. JS does `dict.hostname.toLowerCase()` style reads.
-        let dict = NetLAN.current()
-        try expect(dict["hostname"] is String, "hostname should be a String, got \(type(of: dict["hostname"] ?? "nil"))")
-    }
-
-    test("NetLAN.current ipv4 is either a String or NSNull") {
-        // SCDynamicStore can fail to resolve a primary service (no network,
-        // captive portal mid-handshake) — surface as NSNull so JSON keeps the
-        // key. Anything else (a number, a dict) would be a producer bug.
+    test("NetLAN.current always carries ipv4 (String or NSNull) and hostname (String)") {
+        // ipv4 is NSNull when SCDynamicStore has no primary service (offline,
+        // captive portal mid-handshake); the key stays so JSON keeps it.
         let dict = NetLAN.current()
         let ipv4 = dict["ipv4"]
-        let isStringOrNull = (ipv4 is String) || (ipv4 is NSNull)
-        try expect(isStringOrNull, "ipv4 must be String or NSNull, got \(type(of: ipv4 ?? "nil"))")
+        try expect((ipv4 is String) || (ipv4 is NSNull),
+                   "ipv4 must be String or NSNull, got \(type(of: ipv4 ?? "nil"))")
+        try expect(dict["hostname"] is String,
+                   "hostname should be a String, got \(type(of: dict["hostname"] ?? "nil"))")
     }
 
     // MARK: - NetWiFi.current()
 
-    test("NetWiFi.current returns a dict with ssid + signal keys") {
-        // Even on a Mac with no wifi hardware (Mac mini Ethernet-only), the
-        // producer falls through to the no-interface branch and still emits
-        // both keys as NSNull. Absent keys would break JS destructuring.
-        let dict = NetWiFi.current()
-        try expect(dict["ssid"] != nil, "ssid key must exist (NSNull if no interface)")
-        try expect(dict["signal"] != nil, "signal key must exist (NSNull if no interface)")
-    }
-
-    test("NetWiFi.current ssid is either a String or NSNull") {
-        // macOS 14.4+ withholds SSID without Location TCC — producer surfaces
-        // nil → NSNull rather than prompting. Anything else is a bug.
+    test("NetWiFi.current always carries ssid (String or NSNull) and signal (Int or NSNull)") {
+        // Ethernet-only Macs take the no-interface branch (both NSNull);
+        // macOS 14.4+ withholds SSID without Location TCC (NSNull, no prompt).
         let dict = NetWiFi.current()
         let ssid = dict["ssid"]
-        let isStringOrNull = (ssid is String) || (ssid is NSNull)
-        try expect(isStringOrNull, "ssid must be String or NSNull, got \(type(of: ssid ?? "nil"))")
-    }
-
-    test("NetWiFi.current signal is either an Int RSSI or NSNull") {
-        // rssiValue() returns Int (dBm, typically -30…-90). No-interface
-        // branch puts NSNull. Float / String here would mean the producer
-        // changed shape without the JS callers being updated.
-        let dict = NetWiFi.current()
         let signal = dict["signal"]
-        let isIntOrNull = (signal is Int) || (signal is NSNull)
-        try expect(isIntOrNull, "signal must be Int or NSNull, got \(type(of: signal ?? "nil"))")
-    }
-
-    // MARK: - NetworkObserver shape
-
-    test("NetworkObserver.shared exposes a latestPath property (initially nil before install)") {
-        // The observer only starts NWPathMonitor on first subscribe(). Before
-        // anyone subscribes, latestPath should be nil — otherwise the cache
-        // is leaking state from a prior install/cancel cycle.
-        //
-        // Note: if any earlier test in the suite subscribed and the Token
-        // hasn't been released yet, this will be non-nil. We assert the
-        // weaker invariant that the property is reachable and either nil or
-        // a valid NWPath — which is the contract sd.net.path consumers rely
-        // on when priming the channel.
-        let path = NetworkObserver.shared.latestPath
-        if path != nil {
-            // If a previous test or the running daemon already installed the
-            // monitor, the cached path must at minimum have a defined status.
-            // (NWPath.Status is an enum — can't be malformed, but we touch it
-            // to prove the reference is alive.)
-            _ = path!.status
-        }
-        // Either branch is acceptable; the test fails only if accessing
-        // latestPath crashes (e.g. concurrent mutation on a non-main queue).
-        try expect(true)
-    }
-
-    // MARK: - NetPath.snapshot shape (when a real path is available)
-
-    test("NetPath.snapshot emits status + interfaces + isConstrained + isExpensive when path is cached") {
-        // We can't construct an NWPath in a test (no public init), so this
-        // test is conditional: if NetworkObserver has already cached a path
-        // (because the daemon or another test installed it), verify the dict
-        // contract. If not, skip — we don't add a synchronous wait just for
-        // this assertion (the suite avoids RunLoop spins).
-        guard let path = NetworkObserver.shared.latestPath else {
-            return
-        }
-        let dict = NetPath.snapshot(from: path)
-        try expect(dict["status"] is String, "status should be a String enum name")
-        try expect(dict["interfaces"] is [String], "interfaces should be [String]")
-        try expect(dict["isConstrained"] is Bool, "isConstrained should be Bool")
-        try expect(dict["isExpensive"] is Bool, "isExpensive should be Bool")
-
-        // Status must be one of the three known names — anything else means
-        // a new NWPath.Status case landed and the map wasn't updated.
-        let status = dict["status"] as! String
-        let known = ["satisfied", "unsatisfied", "requiresConnection"]
-        try expect(known.contains(status), "status '\(status)' is not in the known set \(known)")
-
-        // Interface names must be from the known set — "other" is the
-        // documented fallback, so unknown types degrade gracefully.
-        let interfaces = dict["interfaces"] as! [String]
-        let knownIfaces = Set(["wifi", "wired", "cellular", "loopback", "other"])
-        for iface in interfaces {
-            try expect(knownIfaces.contains(iface), "interface '\(iface)' is not in the known set")
-        }
+        try expect((ssid is String) || (ssid is NSNull),
+                   "ssid must be String or NSNull, got \(type(of: ssid ?? "nil"))")
+        try expect((signal is Int) || (signal is NSNull),
+                   "signal must be Int or NSNull, got \(type(of: signal ?? "nil"))")
     }
 
     // MARK: - NetThroughput.computeRates (pure diff math)
 
     test("NetThroughput.computeRates returns nil on first sample (prevTs == 0)") {
         // First tick has no prior sample — must skip rather than emit a
-        // garbage rate computed against epoch=0. Matches startChannel's
-        // "snapshot() returns nil → no push" contract.
+        // garbage rate computed against epoch 0.
         let rates = NetThroughput.computeRates(
             prevRx: 0, prevTx: 0, prevTs: 0,
             curRx:  1000, curTx: 2000, curTs: 1000.0
@@ -150,8 +55,6 @@ func registerNetworkTests() {
     }
 
     test("NetThroughput.computeRates returns nil when time hasn't advanced") {
-        // Same-timestamp ticks (degenerate but theoretically possible if a
-        // timer fires twice at the same Date) would yield divide-by-zero.
         let rates = NetThroughput.computeRates(
             prevRx: 100, prevTx: 100, prevTs: 1000.0,
             curRx:  200, curTx:  200, curTs:  1000.0
@@ -160,8 +63,7 @@ func registerNetworkTests() {
     }
 
     test("NetThroughput.computeRates divides byte delta by time delta") {
-        // 1000 bytes rx in 2 seconds → 500 B/s. Plain arithmetic — guards
-        // against an off-by-one in the dt math (e.g., dt=1 hardcoded).
+        // 1000 bytes rx in 2 seconds → 500 B/s.
         let rates = NetThroughput.computeRates(
             prevRx: 0,    prevTx: 0,    prevTs: 1000.0,
             curRx:  1000, curTx:  4000, curTs:  1002.0
@@ -172,9 +74,7 @@ func registerNetworkTests() {
     }
 
     test("NetThroughput.computeRates clamps negative deltas to 0") {
-        // Counter wrap or interface tear-down can produce curRx < prevRx —
-        // the JS-side throughput.js used Math.max(0, ...) for exactly this
-        // reason. Mirror the clamp in Swift so negative rates never reach JS.
+        // Counter wrap or interface tear-down can produce curRx < prevRx.
         let rates = NetThroughput.computeRates(
             prevRx: 5000, prevTx: 5000, prevTs: 1000.0,
             curRx:  1000, curTx:  6000, curTs:  1001.0
@@ -184,17 +84,13 @@ func registerNetworkTests() {
         try expectEqual(rates!.txBps, 1000.0)
     }
 
-    test("NetThroughput.interfaceTotals returns non-negative counters") {
-        // Smoke test — getifaddrs() always succeeds on a healthy mac. We
-        // can't pin specific byte counts (depends on host activity), but
-        // the call must return without crashing and the totals must be
-        // valid UInt64 values (which they are by type — this asserts the
-        // call shape).
-        let (rx, tx) = NetThroughput.interfaceTotals()
-        // UInt64 is non-negative by definition; this is really asserting
-        // that the call doesn't trap. Loopback exclusion means rx/tx may
-        // legitimately be 0 on a freshly booted Ethernet-only mac.
-        try expect(rx >= 0)
-        try expect(tx >= 0)
+    test("NetThroughput.interfaceTotals counters never go backwards between reads") {
+        // The observer diffs successive reads; interface byte counters are
+        // cumulative, so a second read taken right after the first must be
+        // >= it (barring an interface disappearing mid-test).
+        let first = NetThroughput.interfaceTotals()
+        let second = NetThroughput.interfaceTotals()
+        try expect(second.rx >= first.rx, "rx went backwards: \(first.rx) → \(second.rx)")
+        try expect(second.tx >= first.tx, "tx went backwards: \(first.tx) → \(second.tx)")
     }
 }

@@ -11,7 +11,6 @@ func registerHeadlessStackTests() {
         """
         let m = try JSONDecoder().decode(StackManifest.self, from: Data(json.utf8))
         try expectEqual(m.headless, nil)
-        try expectEqual(m.headless == true, false)
     }
 
     test("manifest: headless:true decodes without requiring size") {
@@ -23,8 +22,8 @@ func registerHeadlessStackTests() {
         """
         let m = try JSONDecoder().decode(StackManifest.self, from: Data(json.utf8))
         try expectEqual(m.headless, true)
-        try expectEqual(m.size == nil, true)
-        try expectEqual(m.anchor == nil, true)
+        try expect(m.size == nil, "size should stay nil")
+        try expect(m.anchor == nil, "anchor should stay nil")
     }
 
     test("StackDoctor: headless:true alone passes (no spurious size warning)") {
@@ -36,47 +35,48 @@ func registerHeadlessStackTests() {
         try expectEqual(issues, 0)
     }
 
-    test("StackDoctor: headless:true + size warns (size is ignored)") {
+    test("StackDoctor: headless:true + size is one issue (size is inert)") {
         let dir = makeTempStack(manifest: """
         {"id":"hl2","name":"HL2","permissions":[],"headless":true,"size":{"w":1,"h":1}}
         """, indexHTML: "<html></html>")
         defer { try? FileManager.default.removeItem(atPath: dir) }
         let issues = StackDoctor.check(stackDir: dir)
-        try expectEqual(issues >= 1, true)
+        try expectEqual(issues, 1)
     }
 
-    test("StackDoctor: headless:true + anchor + clickThrough warns about both") {
+    test("StackDoctor: headless:true + anchor + clickThrough is one issue each") {
         let dir = makeTempStack(manifest: """
         {"id":"hl3","name":"HL3","permissions":[],"headless":true,
          "anchor":{"edge":"top-left","inset":[0,0]},"clickThrough":true}
         """, indexHTML: "<html></html>")
         defer { try? FileManager.default.removeItem(atPath: dir) }
         let issues = StackDoctor.check(stackDir: dir)
-        try expectEqual(issues >= 2, true)
+        try expectEqual(issues, 2)
     }
 
-    test("StackDoctor: non-headless still requires size (regression guard)") {
+    test("StackDoctor: non-headless manifest without size is one issue") {
         let dir = makeTempStack(manifest: """
         {"id":"hl4","name":"HL4","permissions":[]}
         """, indexHTML: "<html></html>")
         defer { try? FileManager.default.removeItem(atPath: dir) }
         let issues = StackDoctor.check(stackDir: dir)
-        try expectEqual(issues >= 1, true)
+        try expectEqual(issues, 1)
     }
 
-    test("StackDoctor: headless of wrong type (string) errors") {
+    test("StackDoctor: headless of wrong type (string) errors and falls back to requiring size") {
         let dir = makeTempStack(manifest: """
         {"id":"hl5","name":"HL5","permissions":[],"headless":"yes"}
         """, indexHTML: "<html></html>")
         defer { try? FileManager.default.removeItem(atPath: dir) }
         let issues = StackDoctor.check(stackDir: dir)
-        try expectEqual(issues >= 1, true)
+        try expectEqual(issues, 2)
     }
 }
 
 /// Build a throwaway stack dir with a manifest + index.html so StackDoctor
-/// has something to walk. Uses /tmp + a UUID so concurrent test runs don't
-/// stomp each other. Caller is responsible for cleanup via defer.
+/// has something to walk. The UUID folder name never matches the manifest id,
+/// which only prints a warning and doesn't count as an issue. Caller is
+/// responsible for cleanup via defer.
 private func makeTempStack(manifest: String, indexHTML: String) -> String {
     let base = NSTemporaryDirectory() + "stackd-headless-test-\(UUID().uuidString)"
     try? FileManager.default.createDirectory(atPath: base, withIntermediateDirectories: true)

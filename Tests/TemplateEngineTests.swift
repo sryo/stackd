@@ -12,27 +12,48 @@ func registerTemplateEngineTests() {
         try expectEqual(out, "null")
     }
 
-    test("template scan: single placeholder produces one slot, three parts") {
-        // parts is [literal-before, null-marker, literal-after]; slot count = 1.
+    test("template scan: single placeholder splits into literal, slot marker, literal") {
         let probe = JSHarness.evalString("""
         (function() {
           const r = __sdScanPlaceholders('hello {{ x }} world');
-          return r.slots.length + ',' + r.parts.length;
+          return r.slots.length + '|' + JSON.stringify(r.parts);
         })()
         """)
-        try expectEqual(probe, "1,3")
+        try expectEqual(probe, "1|[\"hello \",null,\" world\"]")
     }
 
-    test("template scan: multiple placeholders accumulate slots") {
-        let count = JSHarness.evalString("__sdScanPlaceholders('{{ a }} and {{ b }}').slots.length")
-        try expectEqual(count, "2")
+    test("template scan: multiple placeholders accumulate slots and union their deps") {
+        let probe = JSHarness.evalString("""
+        (function() {
+          const r = __sdScanPlaceholders('{{ sd.battery.percent }} and {{ sd.battery.charging }} {{ sd.appearance.dark }}');
+          return r.slots.length + '|' + r.deps.size + '|' + r.deps.has(sd.battery) + '|' + r.deps.has(sd.appearance);
+        })()
+        """)
+        try expectEqual(probe, "3|2|true|true")
     }
 
-    test("template compile: 'sd.battery.percent' deps include the battery signal") {
+    test("template compile: 'sd.battery.percent' deps are exactly the battery signal") {
         // __sdCompilePlaceholder regex-matches each sd.<path> against the
-        // known signal table. battery is top-level → one dep entry.
-        let depCount = JSHarness.evalString("__sdCompilePlaceholder('sd.battery.percent').deps.length")
-        try expectEqual(depCount, "1")
+        // known signal table and records the signal object to subscribe.
+        let probe = JSHarness.evalString("""
+        (function() {
+          const deps = __sdCompilePlaceholder('sd.battery.percent').deps;
+          return deps.length + '|' + (deps[0] === sd.battery);
+        })()
+        """)
+        try expectEqual(probe, "1|true")
+    }
+
+    test("template compile: a path that only shares a prefix with a channel is not a dep") {
+        // The word boundary after each channel path keeps
+        // sd.windows.focusedChanged from also subscribing sd.windows.focused.
+        let probe = JSHarness.evalString("""
+        (function() {
+          const deps = __sdCompilePlaceholder('sd.windows.focusedChanged.value').deps;
+          return deps.length + '|' + (deps[0] === sd.windows.focusedChanged);
+        })()
+        """)
+        try expectEqual(probe, "1|true")
     }
 
     test("template compile: pure expression with no sd.* refs has empty deps") {
@@ -47,6 +68,20 @@ func registerTemplateEngineTests() {
         try expectEqual(result, "3")
     }
 
+    test("template eval: item/index bind in scope; null and throwing results render empty") {
+        let probe = JSHarness.evalString("""
+        (function() {
+          return [
+            __sdEvalWithScope(__sdCompilePlaceholder('item.name + index'), { name: 'kite' }, 2),
+            __sdEvalWithScope(__sdCompilePlaceholder('null'), undefined, undefined),
+            __sdEvalWithScope(__sdCompilePlaceholder('item.missing.deep'), {}, 0),
+            __sdEvalWithScope(__sdCompilePlaceholder('0'), undefined, undefined)
+          ].join('|');
+        })()
+        """)
+        try expectEqual(probe, "kite2|||0")
+    }
+
     test("template compile: malformed expression fallback returns empty string") {
         // `new Function` throws on syntax errors → __sdCompilePlaceholder
         // installs a `() => ""` fallback rather than propagating. Important
@@ -58,9 +93,8 @@ func registerTemplateEngineTests() {
     test("signal proxy: payload props fall through when signal has no own key") {
         // `sd.appearance.dark` must read `dark` off the channel payload, not
         // off the signal wrapper itself — otherwise every `{{ sd.X.Y }}`
-        // template silently evaluates to undefined. Sideswipe + palette
-        // shipped with that bug (`data-theme` stuck on 'light'); the fix is a
-        // Proxy on signal() that falls through to .value for unknown keys.
+        // template silently evaluates to undefined. signal() returns a Proxy
+        // that falls through to .value for keys the wrapper doesn't own.
         let result = JSHarness.evalString("""
         (function() {
           // Use the real `sd.appearance` channel — push a payload through the
@@ -80,8 +114,9 @@ func registerTemplateEngineTests() {
         // sd.mouse.warp / sd.media.nowPlaying.play family of methods.
         let result = JSHarness.evalString("""
         (function() {
-          window.__sd_push('mouse', { x: 100, y: 200 });
-          // sd.mouse.warp is a function attached via Object.assign — own key.
+          // The payload carries a `warp` key of its own; the wrapper's
+          // Object.assign'd sd.mouse.warp method must still win.
+          window.__sd_push('mouse', { x: 100, y: 200, warp: 'payload' });
           const ownKeyWorks = typeof sd.mouse.warp === "function";
           // sd.mouse.x falls through to the payload.
           const payloadFallthrough = sd.mouse.x === 100;
@@ -105,12 +140,8 @@ func registerTemplateEngineTests() {
     }
 
     test("array channels: default to [] before first daemon push") {
-        // Companion to the Proxy fall-through fix. Array channels that pre-fix
-        // defaulted to `null` forced every stack to write
-        // `(sd.windows.all || []).map(...)` — 9 occurrences across muse,
-        // windowscape, bar, etc. Now: `sd.windows.all.map(...)` and
-        // `sd.windows.all.length` work pre-push because the underlying value
-        // is `[]`, and the Proxy forwards array properties straight through.
+        // `sd.windows.all.map(...)` and `sd.windows.all.length` must work
+        // before the first push without a `|| []` guard in every stack.
         //
         // The six array-typed channels: windowsAll / displays / apps / spaces
         // / usb / camera.

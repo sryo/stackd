@@ -3,97 +3,51 @@ import Foundation
 // Tests for `Host.diskIO()` and its pure rate-calculation helper.
 //
 // Two layers:
-//   1. `computeRate` — pure before/after/elapsed math. Hammer the edge cases
-//      (zero/negative elapsed, counter reset, fractional time, large deltas).
+//   1. `computeRate` — pure before/after/elapsed math and its degenerate
+//      cases (zero/negative elapsed, counter reset).
 //   2. `diskIO()` — real IOKit walk over IOBlockStorageDriver matches. Every
 //      Mac has at least one (the boot disk), so we can characterize shape,
 //      key presence, and the seed-then-deltas sampling progression without
-//      mocking. We can't assert specific byte magnitudes, but we can assert
-//      the per-device dictionary contract.
-//
-// Pattern mirrors UpdateParserTests: extract the bug-prone math as a static
-// helper, hammer it, then layer integration-style shape checks on top.
+//      mocking, but not byte magnitudes.
 
 func registerHostDiskIOTests() {
     // MARK: - computeRate (pure)
 
-    test("computeRate returns positive bytes/sec for a forward delta") {
-        // 1 MiB written across 1.0s → 1_048_576 B/s.
-        let rate = Host.computeRate(before: 0, after: 1_048_576, elapsed: 1.0)
-        try expectEqual(rate, 1_048_576.0)
+    test("computeRate is delta bytes / elapsed seconds") {
+        try expectEqual(Host.computeRate(before: 0, after: 1_048_576, elapsed: 1.0), 1_048_576.0)
+        try expectEqual(Host.computeRate(before: 0, after: 10_485_760, elapsed: 2.0), 5_242_880.0)
+        try expectEqual(Host.computeRate(before: 0, after: 512, elapsed: 0.5), 1024.0)
+        try expectEqual(Host.computeRate(before: 42_000, after: 42_000, elapsed: 1.0), 0.0)
+        // 4 GiB across 8s — the UInt64 → Double hop must not truncate.
+        try expectEqual(Host.computeRate(before: 0, after: 4 * 1024 * 1024 * 1024, elapsed: 8.0), 536_870_912.0)
     }
 
-    test("computeRate scales by elapsed seconds") {
-        // 10 MiB across 2.0s → 5 MiB/s.
-        let rate = Host.computeRate(before: 0, after: 10_485_760, elapsed: 2.0)
-        try expectEqual(rate, 5_242_880.0)
+    test("computeRate returns 0 for zero or negative elapsed") {
+        // Two reads inside the same tick, or a clock step backward.
+        try expectEqual(Host.computeRate(before: 0, after: 1_000, elapsed: 0.0), 0.0)
+        try expectEqual(Host.computeRate(before: 0, after: 1_000, elapsed: -1.0), 0.0)
     }
 
-    test("computeRate returns 0 when before == after (idle device)") {
-        let rate = Host.computeRate(before: 42_000, after: 42_000, elapsed: 1.0)
-        try expectEqual(rate, 0.0)
-    }
-
-    test("computeRate returns 0 when elapsed is zero (degenerate sample)") {
-        // Two reads inside the same monotonic tick — divide-by-zero guard.
-        let rate = Host.computeRate(before: 0, after: 1_000, elapsed: 0.0)
-        try expectEqual(rate, 0.0)
-    }
-
-    test("computeRate returns 0 when elapsed is negative (clock skew)") {
-        // System clock jump backward shouldn't produce a negative or
-        // explosive positive rate; clamp to 0 and let the next sample
-        // re-baseline cleanly.
-        let rate = Host.computeRate(before: 0, after: 1_000, elapsed: -1.0)
-        try expectEqual(rate, 0.0)
-    }
-
-    test("computeRate returns 0 on counter wraparound (after < before)") {
-        // BSD I/O byte counters are UInt64 on macOS — they don't wrap in any
-        // realistic lifetime, but a device that ejects/remounts between
-        // samples can reset to 0. Surface as 0, not a huge negative.
-        let rate = Host.computeRate(before: 1_000_000, after: 500, elapsed: 1.0)
-        try expectEqual(rate, 0.0)
-    }
-
-    test("computeRate handles fractional elapsed cleanly") {
-        // 512 B across 0.5s → 1024 B/s.
-        let rate = Host.computeRate(before: 0, after: 512, elapsed: 0.5)
-        try expectEqual(rate, 1024.0)
-    }
-
-    test("computeRate handles large multi-GB deltas without overflow") {
-        // 4 GiB across 8.0s → 512 MiB/s. Verifies the UInt64 → Double hop
-        // doesn't truncate within realistic NVMe burst-write magnitudes.
-        let before: UInt64 = 0
-        let after:  UInt64 = 4 * 1024 * 1024 * 1024
-        let rate = Host.computeRate(before: before, after: after, elapsed: 8.0)
-        try expectEqual(rate, 536_870_912.0)
+    test("computeRate returns 0 when the counter goes backward (device remount)") {
+        // A device that ejects/remounts between samples resets its counters.
+        try expectEqual(Host.computeRate(before: 1_000_000, after: 500, elapsed: 1.0), 0.0)
     }
 
     // MARK: - diskIO() shape (real IOKit, real boot disk)
 
-    test("diskIO returns at least one block-device entry on real hardware") {
-        // Every Mac has at least the boot disk's IOBlockStorageDriver node.
-        // An empty array means either the IOKit walk regressed or the
-        // matching dict no longer resolves — both are bugs worth catching.
-        let entries = Host.diskIO()
-        try expect(!entries.isEmpty, "expected ≥1 IOBlockStorageDriver match, got 0")
-    }
-
-    test("diskIO entries always expose name + cumulative byte/op counters") {
-        // Cumulative counters are always present (Statistics dict is read
-        // before the optional rate fields). `name` is the BSD identifier
+    test("diskIO returns ≥1 entry, each with name + cumulative byte/op counters") {
+        // Every Mac has at least the boot disk's IOBlockStorageDriver node;
+        // empty means the IOKit walk regressed. Cumulative counters are
+        // always present (rate fields are optional). `name` is the BSD identifier
         // ("disk0", "disk1s2") that users see in `diskutil list`.
         let entries = Host.diskIO()
-        guard let first = entries.first else {
-            throw Expectation(message: "no disks enumerated")
+        try expect(!entries.isEmpty, "no disks enumerated")
+        for e in entries {
+            try expect(e["name"] is String, "name should be a String (BSD identifier): \(e)")
+            for key in ["bytesRead", "bytesWritten", "opsRead", "opsWritten"] {
+                try expect(e[key] is UInt64, "\(key) should be UInt64: \(e)")
+            }
         }
-        try expect(first["name"] is String, "name should be a String (BSD identifier)")
-        try expect(first["bytesRead"] is UInt64, "bytesRead should be UInt64")
-        try expect(first["bytesWritten"] is UInt64, "bytesWritten should be UInt64")
-        try expect(first["opsRead"] is UInt64, "opsRead should be UInt64")
-        try expect(first["opsWritten"] is UInt64, "opsWritten should be UInt64")
     }
 
     test("diskIO entry names are unique per device (one row per BSD disk)") {

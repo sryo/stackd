@@ -2,68 +2,81 @@ import Foundation
 import JavaScriptCore
 
 /// Tests for the `sd.util` namespace in `Runtime/api.js` — pure JS helpers
-/// (debounce, throttle). No IPC, no permission. Lifted out of the 4+
-/// per-stack reinventions of the same pattern.
+/// (debounce, throttle) that delegate to `sd.timer`. The harness's real
+/// setTimeout is a no-op, so each test swaps in a manual timer queue
+/// (`__utilFakeTimers`) that it flushes explicitly, then restores the
+/// originals.
 func registerUtilTests() {
-    test("debounce: trailing call fires after silence") {
-        // setTimeout in JSContext doesn't auto-tick. Drive the clock via the
-        // shim — JSHarness installs a setTimeout that records callbacks for
-        // manual flush. We just verify the wrapper structure here; behavior
-        // assertions on real timing happen in WKWebView land later.
-        let out = JSHarness.evalString("""
+    /// Wraps `body` (a JS function body that may call `flush()`) with a fake
+    /// setTimeout / clearTimeout pair and returns its result as a String.
+    func withFakeTimers(_ body: String) -> String? {
+        JSHarness.evalString("""
         (function() {
-          let calls = 0;
-          const f = sd.util.debounce(() => { calls++; }, 10);
-          f(); f(); f();
-          // Three calls, none have fired yet (timer not flushed).
-          return calls;
+          const realST = globalThis.setTimeout, realCT = globalThis.clearTimeout;
+          const queue = new Map();
+          let nextId = 1;
+          globalThis.setTimeout = (fn) => { const id = nextId++; queue.set(id, fn); return id; };
+          globalThis.clearTimeout = (id) => { queue.delete(id); };
+          const pending = () => queue.size;
+          const flush = () => {
+            const fns = [...queue.values()];
+            queue.clear();
+            fns.forEach(fn => fn());
+          };
+          try {
+            \(body)
+          } finally {
+            globalThis.setTimeout = realST;
+            globalThis.clearTimeout = realCT;
+          }
         })()
         """)
-        try expectEqual(out, "0")
+    }
+
+    test("debounce: a burst of calls fires once, with the last call's args") {
+        let out = withFakeTimers("""
+            const seen = [];
+            const f = sd.util.debounce((a) => { seen.push(a); }, 10);
+            f(1); f(2); f(3);
+            const before = seen.length + "/" + pending();
+            flush();
+            return before + "|" + seen.join(",");
+        """)
+        try expectEqual(out, "0/1|3")
     }
 
     test("debounce: cancel() prevents the pending call") {
-        let out = JSHarness.evalString("""
-        (function() {
-          const f = sd.util.debounce(() => {}, 10);
-          f();
-          f.cancel();
-          return typeof f.cancel;
-        })()
+        let out = withFakeTimers("""
+            let calls = 0;
+            const f = sd.util.debounce(() => { calls++; }, 10);
+            f();
+            f.cancel();
+            flush();
+            return calls + "/" + pending();
         """)
-        try expectEqual(out, "function")
+        try expectEqual(out, "0/0")
     }
 
     test("throttle: first call fires immediately (leading edge)") {
-        let out = JSHarness.evalString("""
-        (function() {
-          let calls = 0;
-          const f = sd.util.throttle(() => { calls++; }, 100);
-          f();
-          return calls;
-        })()
+        let out = withFakeTimers("""
+            let calls = 0;
+            const f = sd.util.throttle(() => { calls++; }, 100000);
+            f();
+            return String(calls);
         """)
         try expectEqual(out, "1")
     }
 
-    test("throttle: subsequent calls within window are deferred") {
-        let out = JSHarness.evalString("""
-        (function() {
-          let calls = 0;
-          const f = sd.util.throttle(() => { calls++; }, 100);
-          f(); f(); f(); f();
-          // First fires immediately; the rest queue a single trailing-edge call
-          // that hasn't fired yet (no flush).
-          return calls;
-        })()
+    test("throttle: calls within the window collapse into one trailing call") {
+        let out = withFakeTimers("""
+            const seen = [];
+            const f = sd.util.throttle((a) => { seen.push(a); }, 100000);
+            f(1); f(2); f(3); f(4);
+            const before = seen.join(",") + "/" + pending();
+            flush();
+            return before + "|" + seen.join(",");
         """)
-        try expectEqual(out, "1")
-    }
-
-    test("debounce + throttle: exported on sd.util") {
-        let out = JSHarness.evalString("""
-        typeof sd.util.debounce + ',' + typeof sd.util.throttle
-        """)
-        try expectEqual(out, "function,function")
+        // The trailing call fires with the args of the call that armed it.
+        try expectEqual(out, "1/1|1,2")
     }
 }

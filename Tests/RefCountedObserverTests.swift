@@ -37,7 +37,7 @@ private final class StubObserver: RefCountedObserver {
 }
 
 /// Spin the main runloop for the given duration so DispatchQueue.main.asyncAfter
-/// work items have a chance to run. Tests on this file use ~20ms delays so a
+/// work items have a chance to run. Most tests here use ~20ms delays so a
 /// 100ms spin is generous slack without making the suite slow.
 private func spinRunLoop(_ seconds: TimeInterval) {
     let deadline = Date().addingTimeInterval(seconds)
@@ -96,6 +96,20 @@ func registerRefCountedObserverTests() {
         try expectEqual(a, 2); try expectEqual(b, 2); try expectEqual(c, 2)
     }
 
+    test("RefCountedObserver: a cancelled subscriber no longer receives fire()") {
+        let obs = StubObserver()
+        var gone = 0, kept = 0
+        let t1 = obs.subscribe { gone += 1 }
+        let t2 = obs.subscribe { kept += 1 }
+        defer { t2.cancel(); spinRunLoop(0.05) }
+
+        t1.cancel()
+        obs.fire()
+        try expectEqual(gone, 1, "only the subscribe-time prime")
+        try expectEqual(kept, 2)
+        try expect(obs.isActive, "one subscriber left, no teardown")
+    }
+
     test("RefCountedObserver: fire() with zero subscribers is a no-op (does not crash)") {
         let obs = StubObserver()
         obs.fire()  // before any subscribe
@@ -117,21 +131,27 @@ func registerRefCountedObserverTests() {
         spinRunLoop(0.15)
         try expect(!obs.isActive, "inactive after teardownDelay")
         try expectEqual(obs.teardownCount, 1)
+
+        // After a full teardown the next subscribe installs again.
+        let t2 = obs.subscribe { }
+        defer { t2.cancel(); spinRunLoop(0.1) }
+        try expectEqual(obs.installCount, 2)
+        try expect(obs.isActive)
     }
 
     test("RefCountedObserver: resubscribe inside teardown gap cancels teardown") {
         let obs = StubObserver()
-        obs.delay = 0.08
+        obs.delay = 0.3
         let t1 = obs.subscribe { }
-        t1.cancel()                 // schedules teardown ~80ms out
+        t1.cancel()                 // schedules teardown ~300ms out
 
-        spinRunLoop(0.02)           // halfway into the gap
+        spinRunLoop(0.02)           // inside the gap
         try expect(obs.isActive, "still active mid-debounce")
 
         let t2 = obs.subscribe { }  // should cancel the pending teardown
-        defer { t2.cancel(); spinRunLoop(0.2) }
+        defer { t2.cancel() }
 
-        spinRunLoop(0.15)           // well past the original teardown time
+        spinRunLoop(0.4)            // well past the original teardown time
         try expect(obs.isActive, "resubscribe must keep observer active")
         try expectEqual(obs.installCount, 1, "should not reinstall when token was still live")
         try expectEqual(obs.teardownCount, 0, "teardown was cancelled, must not fire")
@@ -156,10 +176,8 @@ func registerRefCountedObserverTests() {
 
     // MARK: - fireIfChanged (lazy fan-out for poll observers)
     //
-    // 2026-06-02: added as the dedup primitive for PrivacyObserver,
-    // SensorsObserver, MenubarItemsObserver. Equal hash → no fan-out
-    // (skip per-stack jsonify + evaluateJavaScript). Different hash →
-    // exactly one fan-out, last hash cached for next compare.
+    // Equal hash → no fan-out (skip per-stack jsonify + evaluateJavaScript).
+    // Different hash → exactly one fan-out, last hash cached for next compare.
 
     test("fireIfChanged: equal hash suppresses fan-out") {
         let obs = StubObserver()

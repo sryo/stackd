@@ -12,30 +12,20 @@ func registerAnchorTests() {
 
     // MARK: corner anchors
 
-    test("anchor: top-right places window in top-right with insets") {
-        let r = StackHost.anchorRect(edge: "top-right", w: 100, h: 50, insetX: 10, insetY: 20, visibleFrame: vf)
-        try expectEqual(r.minX, 890)   // 1000 - 100 - 10
-        try expectEqual(r.minY, 730)   // 800 - 50 - 20
-        try expectEqual(r.width, 100)
-        try expectEqual(r.height, 50)
-    }
-    test("anchor: top-left places window in top-left with insets") {
-        let r = StackHost.anchorRect(edge: "top-left", w: 100, h: 50, insetX: 10, insetY: 20, visibleFrame: vf)
-        try expectEqual(r.minX, 10)
-        try expectEqual(r.minY, 730)
-    }
-    test("anchor: bottom-right places window in bottom-right with insets") {
-        let r = StackHost.anchorRect(edge: "bottom-right", w: 100, h: 50, insetX: 10, insetY: 20, visibleFrame: vf)
-        try expectEqual(r.minX, 890)
-        try expectEqual(r.minY, 20)
-    }
-    test("anchor: bottom-left places window in bottom-left with insets") {
-        let r = StackHost.anchorRect(edge: "bottom-left", w: 100, h: 50, insetX: 10, insetY: 20, visibleFrame: vf)
-        try expectEqual(r.minX, 10)
-        try expectEqual(r.minY, 20)
+    test("anchor: corners place the window against both edges, inset by insetX/insetY") {
+        let corners: [(edge: String, x: CGFloat, y: CGFloat)] = [
+            ("top-right", 890, 730),     // 1000 - 100 - 10, 800 - 50 - 20
+            ("top-left", 10, 730),
+            ("bottom-right", 890, 20),
+            ("bottom-left", 10, 20),
+        ]
+        for c in corners {
+            let r = StackHost.anchorRect(edge: c.edge, w: 100, h: 50, insetX: 10, insetY: 20, visibleFrame: vf)
+            try expectEqual(r, NSRect(x: c.x, y: c.y, width: 100, height: 50), c.edge)
+        }
     }
 
-    // MARK: horizontal-center anchors (new)
+    // MARK: horizontal-center anchors
 
     test("anchor: bottom-center centers horizontally, inset from bottom") {
         let r = StackHost.anchorRect(edge: "bottom-center", w: 80, h: 80, insetX: 0, insetY: 40, visibleFrame: vf)

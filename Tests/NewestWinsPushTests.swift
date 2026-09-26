@@ -12,18 +12,11 @@ func registerNewestWinsPushTests() {
         try expect(p.inFlight)
     }
 
-    test("NewestWinsPush: payloads offered while in flight are held, not sent") {
+    test("NewestWinsPush: payloads offered in flight are held, and completion sends only the newest") {
         var p = NewestWinsPush()
         _ = p.offer("a")
-        try expect(p.offer("b") == nil)
-        try expect(p.offer("c") == nil)
-    }
-
-    test("NewestWinsPush: completion sends only the newest held payload") {
-        var p = NewestWinsPush()
-        _ = p.offer("a")
-        _ = p.offer("b")
-        _ = p.offer("c")
+        try expect(p.offer("b") == nil, "held, not sent")
+        try expect(p.offer("c") == nil, "held, not sent")
         try expectEqual(p.complete(), "c", "intermediate 'b' is dropped")
         try expect(p.inFlight, "the held payload is now the one in flight")
         try expect(p.complete() == nil)

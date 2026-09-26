@@ -3,131 +3,159 @@ import WebKit
 
 // Tests for `Sources/URLSchemeHandler.swift`.
 //
-// StackdSchemeHandler is the WKURLSchemeHandler that resolves `sd://` URLs to
-// files on disk:
+// StackdSchemeHandler resolves `sd://` URLs to files on disk:
 //   sd://runtime/<path>     → <runtimePath>/<path>
-//   sd://<stackId>/<path>   → stacks[stackId]/<path>
+//   sd://<stackId>/<path>   → registered rootURL for stackId/<path>
 //
-// Testable surface:
-//   1. The registration trio — `register(stackId:rootURL:)`,
-//      `unregister(stackId:)`, `clearRegistrations()`. The backing `stacks`
-//      dict is `private`, so we can only assert the negative (no throw, no
-//      crash) plus idempotence. The dict is observed indirectly via the
-//      `webView(_:start:)` method, but that path is not exercisable here.
-//   2. Construction via `init(runtimePath:)` — must not crash with absurd
-//      inputs (empty string, non-existent path); the path is stored verbatim
-//      and only stat'd inside the schemeTask path.
-//
-// What we deliberately do NOT test:
-//   - `webView(_:start:)` — requires a real WKURLSchemeTask. WKURLSchemeTask
-//     is a protocol but the only sanctioned producer is WKWebView itself
-//     during a live load. A hand-rolled conformer that the system later
-//     consumes is documented to crash; a hand-rolled conformer we pass back
-//     into the handler would exercise the resolution logic but the
-//     `task.didReceive`/`task.didFinish` calls go to our own stub and prove
-//     nothing about real-world behavior. Better covered by an integration
-//     test driving WKWebView in a host process.
-//   - `mimeType(for:)` — declared `private`. All 11 branches (html/htm,
-//     js/mjs, css, json, svg, png, jpg/jpeg, woff2, default) are
-//     unreachable without changing visibility, which is forbidden by the
-//     constraints of this ticket. If a future change promotes it to
-//     `fileprivate` (same file) or `internal`, the branches should be
-//     pinned exhaustively in this file.
-//   - The 404 stderr write and the HTTPURLResponse header shape — both
-//     live inside `webView(_:start:)`.
-//
-// StackdSchemeHandler instances are per-WKWebView (not a singleton), so
-// each test allocates a fresh handler — no global cleanup needed.
+// `webView(_:start:)` only reads `task.request` and reports back through the
+// task's didReceive / didFinish / didFailWithError calls, so a recording
+// WKURLSchemeTask is enough to drive resolution, the registration table, the
+// 404 path, and the response headers (including the Content-Type derived
+// from the private mimeType(for:) table).
+
+private final class RecordingSchemeTask: NSObject, WKURLSchemeTask {
+    let request: URLRequest
+    private(set) var response: HTTPURLResponse?
+    private(set) var body = Data()
+    private(set) var finished = false
+    private(set) var failure: NSError?
+
+    init(_ url: String) { request = URLRequest(url: URL(string: url)!) }
+
+    func didReceive(_ response: URLResponse) { self.response = response as? HTTPURLResponse }
+    func didReceive(_ data: Data) { body.append(data) }
+    func didFinish() { finished = true }
+    func didFailWithError(_ error: Error) { failure = error as NSError }
+}
+
+private enum SchemeTestWebView {
+    // The handler never touches the webView argument; one shared instance
+    // satisfies the signature.
+    static let shared = WKWebView(frame: .zero, configuration: WKWebViewConfiguration())
+}
 
 func registerURLSchemeHandlerTests() {
-
-    // MARK: - Initialization
-
-    test("init stores an empty registration map") {
-        // Fresh handler must accept any runtime path without inspecting it
-        // (the path is only resolved inside webView(_:start:)). The witness
-        // is "construction does not throw"; we additionally exercise
-        // unregister + clearRegistrations on the empty state to pin that
-        // both are no-ops when nothing has been registered.
-        let h = StackdSchemeHandler(runtimePath: "/tmp/stackd-test-runtime")
-        h.unregister(stackId: "never-registered")
-        h.clearRegistrations()
-        _ = h // silence unused warning
-    }
-
-    test("init accepts an empty runtime path without crashing") {
-        // The path is stored verbatim; it's only stat'd when a sd://runtime/*
-        // URL is served. An empty string is a degenerate but valid input —
-        // construction must succeed so callers don't have to pre-validate.
-        let h = StackdSchemeHandler(runtimePath: "")
-        h.clearRegistrations()
-        _ = h
-    }
-
-    // MARK: - register / unregister / clearRegistrations
-
-    test("register followed by unregister on the same id is safe") {
-        // The dict is private, so we can only witness "no crash, no throw".
-        // The contract: register sets stacks[stackId] = rootURL; unregister
-        // removes the key. A round-trip must leave the handler in a state
-        // equivalent to the fresh-init state — proved indirectly by the
-        // next test (re-register same id) succeeding.
-        let h = StackdSchemeHandler(runtimePath: "/tmp/stackd-test-runtime")
-        let root = URL(fileURLWithPath: "/tmp/stackd-test-stack")
-        h.register(stackId: "my-stack", rootURL: root)
-        h.unregister(stackId: "my-stack")
-    }
-
-    test("register overwrites a prior registration for the same id") {
-        // `stacks[stackId] = rootURL` is a plain dict assignment — the second
-        // call must overwrite, not append or throw. We can't read the dict
-        // back to verify which rootURL won, but pinning "no crash on
-        // overwrite" guards against a future refactor that adds a duplicate
-        // guard or assertion.
-        let h = StackdSchemeHandler(runtimePath: "/tmp/stackd-test-runtime")
-        h.register(stackId: "dup", rootURL: URL(fileURLWithPath: "/tmp/a"))
-        h.register(stackId: "dup", rootURL: URL(fileURLWithPath: "/tmp/b"))
-        h.unregister(stackId: "dup")
-    }
-
-    test("unregister on an unknown id is a silent no-op") {
-        // `stacks.removeValue(forKey:)` returns nil on a missing key and
-        // does not throw — Dictionary semantics. Bridge teardown can call
-        // unregister after a stack has already been cleared (race during
-        // hot reload); this guard is what keeps that safe.
-        let h = StackdSchemeHandler(runtimePath: "/tmp/stackd-test-runtime")
-        h.unregister(stackId: "never-registered")
-        h.unregister(stackId: "")
-    }
-
-    test("clearRegistrations empties the map and is idempotent") {
-        // `stacks.removeAll()` on a populated dict drops every entry; on an
-        // empty dict it's a no-op. We exercise both paths in sequence.
-        // After clear, a subsequent register/unregister on a previously-
-        // cleared id must still work — proving the dict is reusable, not
-        // sentinelled into a dead state.
-        let h = StackdSchemeHandler(runtimePath: "/tmp/stackd-test-runtime")
-        h.register(stackId: "a", rootURL: URL(fileURLWithPath: "/tmp/a"))
-        h.register(stackId: "b", rootURL: URL(fileURLWithPath: "/tmp/b"))
-        h.register(stackId: "c", rootURL: URL(fileURLWithPath: "/tmp/c"))
-        h.clearRegistrations()
-        h.clearRegistrations() // idempotent on empty
-        h.register(stackId: "a", rootURL: URL(fileURLWithPath: "/tmp/a2"))
-        h.unregister(stackId: "a")
-    }
-
-    test("register accepts many distinct ids without crashing") {
-        // The dict is unbounded; the daemon can host arbitrarily many live
-        // stacks. Pin "no growth ceiling" by inserting a batch and then
-        // clearing them in one shot. If a future change ever added a cap,
-        // this test would surface it before users hit it.
-        let h = StackdSchemeHandler(runtimePath: "/tmp/stackd-test-runtime")
-        for i in 0..<64 {
-            h.register(
-                stackId: "stack-\(i)",
-                rootURL: URL(fileURLWithPath: "/tmp/stack-\(i)")
-            )
+    /// Temp dir holding `files` (relative path → contents); removed by caller.
+    func makeTree(_ files: [String: String]) -> URL {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("stackd-scheme-\(UUID().uuidString)", isDirectory: true)
+        for (rel, contents) in files {
+            let url = root.appendingPathComponent(rel)
+            try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(),
+                                                     withIntermediateDirectories: true)
+            try? contents.write(to: url, atomically: true, encoding: .utf8)
         }
+        return root
+    }
+    func load(_ handler: StackdSchemeHandler, _ url: String) -> RecordingSchemeTask {
+        let task = RecordingSchemeTask(url)
+        handler.webView(SchemeTestWebView.shared, start: task)
+        return task
+    }
+
+    test("registered stack: serves the file with 200, body, and no-store/CORS headers") {
+        let root = makeTree(["index.html": "<p>hi</p>"])
+        defer { try? FileManager.default.removeItem(at: root) }
+        let h = StackdSchemeHandler(runtimePath: "/nonexistent")
+        h.register(stackId: "demo", rootURL: root)
+
+        let task = load(h, "sd://demo/index.html")
+        try expect(task.failure == nil, "unexpected failure: \(String(describing: task.failure))")
+        try expect(task.finished, "task should finish")
+        try expectEqual(task.response?.statusCode, 200)
+        try expectEqual(String(data: task.body, encoding: .utf8), "<p>hi</p>")
+        try expectEqual(task.response?.value(forHTTPHeaderField: "Content-Length"), "9")
+        try expectEqual(task.response?.value(forHTTPHeaderField: "Access-Control-Allow-Origin"), "*")
+        try expectEqual(task.response?.value(forHTTPHeaderField: "Cache-Control"), "no-store")
+    }
+
+    test("registered stack: nested paths resolve under the root") {
+        let root = makeTree(["modules/nested/a.js": "export const a = 1;"])
+        defer { try? FileManager.default.removeItem(at: root) }
+        let h = StackdSchemeHandler(runtimePath: "/nonexistent")
+        h.register(stackId: "demo", rootURL: root)
+
+        let task = load(h, "sd://demo/modules/nested/a.js")
+        try expectEqual(String(data: task.body, encoding: .utf8), "export const a = 1;")
+    }
+
+    test("runtime host resolves against runtimePath, not the stack table") {
+        let runtime = makeTree(["api.js": "export const sd = {};"])
+        defer { try? FileManager.default.removeItem(at: runtime) }
+        let h = StackdSchemeHandler(runtimePath: runtime.path)
+
+        let task = load(h, "sd://runtime/api.js")
+        try expectEqual(task.response?.statusCode, 200)
+        try expectEqual(String(data: task.body, encoding: .utf8), "export const sd = {};")
+    }
+
+    test("unknown stack id and missing file both fail with 404, no response") {
+        let root = makeTree(["index.html": "x"])
+        defer { try? FileManager.default.removeItem(at: root) }
+        let h = StackdSchemeHandler(runtimePath: "/nonexistent")
+        h.register(stackId: "demo", rootURL: root)
+
+        for url in ["sd://other/index.html", "sd://demo/missing.html"] {
+            let task = load(h, url)
+            try expectEqual(task.failure?.code, 404, url)
+            try expect(task.response == nil && !task.finished, "\(url) must not also respond")
+        }
+    }
+
+    test("unregister and clearRegistrations remove the mapping") {
+        let root = makeTree(["index.html": "x"])
+        defer { try? FileManager.default.removeItem(at: root) }
+        let h = StackdSchemeHandler(runtimePath: "/nonexistent")
+
+        h.register(stackId: "a", rootURL: root)
+        h.unregister(stackId: "a")
+        try expectEqual(load(h, "sd://a/index.html").failure?.code, 404, "after unregister")
+
+        h.register(stackId: "a", rootURL: root)
+        h.register(stackId: "b", rootURL: root)
         h.clearRegistrations()
+        try expectEqual(load(h, "sd://a/index.html").failure?.code, 404, "a after clear")
+        try expectEqual(load(h, "sd://b/index.html").failure?.code, 404, "b after clear")
+    }
+
+    test("re-registering an id points it at the new root") {
+        let first = makeTree(["index.html": "first"])
+        let second = makeTree(["index.html": "second"])
+        defer {
+            try? FileManager.default.removeItem(at: first)
+            try? FileManager.default.removeItem(at: second)
+        }
+        let h = StackdSchemeHandler(runtimePath: "/nonexistent")
+        h.register(stackId: "dup", rootURL: first)
+        h.register(stackId: "dup", rootURL: second)
+        try expectEqual(String(data: load(h, "sd://dup/index.html").body, encoding: .utf8), "second")
+    }
+
+    test("Content-Type follows the file extension (case-insensitive)") {
+        let cases: [(file: String, mime: String)] = [
+            ("a.html",  "text/html; charset=utf-8"),
+            ("a.htm",   "text/html; charset=utf-8"),
+            ("a.js",    "text/javascript; charset=utf-8"),
+            ("a.mjs",   "text/javascript; charset=utf-8"),
+            ("a.css",   "text/css; charset=utf-8"),
+            ("a.json",  "application/json; charset=utf-8"),
+            ("a.svg",   "image/svg+xml"),
+            ("a.png",   "image/png"),
+            ("a.jpg",   "image/jpeg"),
+            ("a.JPEG",  "image/jpeg"),
+            ("a.woff2", "font/woff2"),
+            ("a.bin",   "application/octet-stream"),
+        ]
+        var files: [String: String] = [:]
+        for c in cases { files[c.file] = "x" }
+        let root = makeTree(files)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let h = StackdSchemeHandler(runtimePath: "/nonexistent")
+        h.register(stackId: "mime", rootURL: root)
+
+        for c in cases {
+            let task = load(h, "sd://mime/\(c.file)")
+            try expectEqual(task.response?.value(forHTTPHeaderField: "Content-Type"), c.mime, c.file)
+        }
     }
 }

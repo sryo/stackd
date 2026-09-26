@@ -85,16 +85,21 @@ func registerSdOnClickTests() {
         try expectEqual(r?.toString(), "kite:3")
     }
 
-    test("sd-on:click: handler errors are contained (dispatch doesn't throw)") {
+    test("sd-on:click: handler errors are contained and logged, not thrown") {
         let r = ctx.evaluateScript("""
         (function () {
           const el = __makeFakeEl({ "sd-on:click": "globalThis.__noSuchFn()" });
           __sdSetupOnClickElement(el);
-          try { __sdDispatchOnClick(el); return "contained"; }
+          if (!el.hasAttribute("data-sd-on-click")) return "not registered";
+          let logged = false;
+          const realError = console.error;
+          console.error = () => { logged = true; };
+          try { __sdDispatchOnClick(el); return "contained," + logged; }
           catch (e) { return "leaked: " + e; }
+          finally { console.error = realError; }
         })()
         """)
-        try expectEqual(r?.toString(), "contained")
+        try expectEqual(r?.toString(), "contained,true")
     }
 
     test("sd-on:click: empty expression is ignored (no marker, no handler)") {

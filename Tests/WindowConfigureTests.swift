@@ -4,10 +4,10 @@ import JavaScriptCore
 /// Tests for `sd.window.configure(spec)` — the JS aggregator over the
 /// daemon's setAlpha / setClickThrough / setFrame RPC handlers.
 ///
-/// We verify the aggregator's behavior by monkey-patching the postMessage
-/// bridge stub to capture every RPC payload, then asserting on which types
-/// were dispatched. The daemon-side handlers (Bridge.swift) are already
-/// covered by separate Bridge tests (WindowChannelTests etc.).
+/// The postMessage bridge stub is replaced with a spy that captures every
+/// RPC payload; tests assert on which RPC types were dispatched. Body
+/// parsing on the daemon side is covered by WindowLifecycleTests
+/// (StackWindow.parseSet*).
 func registerWindowConfigureTests() {
     func spyAndConfigure(_ spec: String) -> [String] {
         let probe = """
@@ -29,14 +29,21 @@ func registerWindowConfigureTests() {
         try expectEqual(types.count, 0)
     }
 
-    test("configure: alpha-only spec issues exactly window.setAlpha") {
-        let types = spyAndConfigure("{ alpha: 0 }")
-        try expectEqual(types, ["window.setAlpha"])
-    }
-
     test("configure: clickThrough-only spec issues exactly window.setClickThrough") {
         let types = spyAndConfigure("{ clickThrough: true }")
         try expectEqual(types, ["window.setClickThrough"])
+    }
+
+    test("configure: frame payload carries x/y/w/h through to window.setFrame") {
+        let out = JSHarness.evalString("""
+        (function() {
+          let p = null;
+          window.webkit.messageHandlers.sd.postMessage = (m) => { if (m.type === 'window.setFrame') p = m; };
+          sd.window.configure({ frame: { x: 10, y: 20, w: 300, h: 200 } });
+          return p ? [p.x, p.y, p.w, p.h].join(',') : 'null';
+        })()
+        """)
+        try expectEqual(out, "10,20,300,200")
     }
 
     test("configure: frame-only spec issues exactly window.setFrame") {
@@ -49,7 +56,7 @@ func registerWindowConfigureTests() {
         try expectEqual(types, ["window.setAlpha", "window.setClickThrough", "window.setFrame"])
     }
 
-    test("configure: alpha:0 isn't dropped as falsy (uses typeof check)") {
+    test("configure: alpha-only spec issues exactly window.setAlpha (alpha:0 isn't dropped as falsy)") {
         let types = spyAndConfigure("{ alpha: 0 }")
         try expectEqual(types, ["window.setAlpha"])
     }

@@ -2,8 +2,8 @@ import Foundation
 import CoreGraphics
 
 // setFrame(id, frame, {live: true}): the routing decision, the planned
-// mailbox write, the non-forgetting refusal lookup it reads, and the
-// mailbox collapsing a stream of live writes to the newest.
+// mailbox write, and the non-forgetting refusal lookup it reads. Mailbox
+// coalescing itself is covered by MotionWriteMailboxTests.
 func registerLiveFrameWriteTests() {
     func route(duration: Double = 0, easing: MotionEasing? = nil, live: Bool,
                reduceMotion: Bool = false) -> MotionRouting.Route {
@@ -17,7 +17,7 @@ func registerLiveFrameWriteTests() {
 
     test("live routing: live with no duration goes through the mailbox") {
         try expectEqual(route(live: true), .live)
-        try expectEqual(route(easing: .linear, live: true), .live, "an easing without a duration is instant")
+        try expectEqual(route(easing: .linear, live: true), .live, "an easing without a duration doesn't animate")
     }
 
     test("live routing: a duration or spring still animates") {
@@ -68,25 +68,6 @@ func registerLiveFrameWriteTests() {
         try expectEqual(l.peekEnforcedSize(windowID: 9, targetSize: target.size), clamped.size)
         try expectEqual(l.enforcedSize(windowID: 9, targetSize: target.size), clamped.size,
                         "the peek did not forget it")
-    }
-
-    test("mailbox: live writes queued behind a drain collapse to the newest, every caller resolved") {
-        var m = MotionWriteMailbox()
-        func live(_ x: Double, _ cb: UInt64) -> MotionWriteMailbox.Entry {
-            let w = LiveFrameWrite.plan(windowID: 4, frame: CGRect(x: x, y: 0, width: 400, height: 600),
-                                        previous: nil, enforcedSize: nil)!
-            return MotionWriteMailbox.Entry(write: w, generation: 0, callbacks: [cb])
-        }
-        try expect(m.post(live(100, 1)))
-        _ = m.take()
-        try expect(!m.post(live(110, 2)))
-        try expect(!m.post(live(120, 3)))
-        try expect(!m.post(live(130, 4)))
-        try expect(m.finish())
-        let next = m.take()
-        try expectEqual(next.count, 1)
-        try expectEqual(next[0].write.frame.origin.x, 130)
-        try expectEqual(next[0].callbacks, [2, 3, 4])
     }
 }
 

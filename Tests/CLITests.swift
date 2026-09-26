@@ -1,7 +1,6 @@
 import Foundation
 
-// Tests for the two CLI helpers that were refactored to internal static so
-// they're hammerable without constructing a StackHost:
+// Tests for the pure CLI helpers:
 //
 //   - CLI.isSafeId(_:)      — input validation for `stackd new <name>`.
 //                             Stack IDs become the host of `sd://<id>/`, so
@@ -11,15 +10,12 @@ import Foundation
 //                             bug that mass-matches every stack would
 //                             silently apply CSS to all of them.
 //
-// What we DON'T test here: the full CLI.dispatch round-trip. That needs a
-// StackHost + windows, which means StackWindow / WKWebView / NSPanel —
-// none of which are unit-testable in a Foundation harness. CLI's verb
-// surface is exercised by integration use (the real daemon runs them
-// thousands of times a day).
+// The full CLI.dispatch round-trip needs a StackHost with live windows and
+// is not covered here.
 func registerCLITests() {
     // MARK: - isSafeId
 
-    test("isSafeId: simple ASCII identifier is accepted") {
+    test("isSafeId: ASCII letters / digits / dash / underscore are accepted") {
         try expect(CLI.isSafeId("hello"))
         try expect(CLI.isSafeId("h_e-l-l-o_2"))
         try expect(CLI.isSafeId("a"))
@@ -35,20 +31,17 @@ func registerCLITests() {
         try expect(!CLI.isSafeId("."))
     }
 
-    test("isSafeId: ASCII letters / digits / dash / underscore are the full allowed set") {
-        // Sample of each allowed class plus their boundaries.
-        try expect(CLI.isSafeId("abc-def_123"))
+    test("isSafeId: whitespace and punctuation outside - and _ are rejected") {
         try expect(!CLI.isSafeId("abc def"),  "space disallowed")
         try expect(!CLI.isSafeId("abc/def"),  "slash disallowed")
-        try expect(!CLI.isSafeId("abc.def"),  "dot disallowed (would mid-string collide with extension-style names)")
+        try expect(!CLI.isSafeId("abc.def"),  "dot disallowed")
         try expect(!CLI.isSafeId("abc@def"),  "@ disallowed")
         try expect(!CLI.isSafeId("abc!def"),  "! disallowed")
     }
 
     test("isSafeId: rejects Unicode letters (CJK / accented / emoji-letter)") {
-        // The original bug: `c.isLetter` accepted these. Stack IDs become
-        // the host of `sd://<id>/`, and RFC 3986 hosts must be ASCII —
-        // non-ASCII hosts silently break the WKURLSchemeHandler lookup.
+        // Stack IDs become the host of `sd://<id>/`, and RFC 3986 hosts must
+        // be ASCII — non-ASCII hosts silently break the scheme-handler lookup.
         try expect(!CLI.isSafeId("日本語"),  "CJK letters rejected")
         try expect(!CLI.isSafeId("café"),   "Latin-1 accented rejected")
         try expect(!CLI.isSafeId("emoji😀"), "emoji rejected")
@@ -74,10 +67,9 @@ func registerCLITests() {
     }
 
     test("matchStacks: // (empty regex) matches NOTHING, not everything") {
-        // The original bug: NSRegularExpression(pattern: "") compiles fine
-        // and matches at every position, so `set // --css X=Y` would
-        // silently mass-apply to every stack on disk. Fix: explicit empty-
-        // pattern guard returns []. Use `/.*/` if you really want "all".
+        // NSRegularExpression(pattern: "") compiles and matches everywhere,
+        // so without the guard `set // --css X=Y` would mass-apply to every
+        // stack on disk. `/.*/` is the explicit "all" selector.
         let candidates = ["cursor", "battery", "menu"]
         try expectEqual(CLI.matchStacks(selector: "//", candidates: candidates), [])
     }

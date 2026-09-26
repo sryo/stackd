@@ -12,24 +12,14 @@ import Foundation
 //   Speech.shapeResult(...)         — whole-result envelope sent to JS
 
 func registerSpeechSTTTests() {
-    test("resolveLocale nil falls back to current locale") {
-        let l = Speech.resolveLocale(nil)
-        try expectEqual(l.identifier, Locale.current.identifier)
+    test("resolveLocale nil or empty falls back to current locale") {
+        try expectEqual(Speech.resolveLocale(nil).identifier, Locale.current.identifier)
+        try expectEqual(Speech.resolveLocale("").identifier, Locale.current.identifier)
     }
 
-    test("resolveLocale empty string falls back to current locale") {
-        let l = Speech.resolveLocale("")
-        try expectEqual(l.identifier, Locale.current.identifier)
-    }
-
-    test("resolveLocale valid BCP-47 returns matching Locale") {
-        let l = Speech.resolveLocale("en-US")
-        try expectEqual(l.identifier, "en-US")
-    }
-
-    test("resolveLocale non-English BCP-47 round-trips identifier") {
-        let l = Speech.resolveLocale("fr-FR")
-        try expectEqual(l.identifier, "fr-FR")
+    test("resolveLocale BCP-47 identifier round-trips") {
+        try expectEqual(Speech.resolveLocale("en-US").identifier, "en-US")
+        try expectEqual(Speech.resolveLocale("fr-FR").identifier, "fr-FR")
     }
 
     test("shapeSegment exposes substring/range/confidence in JS shape") {

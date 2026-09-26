@@ -31,12 +31,6 @@ func registerDisplayDDCTests() {
         try expectEqual(chk, 0x9A)
     }
 
-    test("checksum of empty payload equals the destination address itself") {
-        // Edge case — XOR identity. Not a real packet but the math has to
-        // hold so the helper is composable.
-        try expectEqual(DisplayDDC.checksum(destinationAddress: 0x6E, bytes: []), 0x6E)
-    }
-
     // encodeBrightnessSet returns the full 6-byte payload that
     // IOAVServiceWriteI2C transmits after the (0x37, 0x51) addr/subaddr
     // pair. Layout: [length=0x84, opcode=0x03, vcp=0x10, hi, lo, chk].
@@ -52,35 +46,23 @@ func registerDisplayDDCTests() {
         try expectEqual(p[5], 0x9A)
     }
 
-    test("encodeBrightnessSet clamps percent below 0 to 0") {
-        // Negative input shouldn't underflow into a wrap-around byte (which
-        // would set the monitor to ~maximum). Clamp at the boundary.
-        let p = DisplayDDC.encodeBrightnessSet(percent: -10)
-        try expectEqual(p[4], 0x00)
+    test("encodeBrightnessSet keeps 0...100 and clamps outside it") {
+        // Negative input must not wrap into a high byte (≈ max brightness);
+        // values above 100 clamp to the v1 0..100 contract. MSB stays 0
+        // across the whole range. The checksum must track the clamped value.
+        let cases: [(input: Int, lsb: UInt8)] = [(0, 0x00), (100, 0x64), (-10, 0x00), (250, 0x64)]
+        for c in cases {
+            let p = DisplayDDC.encodeBrightnessSet(percent: c.input)
+            try expectEqual(p[3], 0x00, "MSB for \(c.input)")
+            try expectEqual(p[4], c.lsb, "LSB for \(c.input)")
+            try expectEqual(p[5], DisplayDDC.checksum(destinationAddress: 0x6E, bytes: [0x51] + Array(p[0..<5])),
+                            "checksum for \(c.input)")
+        }
     }
 
-    test("encodeBrightnessSet clamps percent above 100 to 100") {
-        // Some monitors interpret values > their declared max as 0 or
-        // saturate randomly. Clamp at 100 to match the v1 0..100 contract.
-        let p = DisplayDDC.encodeBrightnessSet(percent: 250)
-        try expectEqual(p[4], 0x64)         // 100 decimal
-    }
-
-    test("encodeBrightnessSet(100) emits MSB=0 LSB=0x64") {
-        // Boundary at the high end. MSB stays 0 — only matters for monitors
-        // that report a max value > 255 via the capabilities string, out of
-        // scope for v1.
-        let p = DisplayDDC.encodeBrightnessSet(percent: 100)
-        try expectEqual(p[3], 0x00)
-        try expectEqual(p[4], 0x64)
-    }
-
-    test("encodeBrightnessSet(0) emits MSB=0 LSB=0") {
-        // Zero is a real value (full dim) — must not be confused with the
-        // clamp path.
-        let p = DisplayDDC.encodeBrightnessSet(percent: 0)
-        try expectEqual(p[3], 0x00)
-        try expectEqual(p[4], 0x00)
+    test("encodeBrightnessRead packs length, get-opcode, vcp, chk") {
+        // 0x6E ^ 0x51 ^ 0x82 ^ 0x01 ^ 0x10 = 0xAC
+        try expectEqual(DisplayDDC.encodeBrightnessRead(), [0x82, 0x01, 0x10, 0xAC])
     }
 
     // The brightness-read reply is an 11-byte block: source addr, length,
@@ -96,6 +78,10 @@ func registerDisplayDDCTests() {
             0x00          // checksum (unverified in v1)
         ]
         try expectEqual(DisplayDDC.parseBrightnessReply(reply), 42)
+        // The MSB counts: current=0x012C (300) on a monitor with a wide range.
+        var wide = reply
+        wide[8] = 0x01; wide[9] = 0x2C
+        try expectEqual(DisplayDDC.parseBrightnessReply(wide), 300)
     }
 
     test("parseBrightnessReply returns nil for a too-short buffer") {

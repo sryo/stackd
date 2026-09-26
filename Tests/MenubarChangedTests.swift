@@ -1,9 +1,9 @@
 import Foundation
 
 /// Tests for `Bridge.menubarDelta` — the pure diff that drives
-/// `sd.menubar.changed`. Mirrors WindowsChangedTests / DisplaysChangedTests;
-/// the identity is owner+title (menubar items have no stable id) and the
-/// transition fields are x, width, hidden.
+/// `sd.menubar.changed`. The identity is owner+title (menubar items have no
+/// stable id) and the transition fields are x, width, hidden. The generic
+/// added/removed walk is covered by ComputeDeltaTests.
 func registerMenubarChangedTests() {
     func item(owner: String, title: String, x: Double, width: Double = 22, hidden: Bool = false) -> [String: Any] {
         return [
@@ -13,19 +13,6 @@ func registerMenubarChangedTests() {
             "width":  width,
             "hidden": hidden
         ]
-    }
-
-    test("empty → empty: no changes") {
-        let d = Bridge.menubarDelta(snapshot: [], previous: [:])
-        try expectEqual(d.added.count + d.removed.count + d.changed.count, 0)
-        try expectEqual(d.nowByKey.count, 0)
-    }
-
-    test("first snapshot from empty previous: all entries added") {
-        let snap = [item(owner: "Spotify", title: "Spotify", x: 100), item(owner: "Clock", title: "9:41", x: 200)]
-        let d = Bridge.menubarDelta(snapshot: snap, previous: [:])
-        try expectEqual(d.added.count, 2)
-        try expectEqual(d.changed.count, 0)
     }
 
     test("removed: app quit, its menubar item lands in `removed`") {
@@ -49,6 +36,15 @@ func registerMenubarChangedTests() {
         try expectEqual(d.changed.count, 1)
         try expectEqual(d.added.count, 0)
         try expectEqual(d.removed.count, 0)
+    }
+
+    test("width change lands in `changed`") {
+        let prev: [String: [String: Any]] = [
+            "Spotify|Spotify": item(owner: "Spotify", title: "Spotify", x: 100, width: 22)
+        ]
+        let snap = [item(owner: "Spotify", title: "Spotify", x: 100, width: 140)]
+        let d = Bridge.menubarDelta(snapshot: snap, previous: prev)
+        try expectEqual(d.changed.count, 1)
     }
 
     test("hidden transition (notch overflow) lands in `changed`") {

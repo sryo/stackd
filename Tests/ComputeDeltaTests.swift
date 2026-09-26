@@ -45,16 +45,18 @@ func registerComputeDeltaTests() {
                                     identity: ident, equal: eq)
         try expectEqual(d.removed.count, 1)
         try expectEqual(d.removed.first?["id"] as? Int, 2)
+        try expectEqual(d.nowByKey.count, 1)
         try expectEqual(d.added.count, 0)
         try expectEqual(d.changed.count, 0)
     }
 
-    test("computeDelta: equal-returns-false routes to `changed` (not added)") {
+    test("computeDelta: equal-returns-false routes the new row to `changed` (not added)") {
         let prev: [Int: [String: Any]] = [1: node(1, value: 10)]
         let d = Bridge.computeDelta(snapshot: [node(1, value: 20)], previous: prev,
                                     identity: ident, equal: eq)
         try expectEqual(d.changed.count, 1)
         try expectEqual(d.changed.first?["id"] as? Int, 1)
+        try expectEqual(d.changed.first?["value"] as? Int, 20, "changed carries the current row")
         try expectEqual(d.added.count, 0)
         try expectEqual(d.removed.count, 0)
     }
@@ -88,20 +90,20 @@ func registerComputeDeltaTests() {
         }
         let prev: [String: [String: Any]] = [
             "a": ["k": "a", "v": 1],
-            "b": ["k": "b", "v": 2]
+            "b": ["k": "b", "v": 2],
+            "d": ["k": "d", "v": 4]
         ]
         let snap: [[String: Any]] = [
             ["k": "a", "v": 1],   // unchanged
             ["k": "b", "v": 99],  // changed
-            ["k": "c", "v": 3]    // added
-            // "b" stays, but value differs; nothing maps to "removed" here
-            // — let's also drop one to exercise removal.
+            ["k": "c", "v": 3]    // added; "d" is gone → removed
         ]
         let d = Bridge.computeDelta(snapshot: snap, previous: prev,
                                     identity: sIdent, equal: sEq)
         try expectEqual(d.added.first?["k"] as? String, "c")
         try expectEqual(d.changed.first?["k"] as? String, "b")
-        try expectEqual(d.removed.count, 0)
+        try expectEqual(d.removed.map { $0["k"] as? String }, ["d"])
+        try expectEqual(d.added.count + d.changed.count, 2)
         try expectEqual(d.nowByKey.count, 3)
     }
 }

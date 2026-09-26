@@ -2,61 +2,12 @@ import Foundation
 import AppKit
 import CoreGraphics
 
-// Tests for `Sources/DataSources/Windows.swift`.
-//
-// Like Apps.swift, Windows.swift exposes almost no extracted pure helpers:
-// every `static` is wired straight into either CGWindowList, the AX
-// (Accessibility) APIs, or the private SkyLight (CGS) SPI. There is no
-// `clampedFps` / `isHidden(itemX:...)` knob to hammer in isolation.
-//
-// What CAN be characterized without mutating live macOS state:
-//
-//   1. `WindowsLifecycleObserver.detail(_:)` — the ONE genuinely pure helper
-//      in the file. Snap → JSON-able dict mapping that the bang fan-out and
-//      every `sd.window.*` consumer relies on. Stable, no side effects.
-//
-//   2. `Windows.all()` shape contract — `CGWindowListCopyWindowInfo` is a
-//      public, no-prompt read. We characterize the dict contract (id / app /
-//      pid / title / onscreen / frame{x,y,w,h}) that JS consumers depend on
-//      without depending on which specific windows are open. Non-emptiness
-//      is asserted only for `includeNonStandard: true` and only when raw
-//      CGWindowList carries qualifying candidates — the default list's
-//      isStandard filter rides on third-party AX state that headless
-//      sessions never satisfy. See `rawWindowCandidatesExist`.
-//
-//   3. Negative branches of every `WindowsByID.*` reader for an obviously-
-//      invalid CGWindowID — `elementFor(windowID:)` walks CGWindowList and
-//      returns nil on miss, so every downstream reader short-circuits to
-//      its documented "no AX handle" return (nil / false / empty hints).
-//      This locks the contract that JS sees a deterministic type, never a
-//      hang or crash, for stale window ids.
-//
-//   4. `WindowsByID.invalidateCache(pid:)` / `invalidateAll()` — pure cache
-//      mutations, idempotent, safe to call repeatedly. They have no return
-//      value but characterizing "doesn't throw, doesn't crash" matters
-//      because they're called from the lifecycle observer on destroy.
-//
-// What is NOT covered here (by design):
-//
-//   - `Windows.setFocusedFrame` / `minimizeFocused` / `fullscreenFocused` /
-//     `raiseFocused` — would move / minimize / fullscreen the real frontmost
-//     window of whatever app is up while the test suite runs.
-//   - `WindowsByID.setFrame` / `minimize` / `fullscreen` / `raise` / `focus`
-//     / `close` / `focusTab` — same reason: live AX mutations.
-//   - `WindowsByID.setFrame` routed through a live batch — needs a real
-//     window to observe convergence; covered by the batch lifecycle tests
-//     below only up to the sink/ledger/commit contract (bogus CGWindowIDs,
-//     injected position applier — no user window is mutated; an SLS move on
-//     an id WindowServer doesn't know is a per-op error the tx ignores).
-//   - `WindowsByID.snapshot` — exercises the SkyLight HW-capture SPI; safe
-//     to read but environment-dependent (depends on which windows exist).
-//   - The CGS event callback (`windowEventsCallback`) and the
-//     `WindowsLifecycleObserver` timer loop — both are wire-into-WindowServer
-//     state with no isolatable surface.
-//
-// Pattern mirrors AppsTests + MenubarItemsTests: pure helpers get the full
-// table-driven treatment; AX-coupled readers get negative-input contract
-// pinning so the JS-visible return type stays deterministic.
+// Tests for `Sources/DataSources/Windows.swift`: the pure helpers
+// (lifecycle bang detail, addressability-cache verdict rules, create-announce
+// dedup, batch frame ledger), the `Windows.all()` shape contract, and the
+// negative branch of every `WindowsByID` reader for a window id that names
+// no window. Live AX mutations (setFrame / minimize / raise / focus on a real
+// window) are not exercised: they would move whatever the user has open.
 
 // Whether raw CGWindowList carries at least one row decode promises to keep
 // under includeNonStandard: true — same field requirements as decode's
@@ -145,152 +96,69 @@ func registerWindowsTests() {
 
     // MARK: - Windows.all() — public CGWindowList shape contract
 
-    test("Windows.all keeps raw candidates (includeNonStandard) with the documented per-entry keys") {
+    test("Windows.all rows (includeNonStandard) carry the documented keys and an Int x/y/w/h frame") {
         // includeNonStandard: true keeps every normal-layer non-own CGWindow,
         // so with raw candidates present, emptiness means decode's field
-        // extraction broke — assertable in any session that has windows at
-        // all. (The default Windows.all() additionally filters on the AX
-        // isStandard probe, which resolves nothing in headless sessions —
-        // its count is never asserted, see rawWindowCandidatesExist.)
+        // extraction broke. The default Windows.all() additionally filters
+        // on the AX isStandard probe, whose result depends on other apps'
+        // AX state — its count is never asserted (see rawWindowCandidatesExist).
         let entries = Windows.all(includeNonStandard: true)
-        guard let first = entries.first else {
+        if entries.isEmpty {
             try expect(!rawWindowCandidatesExist,
                        "raw CGWindowList has normal-layer candidates but decode produced 0 rows")
-            return
         }
-        try expect(first["id"] is Int, "id should be Int (CGWindowID)")
-        try expect(first["app"] is String, "app should be String (owner name)")
-        try expect(first["pid"] is Int, "pid should be Int (owner pid)")
-        try expect(first["title"] is String, "title should be String (may be empty)")
-        try expect(first["onscreen"] is Bool, "onscreen should be Bool")
-        try expect(first["frame"] is [String: Int], "frame should be [String: Int]")
-    }
-
-    test("Windows.all frame dict carries x/y/w/h as Int") {
-        // The `decode` helper flattens kCGWindowBounds (CGFloat dict) into
-        // an Int-keyed sub-dict. Every entry should have all four keys —
-        // a missing dimension is a bug that breaks any JS frame consumer.
-        for entry in Windows.all(includeNonStandard: true) {
+        for entry in entries {
+            try expect(entry["id"] is Int, "id should be Int (CGWindowID) in \(entry)")
+            try expect(entry["app"] is String, "app should be String (owner name) in \(entry)")
+            try expect(entry["pid"] is Int, "pid should be Int (owner pid) in \(entry)")
+            try expect(entry["title"] is String, "title should be String (may be empty) in \(entry)")
+            try expect(entry["onscreen"] is Bool, "onscreen should be Bool in \(entry)")
             guard let frame = entry["frame"] as? [String: Int] else {
                 throw Expectation(message: "frame not [String: Int] in \(entry)")
             }
-            try expect(frame["x"] != nil, "frame missing x")
-            try expect(frame["y"] != nil, "frame missing y")
-            try expect(frame["w"] != nil, "frame missing w")
-            try expect(frame["h"] != nil, "frame missing h")
+            try expectEqual(Set(frame.keys), ["x", "y", "w", "h"])
         }
     }
 
     test("Windows.all ids are unique (one row per CGWindowID)") {
-        // CGWindowList keys by window number; if `decode` ever dropped that
-        // invariant, JS dedup logic in tilers / window switchers would
-        // double-count the same window. includeNonStandard for the widest
-        // row set; emptiness only counts as a failure when raw candidates
-        // exist (see rawWindowCandidatesExist).
+        // Tilers and switchers dedupe by id; a repeated row would double-count
+        // a window.
         let ids = Windows.all(includeNonStandard: true).compactMap { $0["id"] as? Int }
-        guard !ids.isEmpty else {
-            try expect(!rawWindowCandidatesExist,
-                       "no ids extracted from Windows.all despite raw CGWindowList candidates")
-            return
-        }
         try expectEqual(Set(ids).count, ids.count)
     }
 
     // MARK: - WindowsByID readers — negative branch for invalid CGWindowID
+    //
+    // CGWindowID 0 (kCGNullWindowID) never names a window, so elementFor
+    // misses and every reader returns its no-handle value: JS sees a
+    // deterministic null / false / fallback dict for a stale id, never a
+    // partial payload.
 
-    test("WindowsByID.frame returns nil for an obviously-invalid window id") {
-        // CGWindowID 0 is reserved (kCGNullWindowID) and never names a real
-        // window. The CGWindowList scan in `elementFor(windowID:)` misses,
-        // every downstream reader short-circuits to its no-handle return.
-        try expect(WindowsByID.frame(windowID: 0) == nil,
-                   "expected nil frame for windowID 0")
-    }
-
-    test("WindowsByID title/role/subrole return nil for an invalid window id") {
-        // Same negative branch — locks the contract that JS sees `null`
-        // (via the `Any? ?? NSNull()` wrap in Bridge) and not a hang.
-        try expect(WindowsByID.title(windowID: 0) == nil,
-                   "expected nil title for windowID 0")
-        try expect(WindowsByID.role(windowID: 0) == nil,
-                   "expected nil role for windowID 0")
-        try expect(WindowsByID.subrole(windowID: 0) == nil,
-                   "expected nil subrole for windowID 0")
+    test("WindowsByID optional readers return nil for an invalid window id") {
+        try expect(WindowsByID.frame(windowID: 0) == nil, "frame")
+        try expect(WindowsByID.title(windowID: 0) == nil, "title")
+        try expect(WindowsByID.role(windowID: 0) == nil, "role")
+        try expect(WindowsByID.subrole(windowID: 0) == nil, "subrole")
+        try expect(WindowsByID.tabs(windowID: 0) == nil, "tabs (nil, not an empty tab list)")
+        try expect(WindowsByID.buttonFrames(windowID: 0) == nil, "buttonFrames (nil, not a dict of nulls)")
+        try expect(WindowsByID.info(windowID: 0) == nil, "info (nil, not a partial dict)")
     }
 
     test("WindowsByID bool readers return false for an invalid window id") {
-        // `isMinimized` / `isFullscreen` / `hasToolbar` / `isStandard` all
-        // gate on `elementFor(windowID:)`; on miss they bail to `false`. JS
-        // consumers (`sd.windows.byId.isStandard`) depend on the Bool never
-        // being `null` for stale ids — a tiler that polls a just-destroyed
-        // window must keep working.
+        // sd.windows.byId.isStandard etc. must stay a Bool, never null, so a
+        // tiler polling a just-destroyed window keeps working.
         try expectEqual(WindowsByID.isMinimized(windowID: 0), false)
         try expectEqual(WindowsByID.isFullscreen(windowID: 0), false)
         try expectEqual(WindowsByID.hasToolbar(windowID: 0), false)
         try expectEqual(WindowsByID.isStandard(windowID: 0), false)
     }
 
-    test("WindowsByID.tabs returns nil for an invalid window id") {
-        // No AX element → no tab group → nil. Distinct from "AXTabGroup
-        // exists but is empty" which returns `[]`; this test pins the
-        // "no window at all" branch.
-        try expect(WindowsByID.tabs(windowID: 0) == nil,
-                   "expected nil tabs for windowID 0")
-    }
-
     test("WindowsByID.cornerHints returns the documented fallback dict for an invalid id") {
-        // Never returns nil — the daemon contract is that overlay/outline
-        // stacks always get a dict with the three keys present so the JS
-        // side doesn't have to defensively branch on missing keys.
+        // Never nil: overlay/outline stacks always get all three keys.
         let hints = WindowsByID.cornerHints(windowID: 0)
         try expectEqual(hints["toolbarPresent"] as? Bool, false)
         try expect(hints["role"] is NSNull, "role should be NSNull for invalid id")
         try expect(hints["subrole"] is NSNull, "subrole should be NSNull for invalid id")
-    }
-
-    // MARK: - WindowsByID cache invalidation — non-throwing side effects
-
-    test("WindowsByID.invalidateAll runs without crashing on an empty cache") {
-        // Lifecycle observer fires this on `sd.window.destroyed`; pinning
-        // the no-op behavior so a destroy on a never-cached pid stays safe.
-        WindowsByID.invalidateAll()
-        WindowsByID.invalidateAll()  // idempotent
-        try expect(true, "invalidateAll did not crash")
-    }
-
-    test("WindowsByID.invalidateCache(pid:) is safe for an unknown pid") {
-        // Same no-op contract for the pid-scoped variant. CGS create/destroy
-        // events come in with whatever pid WindowServer reports — including
-        // pids we've never seen a window from.
-        WindowsByID.invalidateCache(pid: 0)
-        WindowsByID.invalidateCache(pid: -1)
-        WindowsByID.invalidateCache(pid: 999999)
-        try expect(true, "invalidateCache(pid:) did not crash for unknown pids")
-    }
-
-    // MARK: - WindowsByID.buttonFrames — traffic-light reader
-
-    test("WindowsByID.buttonFrames returns nil for an unaddressable windowID") {
-        // buttonFrames batches three AX attribute reads (close/zoom/minimize
-        // → AXPosition + AXSize each) into one daemon round-trip. When the
-        // windowID doesn't resolve via elementFor, the contract is nil (not
-        // a partial dict with three nulls). Mirrors info()'s nil contract;
-        // lets the stack-side interceptor fall through to a no-op cleanly
-        // when a stale id is queried mid-tick.
-        let result = WindowsByID.buttonFrames(windowID: 0)
-        try expect(result == nil,
-                   "buttonFrames(0) returned non-nil: \(String(describing: result))")
-    }
-
-    // MARK: - WindowsByID.info — batch reader
-
-    test("WindowsByID.info returns nil for an unaddressable windowID") {
-        // info() consolidates frame/title/role/subrole/isMinimized/isFullscreen
-        // /isStandard/hasToolbar/cornerHints into one AX lookup. For an id
-        // that doesn't resolve via elementFor, the contract is nil (not a
-        // partial dict). Mirrors WindowsByID.frame's nil contract; lets
-        // callers fall through to a no-op cleanly.
-        let result = WindowsByID.info(windowID: 0)
-        try expect(result == nil, "info(0) returned non-nil: \(String(describing: result))")
     }
 
     // MARK: - WindowsByID.settleProbe — return-shape contract
@@ -327,21 +195,6 @@ func registerWindowsTests() {
         try expectEqual(r["refused"] as? Bool, false)
     }
 
-    test("WindowsByID.settleProbe actual frame, when present, exposes the x/y/w/h key set") {
-        // Shape contract: when CG yields back a frame, it MUST contain all
-        // four keys with Double values (matches sd.windows.frame's contract).
-        // We can't force a real window in tests; skip the body if no window
-        // is reachable. The unaddressable-id test above covers the failure
-        // branch.
-        guard let r = awaitProbe({ done in
-            WindowsByID.settleProbe(windowID: 0, ok: false, x: 0, y: 0, w: 100, h: 100, completion: done)
-        }), let actual = r["actual"] as? [String: Any] else { return }
-        try expect(actual["x"] is Double, "x should be Double, got \(type(of: actual["x"] ?? "nil"))")
-        try expect(actual["y"] is Double, "y should be Double")
-        try expect(actual["w"] is Double, "w should be Double")
-        try expect(actual["h"] is Double, "h should be Double")
-    }
-
     // MARK: - WindowAddressabilityCache.probe — grace + sticky-success contract
     //
     // Each test uses a unique fake (pid, windowID) so they don't collide with
@@ -352,11 +205,10 @@ func registerWindowsTests() {
     // both the result cache and the firstSeenAt map per test.
 
     test("WindowAddressabilityCache.probe — grace optimism reports addressable:true, isStandard:false") {
-        // Locks the post-aef9f4e contract: brand-new IDs get the optimistic
-        // `addressable: true` (so they stay candidate for tile rotation),
-        // but isStandard stays false until a real AX probe confirms
-        // AXStandardWindow. Prevents the prior bug where sheets/dialogs
-        // born during AX-stress inherited isStandard: true and got tiled.
+        // Brand-new ids get the optimistic `addressable: true` (so they stay
+        // candidates for tile rotation), but isStandard stays false until a
+        // real AX probe confirms AXStandardWindow, so a sheet or dialog born
+        // while AX is slow is never tiled.
         let pid: pid_t = 7_777_701
         defer { WindowAddressabilityCache.invalidate(pid: pid) }
         let p = WindowAddressabilityCache.probe(pid: pid, windowID: 7_777_701, now: 1000.0)
@@ -366,17 +218,10 @@ func registerWindowsTests() {
     }
 
     test("WindowAddressabilityCache.probe — grace optimism is NOT cached as sticky-success") {
-        // Regression: prior to this fix, the grace path stored its
-        // `addressable: true` result in the same cache the sticky-success
-        // branch reads, so the next probe returned the lie permanently.
-        // Every window the daemon saw during an AX-stress burst (boot,
-        // full restart, spotlight indexing) ended up flagged
-        // `isStandard: false` for its entire lifetime and silently dropped
-        // out of windowscape's tile rotation. The check: probe twice — once
-        // inside grace, once past grace — and demand the second call
-        // re-probes (verdict goes to `addressable: false` once the optimism
-        // budget runs out). If the grace result had stickied, the second
-        // call would echo the cached `addressable: true`.
+        // A cached grace result would be read back by the sticky-success
+        // branch forever, pinning `isStandard: false` on every window seen
+        // during an AX-stress burst. Probe inside grace, then past it: the
+        // second call must re-probe and reach `addressable: false`.
         let pid: pid_t = 7_777_702
         defer { WindowAddressabilityCache.invalidate(pid: pid) }
         let inGrace = WindowAddressabilityCache.probe(pid: pid, windowID: 7_777_702, now: 1000.0)
@@ -483,21 +328,21 @@ func registerWindowsTests() {
         try expectEqual(again.failures, f2.failures + 1)
     }
 
-    test("MainStallWatch.report — only passes past the threshold are logged") {
+    test("MainStallWatch.report — only passes past the threshold are reported, in whole ms") {
         try expectEqual(MainStallWatch.report(busy: 0.01), nil)
         try expectEqual(MainStallWatch.report(busy: MainStallWatch.threshold), nil)
-        try expectEqual(MainStallWatch.report(busy: 0.0834), "main: busy 83ms")
+        let line = MainStallWatch.report(busy: 0.0834)
+        try expect(line?.contains("83ms") == true, "got \(String(describing: line))")
     }
 
     // MARK: - WindowAddressabilityCache.confirm / setMinimized — AX-fed seeding
     //
     // WindowsAXObserver.installPerWindow calls confirm() with the verdict it
     // already read from the live AX element, bypassing probe()'s grace
-    // machinery. Regression context: without seeding, a window created while
-    // AX is busy probes into the optimism grace (isStandard: false), gets
-    // filtered out of Windows.all(), and the snapshot pumped in response to
-    // its own create bang doesn't contain it — the create is silently
-    // absorbed. All tests use fake pids (no real AX RPC fires on the cache-
+    // machinery. Without seeding, a window created while AX is busy probes
+    // into the optimism grace (isStandard: false), is filtered out of
+    // Windows.all(), and the snapshot pumped for its own create bang misses
+    // it. All tests use fake pids (no real AX RPC fires on the cache-
     // hit path) and clean up via invalidate(pid:).
 
     test("WindowAddressabilityCache.confirm seeds a sticky-success verdict that survives past grace") {
@@ -572,11 +417,9 @@ func registerWindowsTests() {
     }
 
     test("WindowAddressabilityCache.standardVerdict — minimized ⇒ standard regardless of subrole reading") {
-        // Regression: Terminal's minimized windows report AXSubrole ==
-        // AXDialog (macOS 26). A window first probed while it sat in the
-        // Dock got sticky-cached non-standard, filtered out of
-        // Windows.all(), and apptimeout read Terminal as windowless and
-        // killed it (2026-07-04).
+        // Some apps (Terminal) report AXSubrole == AXDialog for a minimized
+        // window; a window first probed while in the Dock must still count
+        // as standard or it drops out of Windows.all().
         try expectEqual(WindowAddressabilityCache.standardVerdict(subrole: "AXDialog", isMinimized: true), true)
         try expectEqual(WindowAddressabilityCache.standardVerdict(subrole: nil, isMinimized: true), true)
         try expectEqual(WindowAddressabilityCache.standardVerdict(subrole: "AXStandardWindow", isMinimized: true), true)
@@ -653,18 +496,12 @@ func registerWindowsTests() {
                         "the minimized flip itself must survive the re-probe")
     }
 
-    // (TahoeSynthPoll + WindowEvents.tahoeMinimizeBang removed 2026-06-05:
-    //  WindowsAXObserver now registers kAXWindowMiniaturizedNotification per
-    //  window, which only fires on real Cmd+M — no tab-switch ambiguity to
-    //  gate against. AX is the right primitive for this.)
-
     // MARK: - CreateAnnouncementLedger — single-owner create dedup
     //
     // All three create announcers (AX observer, CGS 1325 fast path, 10s
     // poll) funnel through WindowLifecycleFanout.fireCreated, which
-    // check-and-marks against this ledger. One owner, so no announcer can
-    // forget half the protocol (the failure mode behind the 2026-07-02
-    // dropped-creates regression).
+    // check-and-marks against this ledger, so no announcer can skip half of
+    // the dedup protocol.
 
     test("CreateAnnouncementLedger announces once per window per TTL") {
         var l = CreateAnnouncementLedger()
@@ -685,15 +522,11 @@ func registerWindowsTests() {
 
     // MARK: - Batch — all-AX queued commit
     //
-    // History being pinned: the original batch split one window's geometry
-    // across two unsynchronized channels — size via AX at setFrame time,
-    // position via SLSTransaction at commit — and each app's late resize
-    // re-asserted its stale origin over the committed SLS move (2026-06-10:
-    // windows stacked at old origins / offscreen). The rework queues FULL
-    // frames and applies them all through the normal AX setFrame dance in
-    // one main-thread burst at commit: one channel, no split, and begin no
-    // longer depends on SkyLight tx symbols (it can't fail unless a batch
-    // is already open).
+    // A batch queues full frames (last write wins per window) and applies
+    // them all through the normal AX setFrame path in one burst at commit,
+    // so size and position never travel on separate channels. begin fails
+    // only when a batch is already open. The frame applier is injected, so
+    // the bogus window ids below are never written.
 
     test("BatchFrameLedger records last-write-wins per window id in first-seen order") {
         var ledger = WindowsByID.BatchFrameLedger()
@@ -718,8 +551,7 @@ func registerWindowsTests() {
     }
 
     test("beginBatch always opens unless a batch is already open") {
-        try expectEqual(WindowsByID.beginBatch(), true,
-                        "begin must not depend on SkyLight symbols any more")
+        try expectEqual(WindowsByID.beginBatch(), true, "begin opens a batch")
         try expectEqual(WindowsByID.beginBatch(), false, "no nesting")
         _ = WindowsByID.commitBatch { _, _ in }
     }

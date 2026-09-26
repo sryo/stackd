@@ -49,39 +49,28 @@ func registerAppIntentsTests() {
         try expectEqual(kv["off"], "false")
     }
 
-    test("parsePayloadThrowing rejects non-object JSON") {
-        do {
-            _ = try RunStackdBangHelpers.parsePayloadThrowing("[1,2,3]")
-            try expect(false, "expected throw for array payload")
-        } catch {
-            try expect(true)
-        }
-        do {
-            _ = try RunStackdBangHelpers.parsePayloadThrowing(#""just a string""#)
-            try expect(false, "expected throw for scalar payload")
-        } catch {
-            try expect(true)
-        }
-    }
-
-    test("parsePayloadThrowing rejects malformed JSON") {
-        do {
-            _ = try RunStackdBangHelpers.parsePayloadThrowing("{not json")
-            try expect(false, "expected throw for malformed JSON")
-        } catch {
-            try expect(true)
+    test("parsePayloadThrowing rejects non-object, malformed, and '='-keyed payloads") {
+        // A key containing '=' is rejected because the CLI argv parser
+        // splits on the first '=' and would deliver the wrong key=value.
+        let bad = [
+            "[1,2,3]",
+            #""just a string""#,
+            "{not json",
+            #"{"a=b":"c"}"#,
+        ]
+        for payload in bad {
+            var threw = false
+            do { _ = try RunStackdBangHelpers.parsePayloadThrowing(payload) } catch { threw = true }
+            try expect(threw, "expected throw for payload \(payload)")
+            try expectEqual(RunStackdBangHelpers.parsePayload(payload).count, 0,
+                            "non-throwing parsePayload should degrade to empty for \(payload)")
         }
     }
 
-    test("parsePayloadThrowing rejects keys containing '='") {
-        // CLI argv parser splits on first '=', so an embedded '=' in the
-        // key would silently send the wrong key=value to the bang handler.
-        do {
-            _ = try RunStackdBangHelpers.parsePayloadThrowing(#"{"a=b":"c"}"#)
-            try expect(false, "expected throw for '=' in key")
-        } catch {
-            try expect(true)
-        }
+    test("parsePayload re-encodes nested objects and arrays as JSON strings") {
+        let kv = RunStackdBangHelpers.parsePayload(#"{"list":[1,2],"obj":{"k":"v"}}"#)
+        try expectEqual(kv["list"], "[1,2]")
+        try expectEqual(kv["obj"], #"{"k":"v"}"#)
     }
 
     test("formatError produces a prefixed user-facing string") {

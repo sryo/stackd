@@ -66,10 +66,8 @@ func registerOverlayTickPlanTests() {
         try expect(OverlayTickPlan.needsAppKitSync(frameOp: .none, appKitStale: true))
         try expect(!OverlayTickPlan.needsAppKitSync(frameOp: .move(.zero), appKitStale: true))
         try expect(!OverlayTickPlan.needsAppKitSync(frameOp: .none, appKitStale: false))
-    }
-
-    test("OverlayTickPlan.needsAppKitSync is false on reshape (setFrame resyncs)") {
-        try expect(!OverlayTickPlan.needsAppKitSync(frameOp: .reshape(.zero), appKitStale: true))
+        try expect(!OverlayTickPlan.needsAppKitSync(frameOp: .reshape(.zero), appKitStale: true),
+                   "a reshape goes through setFrame, which resyncs by itself")
     }
 
     test("OverlayTickPlan.holdsHeadroom while the motion engine animates the target") {

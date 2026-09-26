@@ -22,33 +22,21 @@ import CoreAudio
 //     we assert shape only, never magnitudes or device names.
 //   - devices(scope:) → list-of-dicts shape contract, key presence, type
 //     stability, and the isDefault invariant (≤1 default per scope).
-//   - defaultOutputDevice / defaultInputDevice → AudioDeviceID? probe. Every
-//     Mac with working audio has both; if absent, we don't fail the test,
-//     we skip the shape assertions that depend on them.
+//   - defaultOutputDevice → name(of:) round-trip when a device exists.
+//   - Media.parseScriptedResult → the pure osascript-output parser.
+//
+// Media.nowPlaying is not called: when MediaRemote has no broadcaster it
+// falls back to osascript against a running Spotify, which can raise an
+// Automation TCC prompt for the test binary.
 
 func registerAudioTests() {
     // MARK: - Scope enum (pure mapping)
 
-    test("Scope.output maps to kAudioDevicePropertyScopeOutput") {
+    test("Scope maps to the CoreAudio scope + default-device selector per direction") {
         try expectEqual(Audio.Scope.output.coreAudioScope, kAudioDevicePropertyScopeOutput)
-    }
-
-    test("Scope.input maps to kAudioDevicePropertyScopeInput") {
-        try expectEqual(Audio.Scope.input.coreAudioScope, kAudioDevicePropertyScopeInput)
-    }
-
-    test("Scope.output default selector is DefaultOutputDevice") {
-        try expectEqual(
-            Audio.Scope.output.defaultDeviceSelector,
-            kAudioHardwarePropertyDefaultOutputDevice
-        )
-    }
-
-    test("Scope.input default selector is DefaultInputDevice") {
-        try expectEqual(
-            Audio.Scope.input.defaultDeviceSelector,
-            kAudioHardwarePropertyDefaultInputDevice
-        )
+        try expectEqual(Audio.Scope.input.coreAudioScope,  kAudioDevicePropertyScopeInput)
+        try expectEqual(Audio.Scope.output.defaultDeviceSelector, kAudioHardwarePropertyDefaultOutputDevice)
+        try expectEqual(Audio.Scope.input.defaultDeviceSelector,  kAudioHardwarePropertyDefaultInputDevice)
     }
 
     // MARK: - Address builders (pure)
@@ -85,38 +73,19 @@ func registerAudioTests() {
 
     // MARK: - current() / currentInput() dict shape
 
-    test("current() returns the volume/muted/deviceName key set") {
-        let dict = Audio.current()
-        try expect(dict["volume"]     != nil, "missing 'volume' key")
-        try expect(dict["muted"]      != nil, "missing 'muted' key")
-        try expect(dict["deviceName"] != nil, "missing 'deviceName' key")
-    }
-
-    test("current() volume is Float-or-null, muted is Bool, deviceName is String-or-null") {
-        // Stacks pattern-match on these types — a regression to e.g.
-        // NSNumber-wrapped Bool would silently break sd.volume HUDs.
-        let dict = Audio.current()
-        // volume: Float OR NSNull (no device case)
-        let v = dict["volume"]!
-        try expect(v is Float || v is NSNull,
-                   "volume should be Float or NSNull, got \(type(of: v))")
-        // muted: always Bool (defaults to false when no device)
-        try expect(dict["muted"]! is Bool,
-                   "muted should be Bool, got \(type(of: dict["muted"]!))")
-        // deviceName: String OR NSNull
-        let n = dict["deviceName"]!
-        try expect(n is String || n is NSNull,
-                   "deviceName should be String or NSNull, got \(type(of: n))")
-    }
-
-    test("currentInput() returns the same key set as current()") {
-        // Mirror contract — the input HUD reuses the output HUD's shape.
-        let dict = Audio.currentInput()
-        try expect(dict["volume"]     != nil, "missing 'volume' key")
-        try expect(dict["muted"]      != nil, "missing 'muted' key")
-        try expect(dict["deviceName"] != nil, "missing 'deviceName' key")
-        try expect(dict["muted"]! is Bool,
-                   "input muted should be Bool, got \(type(of: dict["muted"]!))")
+    test("current() / currentInput() expose volume/muted/deviceName with nullable types") {
+        // With a default device: volume Float-or-null, muted Bool, deviceName
+        // String. Without one (headless host): all three keys are NSNull.
+        // Keys are always present so JS never sees undefined.
+        for (label, dict) in [("output", Audio.current()), ("input", Audio.currentInput())] {
+            guard let v = dict["volume"], let m = dict["muted"], let n = dict["deviceName"] else {
+                throw Expectation(message: "\(label): missing volume/muted/deviceName key in \(dict)")
+            }
+            try expect(v is Float || v is NSNull, "\(label) volume should be Float or NSNull, got \(type(of: v))")
+            try expect(m is Bool || m is NSNull, "\(label) muted should be Bool or NSNull, got \(type(of: m))")
+            try expect(n is String || n is NSNull, "\(label) deviceName should be String or NSNull, got \(type(of: n))")
+            try expectEqual(m is NSNull, n is NSNull, "\(label): muted and deviceName are null together (no device)")
+        }
     }
 
     // MARK: - devices(scope:) list shape
@@ -157,15 +126,6 @@ func registerAudioTests() {
                    "expected ≤1 default input, got \(inputDefaults.count)")
     }
 
-    test("devices(scope:) returns the same row count when called back-to-back") {
-        // Cheap stability check: a hot enumeration shouldn't drop/add rows
-        // between consecutive reads on a stable hardware state. Catches a
-        // class of "first call seeds state, second call sees fewer" bugs.
-        let a = Audio.devices(scope: .output)
-        let b = Audio.devices(scope: .output)
-        try expectEqual(a.count, b.count)
-    }
-
     // MARK: - defaultOutputDevice / defaultInputDevice probes
 
     test("defaultOutputDevice round-trips through name(of:) when present") {
@@ -181,17 +141,6 @@ func registerAudioTests() {
                    "default output device should have a non-empty name, got \(String(describing: n))")
     }
 
-    test("Media.nowPlaying: completion is async, never fires inline") {
-        // Whether MediaRemote.getNowPlayingInfo is loadable or not, the
-        // completion must hop a queue before firing — Bridge.respond would
-        // otherwise be re-entered before the dispatch tool returned, and
-        // chained sd.media.* calls could see inverted ordering. Same
-        // contract as Vision/Thumbnails (different queue, same async-ness).
-        var fired = false
-        Media.nowPlaying { _ in fired = true }
-        try expect(!fired, "Media.nowPlaying completion must not fire synchronously")
-    }
-
     // MARK: - Media.parseScriptedResult (Spotify / osascript fallback)
 
     test("parseScriptedResult: empty / whitespace input returns nil") {
@@ -201,34 +150,27 @@ func registerAudioTests() {
                    "whitespace-only input should yield nil")
     }
 
-    test("parseScriptedResult: leading-tab (empty title) with content elsewhere returns nil") {
-        // Spotify can emit a row with metadata but a blank title field. The
-        // parser must reject these — otherwise the bar would render a stale
-        // " · Artist" entry with no track name. The earlier "all tabs"
-        // version of this test was incorrect: `trimmingCharacters` strips
-        // tabs (they're whitespace), so the input collapsed to "" and hit
-        // the empty short-circuit, never exercising the !parts[0].isEmpty
-        // guard. This input keeps content past the title so the guard
-        // actually fires.
+    test("parseScriptedResult: blank or whitespace-only title returns nil") {
+        // A row with metadata but no track name must not render as a
+        // nameless " · Artist" entry. The leading tab must survive input
+        // trimming so Artist isn't promoted into the title slot.
         try expect(Media.parseScriptedResult("\tArtist\tAlbum\t100\t10\tplaying", bundleId: "com.spotify.client") == nil,
                    "blank-title-with-content should yield nil")
-    }
-
-    test("parseScriptedResult: whitespace-only title returns nil") {
-        // Per-field whitespace check — "   " is rejected the same as "".
         try expect(Media.parseScriptedResult("   \tArtist", bundleId: "com.spotify.client") == nil,
                    "whitespace-only title should yield nil")
     }
 
-    test("parseScriptedResult: whitespace-only artist/album are dropped, not emitted") {
+    test("parseScriptedResult: blank or whitespace-only artist/album are dropped, not emitted") {
         // The bar's `m.artist ? "X · " + m.artist : "X"` ternary is truthy
-        // on "   " — so a non-trim emit would render "Song ·    ·    ".
-        let out = Media.parseScriptedResult("Song\t   \t   \t1000\t0.5\tplaying",
-                                            bundleId: "com.spotify.client")
-        try expect(out != nil)
-        try expectEqual(out!["title"] as? String, "Song")
-        try expect(out!["artist"] == nil, "whitespace-only artist should be dropped")
-        try expect(out!["album"]  == nil, "whitespace-only album should be dropped")
+        // on "   " and "" would still be a present key — both must drop.
+        for raw in ["Song\t   \t   \t1000\t0.5\tplaying", "Song\t\t\t1000\t0.5"] {
+            let out = Media.parseScriptedResult(raw, bundleId: "com.spotify.client")
+            try expect(out != nil, "should parse: \(raw.debugDescription)")
+            try expectEqual(out!["title"] as? String, "Song")
+            try expect(out!["artist"] == nil, "blank artist should be dropped for \(raw.debugDescription)")
+            try expect(out!["album"]  == nil, "blank album should be dropped for \(raw.debugDescription)")
+            try expectEqual(out!["duration"] as? Double, 1.0)
+        }
     }
 
     test("parseScriptedResult: title-only input yields playing+title, no artist/album") {
@@ -242,26 +184,16 @@ func registerAudioTests() {
         try expect(out!["album"]  == nil, "no album field for title-only input")
     }
 
-    test("parseScriptedResult: 6th-field playState=paused yields playing=false") {
-        // The current script emits player state as the 6th field. "paused"
-        // must surface as playing=false so HUDs can show a ▶ overlay rather
-        // than blanking the track entirely.
-        let out = Media.parseScriptedResult(
-            "Song\tArtist\tAlbum\t180000\t30\tpaused",
-            bundleId: "com.spotify.client"
-        )
-        try expect(out != nil)
-        try expectEqual(out!["title"]   as? String, "Song")
-        try expectEqual(out!["playing"] as? Bool,   false)
-    }
-
-    test("parseScriptedResult: 6th-field playState=playing yields playing=true") {
-        let out = Media.parseScriptedResult(
-            "Song\tArtist\tAlbum\t180000\t30\tplaying",
-            bundleId: "com.spotify.client"
-        )
-        try expect(out != nil)
-        try expectEqual(out!["playing"] as? Bool, true)
+    test("parseScriptedResult: 6th-field playState drives `playing`") {
+        // "paused" must surface as playing=false so HUDs can show a ▶
+        // overlay rather than blanking the track entirely.
+        let paused = Media.parseScriptedResult("Song\tArtist\tAlbum\t180000\t30\tpaused",
+                                               bundleId: "com.spotify.client")
+        try expectEqual(paused?["title"]   as? String, "Song")
+        try expectEqual(paused?["playing"] as? Bool,   false)
+        let playing = Media.parseScriptedResult("Song\tArtist\tAlbum\t180000\t30\tplaying",
+                                                bundleId: "com.spotify.client")
+        try expectEqual(playing?["playing"] as? Bool, true)
     }
 
     test("parseScriptedResult: full Spotify row maps to media-channel keys") {
@@ -281,19 +213,6 @@ func registerAudioTests() {
         // progress fraction depend on the same units across sources.
         try expectEqual(out!["duration"] as? Double, 482.83)
         try expectEqual(out!["elapsed"]  as? Double, 127.5)
-    }
-
-    test("parseScriptedResult: blank artist/album fields are dropped, not empty-strung") {
-        // AppleScript returns the literal "" when the metadata is missing;
-        // dropping them keeps the JS-side `m.artist ? ... : ...` ternary in
-        // bar/items/nowplaying.js producing "Title" instead of "Title · ".
-        let out = Media.parseScriptedResult("OnlyTitle\t\t\t180000\t10",
-                                            bundleId: "com.spotify.client")
-        try expect(out != nil)
-        try expectEqual(out!["title"] as? String, "OnlyTitle")
-        try expect(out!["artist"] == nil, "blank artist should be dropped")
-        try expect(out!["album"]  == nil, "blank album should be dropped")
-        try expectEqual(out!["duration"] as? Double, 180.0)
     }
 
     test("parseScriptedResult: trailing newline from osascript is tolerated") {

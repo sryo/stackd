@@ -11,18 +11,15 @@ import WebKit
 // windows beneath, and no public API makes a window picker-invisible while
 // staying on top (NSWindow.sharingType is ignored on macOS 15+).
 //
-// Headlessly testable and covered here: the manifest decode, the pure
-// hide predicate (ScreenshotHidePolicy), the session state machine
-// (ScreenshotSession), the StackWindow flag carry, hideAll's skip
-// branches against never-ordered-front panels, and the
-// repinAllAfterScreenshot fan-out.
+// Covered here: the manifest decode, the pure hide predicate
+// (ScreenshotHidePolicy), the session state machine (ScreenshotSession),
+// the StackWindow flag carry, hideAll against transparent off-screen
+// panels, and the repinAllAfterScreenshot fan-out.
 //
-// NOT testable here (manual verification only): the NSWorkspace
+// NOT covered (manual verification only): the NSWorkspace
 // runningApplications KVO actually firing on Cmd-Shift-4 (needs a real
-// screenshot session), the orderOut/orderFrontRegardless round-trip on
-// visible windows (ordering a window front during the suite is out of
-// scope per the OverlayTests constraint), and the BridgeOverlay
-// vsync-tick gate interaction.
+// screenshot session), the restore round-trip, and the overlay tick's
+// dormant-while-active gate.
 
 func registerScreenshotHiderTests() {
     // MARK: - manifest decode
@@ -33,8 +30,6 @@ func registerScreenshotHiderTests() {
         """
         let m = try JSONDecoder().decode(StackManifest.self, from: Data(json.utf8))
         try expectEqual(m.hideDuringScreenshot, nil)
-        // The spawn-side default: nil → hide.
-        try expectEqual(m.hideDuringScreenshot ?? true, true)
     }
 
     test("manifest: hideDuringScreenshot decodes true and false") {
@@ -108,29 +103,43 @@ func registerScreenshotHiderTests() {
 
     // MARK: - hideAll skip branches
 
-    test("ScreenshotHider.hideAll skips invisible, clickable, and opted-out windows") {
-        // All panels here are defer:true and never ordered front —
-        // isVisible == false, so the visibility skip-branch applies to the
-        // plain panel, and the opted-out StackWindow exercises the opt-out
-        // branch regardless. Nothing appears during the suite; the positive
-        // hide path (a VISIBLE click-through panel) is manual-verification
-        // territory.
-        let clickThroughPanel = NSPanel(contentRect: .zero, styleMask: .borderless,
-                                        backing: .buffered, defer: true)
-        clickThroughPanel.ignoresMouseEvents = true
-        let clickablePanel = NSPanel(contentRect: .zero, styleMask: .borderless,
-                                     backing: .buffered, defer: true)
-        clickablePanel.ignoresMouseEvents = false
+    test("ScreenshotHider.hideAll hides visible click-through panels and skips the rest") {
+        // Fully transparent 1pt panels far off screen: ordered in at the
+        // window server, invisible on the display.
+        func panel(clickThrough: Bool, show: Bool) -> NSPanel {
+            let p = NSPanel(contentRect: NSRect(x: -9999, y: -9999, width: 1, height: 1),
+                            styleMask: .borderless, backing: .buffered, defer: false)
+            p.ignoresMouseEvents = clickThrough
+            p.alphaValue = 0
+            if show { p.orderFrontRegardless() }
+            return p
+        }
+        let target = panel(clickThrough: true, show: true)
+        let clickable = panel(clickThrough: false, show: true)
+        let neverShown = panel(clickThrough: true, show: false)
         let optedOut = StackWindow(
-            frame: NSRect(x: 0, y: 0, width: 10, height: 10),
+            frame: NSRect(x: -9999, y: -9999, width: 1, height: 1),
             clickThrough: true,
             schemeHandler: StackdSchemeHandler(runtimePath: "/nonexistent"),
             hideDuringScreenshot: false
         )
+        optedOut.alphaValue = 0
+        optedOut.orderFrontRegardless()
+        try expect(target.isVisible && clickable.isVisible && optedOut.isVisible,
+                   "setup: panels must be ordered in")
+
         let hider = ScreenshotHider()
-        hider.hideAll([clickThroughPanel, clickablePanel, optedOut])
-        try expectEqual(hider.hiddenCount, 0,
-                        "no window qualified: invisible / clickable / opted-out")
+        hider.hideAll([target, clickable, neverShown, optedOut])
+        try expectEqual(hider.hiddenCount, 1, "only the visible click-through panel qualifies")
+        try expect(!target.isVisible, "the qualifying panel is ordered out")
+        try expect(clickable.isVisible, "a clickable panel stays")
+        try expect(optedOut.isVisible, "a stack that opted out stays")
+
+        optedOut.orderOut(nil)
+        for p in [target, clickable, neverShown] {
+            p.orderOut(nil)
+            p.close()
+        }
     }
 
     // MARK: - overlay repin fan-out

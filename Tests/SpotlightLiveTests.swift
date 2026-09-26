@@ -15,11 +15,7 @@ import Foundation
 //     decision the live + one-shot paths share. Both subscribe() and find()
 //     need to default identically, so the helper exists to avoid drift.
 //
-// Mirrors the BonjourTests / UpdateParserTests rationale: test what's
-// deterministic, leave the macOS subsystem to the live runtime.
-//
-// Wire-up: orchestrator adds `registerSpotlightLiveTests()` to
-// Tests/main.swift and appends this file to TEST_SOURCES in tests.sh.
+// Test what's deterministic; leave the macOS subsystem to the live runtime.
 
 func registerSpotlightLiveTests() {
     test("defaultAttributes contains the documented baseline set") {
@@ -74,22 +70,23 @@ func registerSpotlightLiveTests() {
     }
 
     // ── LiveQuery construction guard ─────────────────────────────────────
-    // The "live" flavor differs from one-shot in that it keeps the
-    // NSMetadataQuery alive after the initial gather and re-pushes on
-    // every NSMetadataQueryDidUpdate. We can't drive that loop here (it
-    // needs a real Spotlight index + main runloop), but the failable
-    // initializer's predicate guard IS synchronous and deterministic — it
-    // mirrors find()'s empty-predicate short-circuit and is the only safe
-    // observation we can make without spinning up a query.
-    test("LiveQuery init returns nil on nil predicate") {
-        let q = Spotlight.LiveQuery(predicate: nil, scopes: nil,
-                                    attributes: nil, limit: nil) { _ in }
-        try expect(q == nil, "expected nil LiveQuery for nil predicate")
+    // The failable initializer's predicate guards are synchronous and run
+    // before any NSMetadataQuery starts; a nil LiveQuery is what Bridge
+    // uses to reject a subscription.
+    test("LiveQuery init returns nil on nil or empty predicate") {
+        let nilPred = Spotlight.LiveQuery(predicate: nil, scopes: nil,
+                                          attributes: nil, limit: nil) { _ in }
+        try expect(nilPred == nil, "expected nil LiveQuery for nil predicate")
+        let emptyPred = Spotlight.LiveQuery(predicate: "", scopes: nil,
+                                            attributes: nil, limit: nil) { _ in }
+        try expect(emptyPred == nil, "expected nil LiveQuery for empty predicate")
     }
 
-    test("LiveQuery init returns nil on empty predicate") {
-        let q = Spotlight.LiveQuery(predicate: "", scopes: nil,
+    test("LiveQuery init returns nil on a malformed predicate instead of raising") {
+        // NSPredicate(format:) raises an ObjC exception on bad input; the
+        // SafePredicate wrap turns that into a nil LiveQuery.
+        let q = Spotlight.LiveQuery(predicate: "$$$ malformed predicate $$$", scopes: nil,
                                     attributes: nil, limit: nil) { _ in }
-        try expect(q == nil, "expected nil LiveQuery for empty predicate")
+        try expect(q == nil, "expected nil LiveQuery for malformed predicate")
     }
 }

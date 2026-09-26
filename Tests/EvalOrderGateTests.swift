@@ -19,12 +19,12 @@ func registerEvalOrderGateTests() {
 
     test("EvalOrderGate queues behind an earlier queued script until it drains") {
         var g = EvalOrderGate()
-        try expect(!g.shouldRunInline(isMain: false))    // queued, pending = 1
-        try expect(!g.shouldRunInline(isMain: true), "must not overtake the queued script")
-        g.drained()                                         // first hop ran
-        try expect(!g.shouldRunInline(isMain: true), "second queued script still pending")
-        g.drained()
-        g.drained()                                         // the on-main one queued above
-        try expect(g.shouldRunInline(isMain: true))
+        try expect(!g.shouldRunInline(isMain: false))      // A queued
+        try expect(!g.shouldRunInline(isMain: true), "must not overtake the queued script")  // B queued
+        g.drained()                                        // A ran; B still queued
+        try expect(!g.shouldRunInline(isMain: true), "B is still queued")                     // C queued
+        g.drained()                                        // B ran
+        g.drained()                                        // C ran
+        try expect(g.shouldRunInline(isMain: true), "nothing queued: inline again")
     }
 }

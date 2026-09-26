@@ -32,11 +32,13 @@ func registerMotionPlannerTests() {
         }
     }
 
-    test("final tick writes exact target, flags isFinal, and empties the table") {
+    test("isAnimating from registration until the final tick, which writes the exact target and empties the table") {
         var p = MotionPlanner()
         _ = p.register(windowID: 7, from: rect(0, 0, 100, 100), to: rect(300, 40, 640, 480),
                        duration: 0.2, easing: .easeOutCubic)
+        try expect(p.isAnimating(7), "animating from registration on")
         _ = p.tick(now: 0)
+        try expect(p.isAnimating(7))
         let done = p.tick(now: 5.0)
         try expectEqual(done.writes.count, 1)
         try expectEqual(done.writes[0].frame, rect(300, 40, 640, 480))
@@ -73,22 +75,31 @@ func registerMotionPlannerTests() {
     }
 
     test("spring supersede seeds velocity carryover") {
+        // A spring superseded mid-flight hands its velocity to the
+        // replacement, which therefore runs ahead of a spring started from
+        // rest at the same point toward the same target.
         var p = MotionPlanner()
         _ = p.register(windowID: 4, from: rect(0, 0, 100, 100), to: rect(800, 0, 100, 100),
                        duration: 0, easing: .spring)
         _ = p.tick(now: 0)
         _ = p.tick(now: 0.03) // in flight, moving +x fast
-
         _ = p.register(windowID: 4, from: rect(0, 0, 100, 100), to: rect(820, 0, 100, 100),
                        duration: 0, easing: .spring)
         _ = p.tick(now: 0.03)
-        // With carried +x velocity the very next instant keeps moving in +x
-        // from the handoff point rather than restarting from rest.
-        let before = p.tick(now: 0.031).writes.first?.frame.origin.x
-        let after = p.tick(now: 0.05).writes.first?.frame.origin.x
-        if let b = before, let a = after {
-            try expect(a > b, "carried velocity should keep +x motion (\(b) → \(a))")
+        guard let carried = p.tick(now: 0.04).writes.first?.frame.origin.x else {
+            throw Expectation(message: "no write from the replacement spring")
         }
+
+        let handoff = MotionMath.Spring(from: 0, target: 800, initialVelocity: 0).value(at: 0.03)
+        var rest = MotionPlanner()
+        _ = rest.register(windowID: 4, from: rect(handoff, 0, 100, 100), to: rect(820, 0, 100, 100),
+                          duration: 0, easing: .spring)
+        _ = rest.tick(now: 0.03)
+        guard let fromRest = rest.tick(now: 0.04).writes.first?.frame.origin.x else {
+            throw Expectation(message: "no write from the at-rest spring")
+        }
+        try expect(carried > fromRest + 10, "carried velocity should run ahead (\(carried) vs \(fromRest))")
+
         let done = p.tick(now: 5.0)
         try expectEqual(done.writes.first?.frame.origin.x, 820, "spring must settle at new target")
     }
@@ -126,17 +137,6 @@ func registerMotionPlannerTests() {
         try expect(out.writes[0].isFinal)
         try expectEqual(out.finished.count, 1)
         try expect(p.isEmpty)
-    }
-
-    test("isAnimating reflects registration lifetime") {
-        var p = MotionPlanner()
-        try expect(!p.isAnimating(11))
-        _ = p.register(windowID: 11, from: rect(0, 0, 10, 10), to: rect(90, 0, 10, 10),
-                       duration: 0.5, easing: .linear)
-        try expect(p.isAnimating(11))
-        _ = p.tick(now: 0)
-        _ = p.tick(now: 10)
-        try expect(!p.isAnimating(11))
     }
 
     test("translate-only intermediate writes skip the size axis") {

@@ -1,19 +1,10 @@
 import Foundation
 
-/// Pins the `Channels.all` registry as the single source of truth for
-/// every channel the daemon vends. Before this refactor, two parallel
-/// hardcoded tables (Bridge.replayTable + Runtime/api.js __sdSignalPaths)
-/// drifted apart when primitive authors touched one and forgot the other.
-///
-/// These tests verify:
-///   1. The registry contains every entry the old replayTable had
-///      (replayable channels) — replayState behavior is preserved.
-///   2. The registry exposes a `jsPath` for every entry the old
-///      __sdSignalPaths had — template engine bindings are preserved.
-///   3. The injected `window.__sd_channels` payload round-trips through
-///      api.js's __sdSignalPaths resolver and produces a non-empty,
-///      longest-first-sorted path map identical in shape to the pre-
-///      refactor hardcoded one.
+/// Pins the `Channels.all` registry — the single source of truth for every
+/// channel the daemon vends. Swift replay (`Bridge.replayState`) and the JS
+/// template engine (`window.__sd_channels` → `__sdSignalPaths`) both derive
+/// from it, so these snapshots are the same-commit guard: adding, removing,
+/// or reordering a channel must update the expectations below.
 func registerChannelsRegistryTests() {
     // Lock the snapshot. Adding a Channel means updating this expectation
     // in the SAME commit — the same-commit-test rule from CLAUDE.md
@@ -57,32 +48,18 @@ func registerChannelsRegistryTests() {
         ("windows",     "titleChanged"),
     ]
 
-    test("registry preserves every replayTable entry") {
+    test("replayable channels match the pinned (permission, name) list in order") {
+        // replayState iteration order is the firing order for newly-ready
+        // stacks, so order is part of the contract.
         let actual = Channels.all
             .filter { $0.replayable }
-            .map { (permission: $0.permission, channel: $0.name) }
-        try expectEqual(actual.count, expectedReplayable.count)
-        for (i, (got, want)) in zip(actual, expectedReplayable).enumerated() {
-            try expectEqual(got.permission, want.permission,
-                "replayable[\(i)] permission")
-            try expectEqual(got.channel, want.channel,
-                "replayable[\(i)] channel")
-        }
+            .map { "\($0.permission):\($0.name)" }
+        let want = expectedReplayable.map { "\($0.permission):\($0.channel)" }
+        try expectEqual(actual, want)
     }
 
-    test("registry replay order matches historical replayTable order") {
-        // replayState iteration order is the firing order for newly-ready
-        // stacks. Locking the order means existing stacks see channels
-        // arrive in the same sequence as before the refactor.
-        let names = Channels.all.filter { $0.replayable }.map(\.name)
-        let want = expectedReplayable.map { $0.channel }
-        try expectEqual(names, want)
-    }
-
-    // Pre-refactor hardcoded path set from Runtime/api.js. Adding to
-    // __sdSignalPaths without registering the matching Swift channel means
-    // template bindings break silently — this test fails first if the
-    // jsPath set drifts.
+    // Every template-bindable path. A jsPath dropped from the registry
+    // silently breaks `{{ sd.<path> }}` bindings in stacks.
     let expectedJSPaths: Set<String> = [
         "battery", "mouse", "appearance",
         "app.frontmost", "app.activated",
@@ -101,14 +78,17 @@ func registerChannelsRegistryTests() {
         "calendar.observe",
     ]
 
-    test("registry exposes every pre-refactor jsPath") {
+    test("registry exposes exactly the pinned jsPath set") {
         let actual = Set(Channels.all.compactMap { $0.jsPath })
         try expectEqual(actual, expectedJSPaths)
     }
 
-    test("every jsPath has a non-empty permission") {
-        for ch in Channels.all where ch.jsPath != nil {
-            try expect(!ch.permission.isEmpty, "jsPath \(ch.jsPath!) missing permission")
+    test("every channel's permission is registered in Permissions.all") {
+        // A channel gated on an unknown permission can never be granted:
+        // the doctor rejects it and inference never adds it.
+        for ch in Channels.all {
+            try expect(Permissions.all.contains(ch.permission),
+                "channel '\(ch.name)' gated on unregistered permission '\(ch.permission)'")
         }
     }
 
@@ -147,35 +127,31 @@ func registerChannelsRegistryTests() {
         try expectEqual(nonReplayable, expected)
     }
 
-    test("jsBootstrapJSON omits channels without a jsPath") {
-        // menubarItems / menubarChanged have no template surface so they
-        // must NOT appear in the JS-side bootstrap. Otherwise api.js's
-        // __sdResolvePath would warn about a missing sd.foo binding.
-        let json = Channels.jsBootstrapJSON
-        try expect(!json.contains("\"menubarItems\""),
-            "menubarItems leaked into JS bootstrap")
-        try expect(!json.contains("\"menubarChanged\""),
-            "menubarChanged leaked into JS bootstrap")
-        // But replayable channels with a jsPath DO appear.
-        try expect(json.contains("\"battery\""),  "battery missing from JS bootstrap")
-        try expect(json.contains("\"frontApp\""), "frontApp missing from JS bootstrap")
+    test("jsBootstrapJSON lists exactly the channels that have a jsPath") {
+        // Channels without a template surface (menubarItems, window
+        // lifecycle bangs) must not reach the JS bootstrap, or api.js's
+        // path resolver warns about a missing sd.<path> binding.
+        guard let data = Channels.jsBootstrapJSON.data(using: .utf8),
+              let entries = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
+            throw Expectation(message: "jsBootstrapJSON is not a JSON array of objects")
+        }
+        let names = entries.compactMap { $0["name"] as? String }
+        let want = Channels.all.filter { $0.jsPath != nil }.map(\.name)
+        try expectEqual(names, want)
+        for e in entries {
+            try expect(e["jsPath"] is String && e["permission"] is String,
+                "bootstrap entry missing jsPath/permission: \(e)")
+        }
     }
 
-    // JS-side round-trip: inject the registry into a fresh JSContext shim,
-    // load the path-resolver shape from api.js, and confirm every jsPath
-    // resolves to a non-null signal. Catches the case where a Channels.all
-    // entry references a JS path that doesn't exist (e.g. typo: "windows.focusd").
+    // JS-side round-trip: walk every bootstrapped jsPath against the loaded
+    // `sd` object and confirm it resolves to a non-null value. Catches a
+    // Channels.all entry naming a JS path that doesn't exist (e.g. a typo
+    // like "windows.focusd").
     test("every registered jsPath resolves to a real sd signal") {
-        // JSHarness's existing context has api.js already loaded WITHOUT
-        // __sd_channels (it's nil during bootstrap), so __sdSignalPaths
-        // came out empty + warned. Re-run the resolver here with the real
-        // bootstrap payload injected.
+        // JSHarness injects window.__sd_channels from Channels.jsBootstrapJSON
+        // before loading api.js, mirroring the daemon's document-start script.
         let ctx = JSHarness.context
-        ctx.evaluateScript("window.__sd_channels = \(Channels.jsBootstrapJSON);")
-
-        // Recompute the path map using api.js's resolver shape (mirrors
-        // the IIFE at the top of __sdSignalPaths). If any jsPath fails to
-        // resolve, the value lands null and the test logs the offender.
         let script = """
         (function(){
           var out = {};
@@ -205,7 +181,6 @@ func registerChannelsRegistryTests() {
         }
         try expect(missing.isEmpty,
             "registered jsPaths failed to resolve: \(missing.joined(separator: ", "))")
-        // Sanity: should match expected JS path count.
-        try expectEqual(Set(paths), expectedJSPaths)
+        try expectEqual(Set(paths), Set(Channels.all.compactMap { $0.jsPath }))
     }
 }

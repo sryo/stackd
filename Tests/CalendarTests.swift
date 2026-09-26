@@ -1,3 +1,4 @@
+import CoreGraphics
 import EventKit
 import Foundation
 
@@ -101,23 +102,21 @@ func registerCalendarTests() {
         r.dueDateComponents = comps
 
         let d = Calendar.describe(r)
-        // Value is a TimeInterval matching the components above. We don't
-        // assert the exact epoch (depends on the test host's local time
-        // zone) — just that the key is present and is a number.
-        try expect(d["due"] is TimeInterval, "due should be present as TimeInterval")
+        // Components carry no time zone, so they resolve in the host's
+        // local zone — compute the expected epoch the same way.
+        let expected = Foundation.Calendar.current.date(from: comps)!.timeIntervalSince1970
+        try expectEqual(d["due"] as? TimeInterval, expected)
     }
 
-    test("filteredCalendars returns nil for nil ids — predicate sees all calendars") {
+    test("filteredCalendars returns nil for nil or empty ids — predicate sees all calendars") {
         // The predicate factories on EKEventStore treat `nil` as "every
         // calendar I have access to." JS callers pass nil/empty `calendarIds`
-        // to opt out of filtering — guard that the helper agrees.
-        let out = Calendar.filteredCalendars(ids: nil, entityType: .event)
-        try expect(out == nil, "nil ids should yield nil (search all)")
-    }
-
-    test("filteredCalendars returns nil for empty ids — predicate sees all calendars") {
-        let out = Calendar.filteredCalendars(ids: [], entityType: .event)
-        try expect(out == nil, "empty ids should yield nil (search all)")
+        // to opt out of filtering — guard that the helper agrees (and never
+        // returns [] which would match nothing).
+        try expect(Calendar.filteredCalendars(ids: nil, entityType: .event) == nil,
+                   "nil ids should yield nil (search all)")
+        try expect(Calendar.filteredCalendars(ids: [], entityType: .reminder) == nil,
+                   "empty ids should yield nil (search all)")
     }
 
     test("sourceTypeName maps every well-known EKSourceType case") {
@@ -129,5 +128,12 @@ func registerCalendarTests() {
         try expectEqual(Calendar.sourceTypeName(.mobileMe),   "mobileme")
         try expectEqual(Calendar.sourceTypeName(.subscribed), "subscribed")
         try expectEqual(Calendar.sourceTypeName(.birthdays),  "birthdays")
+    }
+
+    test("colorHex renders an RGB CGColor as #RRGGBB, dropping alpha") {
+        // 0.5 * 255 = 127.5 rounds to 128 (0x80).
+        let c = CGColor(srgbRed: 1.0, green: 0.5, blue: 0.0, alpha: 0.3)
+        try expectEqual(Calendar.colorHex(c), "#FF8000")
+        try expect(Calendar.colorHex(nil) == nil, "nil color should yield nil")
     }
 }

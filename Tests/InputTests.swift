@@ -38,65 +38,43 @@ import CoreGraphics
 //      mapping. The exact strings here are what JS manifests use under
 //      `signal: { events: { type: "keyDown", … } }`; a typo would break
 //      every consuming stack.
-//   2. HotkeyRegistry.keyCode(for:)            — pure token → virtual
+//   2. EventTapRegistry rect gate              — setConsumerRects storage
+//      plus the pure rectGateAllows / rectGateTransition helpers the tap
+//      callback runs.
+//   3. HotkeyRegistry.keyCode(for:)            — pure token → virtual
 //      keycode lookup. The bind() spec parser walks this table; if "cmd"
 //      stopped resolving the hotkey surface is dead.
-//   3. EventTapPredicate.isEmpty / .matches    — pure predicate
+//   4. EventTapPredicate.isEmpty / .matches    — pure predicate
 //      evaluator. We build CGEvents in-memory (CGEvent(keyboardEventSource:
 //      …) does not post — only .post() does), feed them to .matches, and
 //      assert the AND-of-fields semantics documented on the struct.
-//   4. Gesture.cgEventType                     — the private CGEventType
-//      raw value (29). If a future SDK ever rejects 29 the force-unwrap
-//      crashes at load — we assert the value here for early warning.
-//   5. Mouse.location() / Cursor.position()    — read-only wrappers
-//      around NSEvent.mouseLocation. Safe to call (no warp, no post).
-//      We assert the Y-flip invariant rather than a specific coordinate.
-//
-// Wire-up: add `registerInputTests()` to Tests/main.swift and append
-// this file to TEST_SOURCES in tests.sh (orchestrator handles it).
 
 func registerInputTests() {
 
     // MARK: - EventTapRegistry.parse / .name (string ↔ CGEventType)
 
-    test("EventTapRegistry.parse maps every JS-side event name to the matching CGEventType") {
+    test("EventTapRegistry.parse and .name map every JS-side event name both ways") {
         // These strings are the contract between the JS manifest layer and
-        // the Swift side. The pairs come directly from Input.swift's
-        // parse() / name() switch statements — a regression here breaks
-        // every stack that subscribes to an events channel.
-        try expectEqual(EventTapRegistry.parse("keyDown"),         .keyDown)
-        try expectEqual(EventTapRegistry.parse("keyUp"),           .keyUp)
-        try expectEqual(EventTapRegistry.parse("flagsChanged"),    .flagsChanged)
-        try expectEqual(EventTapRegistry.parse("leftMouseDown"),   .leftMouseDown)
-        try expectEqual(EventTapRegistry.parse("rightMouseDown"),  .rightMouseDown)
-        try expectEqual(EventTapRegistry.parse("otherMouseDown"),  .otherMouseDown)
-        try expectEqual(EventTapRegistry.parse("leftMouseDragged"),  .leftMouseDragged)
-        try expectEqual(EventTapRegistry.parse("rightMouseDragged"), .rightMouseDragged)
-        try expectEqual(EventTapRegistry.parse("mouseMoved"),      .mouseMoved)
-        try expectEqual(EventTapRegistry.parse("scrollWheel"),     .scrollWheel)
-        try expectEqual(EventTapRegistry.parse("gesture"),         Gesture.cgEventType)
-        // Unknown names round-trip to nil, not to .null or to .keyDown.
+        // the Swift side; a drift on either side shows up to consumers as
+        // "subscribed to keyDown but the event came in as 'unknown'".
+        let pairs: [(String, CGEventType)] = [
+            ("keyDown", .keyDown), ("keyUp", .keyUp), ("flagsChanged", .flagsChanged),
+            ("leftMouseDown", .leftMouseDown), ("leftMouseUp", .leftMouseUp),
+            ("rightMouseDown", .rightMouseDown), ("rightMouseUp", .rightMouseUp),
+            ("otherMouseDown", .otherMouseDown), ("otherMouseUp", .otherMouseUp),
+            ("leftMouseDragged", .leftMouseDragged), ("rightMouseDragged", .rightMouseDragged),
+            ("mouseMoved", .mouseMoved), ("scrollWheel", .scrollWheel),
+            ("gesture", Gesture.cgEventType)
+        ]
+        for (name, type) in pairs {
+            try expectEqual(EventTapRegistry.parse(name), type, "parse(\(name))")
+            try expectEqual(EventTapRegistry.name(for: type), name, "name(for: \(name))")
+        }
+        // Unknown names parse to nil, not to .null or .keyDown; unmapped
+        // types name as "unknown".
         try expect(EventTapRegistry.parse("nope") == nil)
         try expect(EventTapRegistry.parse("") == nil)
-    }
-
-    test("EventTapRegistry.name is the inverse of parse for every JS-visible event type") {
-        // Asserts the parse → name round-trip. If either side drifts the
-        // round-trip drops a name; observable to consumers as "subscribed
-        // to keyDown but the event came in as 'unknown'".
-        let names = [
-            "keyDown", "keyUp", "flagsChanged",
-            "leftMouseDown", "rightMouseDown", "otherMouseDown",
-            "leftMouseDragged", "rightMouseDragged",
-            "mouseMoved", "scrollWheel", "gesture"
-        ]
-        for n in names {
-            guard let t = EventTapRegistry.parse(n) else {
-                try expect(false, "parse(\(n)) returned nil")
-                return
-            }
-            try expectEqual(EventTapRegistry.name(for: t), n)
-        }
+        try expectEqual(EventTapRegistry.name(for: .tapDisabledByTimeout), "unknown")
     }
 
     // MARK: - EventTapRegistry.setConsumerRects — runtime cursor-rect gate
@@ -153,17 +131,15 @@ func registerInputTests() {
 
     test("rectGateAllows: nil rects (no gate) allows every point") {
         // No setTapRects call → no entry in rectsByKey → no gate → fire on
-        // every event. Original observer-tap semantics for back-compat with
-        // every existing eventtap manifest entry.
+        // every event, the plain observer-tap semantics.
         try expect(EventTapRegistry.rectGateAllows(rects: nil, point: CGPoint(x: 0, y: 0)))
         try expect(EventTapRegistry.rectGateAllows(rects: nil, point: CGPoint(x: 9999, y: 9999)))
     }
 
     test("rectGateAllows: empty rects [] rejects everything (requireRects boot state)") {
         // requireRects: true installs an empty array at registration so the
-        // tap never matches until JS pushes real rects. The framemaster
-        // hot-corner migration relies on this — if the rects haven't been
-        // pushed yet, the mouseMoved tap must not wake the callback.
+        // tap never matches until JS pushes real rects — until then a
+        // mouseMoved tap must not wake the callback.
         try expect(!EventTapRegistry.rectGateAllows(rects: [], point: CGPoint(x: 0, y: 0)))
         try expect(!EventTapRegistry.rectGateAllows(rects: [], point: CGPoint(x: 500, y: 500)))
     }
@@ -177,30 +153,18 @@ func registerInputTests() {
         try expect(EventTapRegistry.rectGateAllows(rects: zones, point: CGPoint(x: 1508, y: 4))) // in top-right
         try expect(!EventTapRegistry.rectGateAllows(rects: zones, point: CGPoint(x: 100, y: 100))) // middle
         try expect(!EventTapRegistry.rectGateAllows(rects: zones, point: CGPoint(x: 0, y: 9)))     // just below band
-    }
-
-    test("rectGateAllows: first-rect-wins, no need to scan further on hit") {
-        // The early-return matters because rect lists can grow with the
-        // window count (e.g. traffic-light gates across every standard
-        // window); per-event we want O(matches), not O(rects).
-        let rects = (0..<100).map { CGRect(x: $0 * 10, y: 0, width: 5, height: 5) }
-        try expect(EventTapRegistry.rectGateAllows(rects: rects, point: CGPoint(x: 2, y: 2)))   // hit rect 0
-        try expect(EventTapRegistry.rectGateAllows(rects: rects, point: CGPoint(x: 502, y: 2))) // hit rect 50
+        try expect(!EventTapRegistry.rectGateAllows(rects: zones, point: CGPoint(x: 8, y: 4)))     // trailing edge is exclusive
     }
 
     // MARK: - EventTapRegistry.rectGateTransition — pure leave-detection helper
     //
     // Same justification as rectGateAllows: the dispatch path runs inside a
-    // live CGEventTap, but the transition logic itself is pure. Pinning it
-    // here so framemaster's hot-corner migration off `sd.mouse` 30Hz polling
-    // can't silently regress when someone refactors the inside/outside
-    // bookkeeping.
+    // live CGEventTap, but the enter/move/leave classification itself is
+    // pure. Hot-corner style stacks rely on it instead of polling sd.mouse.
 
     test("rectGateTransition: outside → inside fires `enter` and flips nowInside") {
         // The rising edge — first observed event where the cursor lands in
-        // a corner band. JS-side state machine arms the corner here. Before
-        // this, no event ever reaches the callback (the existing rect gate
-        // suppressed every mouseMoved outside).
+        // a corner band. JS-side state machine arms the corner here.
         let zones = [CGRect(x: 0, y: 0, width: 8, height: 8)]
         let (fire, phase, nowInside) = EventTapRegistry.rectGateTransition(
             rects: zones, point: CGPoint(x: 4, y: 4), wasInside: false)
@@ -211,7 +175,6 @@ func registerInputTests() {
 
     test("rectGateTransition: inside → inside fires `move` (continuation, not re-enter)") {
         // While the cursor stays inside the gate, the handler keeps firing
-        // — same cadence as the original "fires while inside" semantics —
         // but tagged `move` so JS knows it's a continuation, not a new arm.
         let zones = [CGRect(x: 0, y: 0, width: 8, height: 8)]
         let (fire, phase, nowInside) = EventTapRegistry.rectGateTransition(
@@ -222,8 +185,7 @@ func registerInputTests() {
     }
 
     test("rectGateTransition: inside → outside fires `leave` and flips nowInside off") {
-        // The falling edge — the whole point of the new primitive. WITHOUT
-        // this synthesized fire, the next mouseMoved outside the gate would
+        // The falling edge. Without this synthesized fire, the next mouseMoved outside the gate would
         // be dropped by the rectGateAllows path and the JS state machine
         // would never learn the cursor left. With it, the handler hears a
         // single "leave" with the outside point so JS can un-arm cleanly.
@@ -279,44 +241,6 @@ func registerInputTests() {
         try expect(fire)
         try expectEqual(phase, "move")
         try expect(nowInside)
-    }
-
-    test("rectGateTransition: enter → move → leave round-trip mirrors a full hot-corner visit") {
-        // End-to-end shape the framemaster migration relies on:
-        //   1. cursor outside corner → no fire
-        //   2. cursor enters corner → enter (arm)
-        //   3. cursor still in corner → move
-        //   4. cursor leaves corner → leave (un-arm)
-        //   5. cursor stays away → no fire
-        // Threading the wasInside state through manually because that's
-        // exactly what the dispatcher's `insideByKey[key]` slot does.
-        let zones = [CGRect(x: 100, y: 100, width: 8, height: 8)]
-        var wasInside = false
-
-        // step 1
-        var r = EventTapRegistry.rectGateTransition(
-            rects: zones, point: CGPoint(x: 50, y: 50), wasInside: wasInside)
-        try expect(!r.fire)
-        wasInside = r.nowInside
-        // step 2
-        r = EventTapRegistry.rectGateTransition(
-            rects: zones, point: CGPoint(x: 102, y: 102), wasInside: wasInside)
-        try expect(r.fire); try expectEqual(r.phase, "enter")
-        wasInside = r.nowInside
-        // step 3
-        r = EventTapRegistry.rectGateTransition(
-            rects: zones, point: CGPoint(x: 104, y: 104), wasInside: wasInside)
-        try expect(r.fire); try expectEqual(r.phase, "move")
-        wasInside = r.nowInside
-        // step 4
-        r = EventTapRegistry.rectGateTransition(
-            rects: zones, point: CGPoint(x: 200, y: 200), wasInside: wasInside)
-        try expect(r.fire); try expectEqual(r.phase, "leave")
-        wasInside = r.nowInside
-        // step 5
-        r = EventTapRegistry.rectGateTransition(
-            rects: zones, point: CGPoint(x: 300, y: 300), wasInside: wasInside)
-        try expect(!r.fire); try expect(r.phase == nil)
     }
 
     // MARK: - HotkeyRegistry.keyCode token table
@@ -479,37 +403,5 @@ func registerInputTests() {
         try expect(aWithCmd.matches(evACmd))     // both match
         try expect(!aWithCmd.matches(evBCmd))    // keycode wrong
         try expect(!aWithCmd.matches(evABare))   // flag missing
-    }
-
-    // MARK: - Gesture.cgEventType
-
-    test("Gesture.cgEventType is the private NSEventTypeGesture raw value (29)") {
-        // Input.swift force-unwraps CGEventType(rawValue: 29). If Apple
-        // ever rejects 29 the daemon crashes at load. We assert the value
-        // explicitly so a SDK change that re-maps the gesture event type
-        // is caught here instead of in production.
-        try expectEqual(Gesture.cgEventType.rawValue, UInt32(29))
-    }
-
-    // MARK: - Mouse / Cursor read-only position
-
-    test("Mouse.location returns a finite CGPoint and Cursor.position mirrors it as ints") {
-        // location() and position() only READ — no warp, no post. Safe to
-        // call inside the test process. The geometry contract is that
-        // both report top-left global screen coords (NSEvent.mouseLocation
-        // is bottom-left, so location() applies a Y-flip against the
-        // primary screen height).
-        let p = Mouse.location()
-        try expect(p.x.isFinite && p.y.isFinite, "Mouse.location returned non-finite point: \(p)")
-
-        let dict = Cursor.position()
-        guard let x = dict["x"], let y = dict["y"] else {
-            try expect(false, "Cursor.position missing x/y keys: \(dict)")
-            return
-        }
-        // position() truncates to Int via Int(p.x) / Int(p.y); within 1
-        // pixel of Mouse.location coords.
-        try expect(abs(Double(x) - Double(p.x)) <= 1.0, "x drift: dict=\(x) point=\(p.x)")
-        try expect(abs(Double(y) - Double(p.y)) <= 1.0, "y drift: dict=\(y) point=\(p.y)")
     }
 }

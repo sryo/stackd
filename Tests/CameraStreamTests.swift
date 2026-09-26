@@ -5,46 +5,33 @@ import Foundation
 // pipeline itself isn't tested here — only the deterministic primitives
 // that gate it: fps throttling, format clamping, quality clamping, and
 // fps clamping.
-//
-// Wire-up: add `registerCameraStreamTests()` to Tests/main.swift and append
-// this file to TEST_SOURCES in tests.sh (orchestrator handles this).
 
 func registerCameraStreamTests() {
     // ── shouldEmit ─────────────────────────────────────────────────────────
-    test("shouldEmit at fps=10 with a 200ms gap returns true") {
-        // 1/10 = 100ms interval; 200ms gap is well past it.
-        try expect(CameraStream.shouldEmit(now: 1.2, lastEmit: 1.0, fps: 10))
+    test("shouldEmit emits once the gap reaches 1/fps and drops before it") {
+        try expect(CameraStream.shouldEmit(now: 1.2, lastEmit: 1.0, fps: 10), "200ms gap at 10fps")
+        try expect(!CameraStream.shouldEmit(now: 1.05, lastEmit: 1.0, fps: 10), "50ms gap at 10fps")
+        try expect(CameraStream.shouldEmit(now: 0.020, lastEmit: 0, fps: 60), "20ms gap at 60fps")
+        try expect(!CameraStream.shouldEmit(now: 0.010, lastEmit: 0, fps: 60), "10ms gap at 60fps")
     }
 
-    test("shouldEmit at fps=10 with a 50ms gap returns false") {
-        // 50ms < 100ms interval — drop the buffer.
-        try expect(!CameraStream.shouldEmit(now: 1.05, lastEmit: 1.0, fps: 10))
+    test("shouldEmit emits at exactly the interval (>=, not >)") {
+        // Exactly representable values so the boundary isn't decided by
+        // float rounding: 1/4 = 0.25 and 0.75 - 0.5 = 0.25.
+        try expect(CameraStream.shouldEmit(now: 0.75, lastEmit: 0.5, fps: 4))
     }
 
-    test("shouldEmit at fps=10 with exactly the interval returns true") {
-        // Boundary case: >= 1/fps must emit, not drop.
-        try expect(CameraStream.shouldEmit(now: 1.1, lastEmit: 1.0, fps: 10))
-    }
-
-    test("shouldEmit at fps=0 always returns true (no gate)") {
+    test("shouldEmit with fps <= 0 always returns true (no gate)") {
         // fps <= 0 disables throttling — the caller asked for raw cadence.
         try expect(CameraStream.shouldEmit(now: 0.001, lastEmit: 0, fps: 0))
-        try expect(CameraStream.shouldEmit(now: 1.0, lastEmit: 0.999, fps: 0))
-    }
-
-    test("shouldEmit at fps=60 with a 20ms gap returns true") {
-        // 1/60 ≈ 16.6ms; 20ms is just past it.
-        try expect(CameraStream.shouldEmit(now: 0.020, lastEmit: 0, fps: 60))
+        try expect(CameraStream.shouldEmit(now: 1.0, lastEmit: 0.999, fps: -1))
     }
 
     // ── normalizedFormat ───────────────────────────────────────────────────
-    test("normalizedFormat passes jpeg/png through") {
+    test("normalizedFormat passes jpeg/png through and collapses jpg to jpeg") {
         try expectEqual(CameraStream.normalizedFormat("jpeg"), "jpeg")
         try expectEqual(CameraStream.normalizedFormat("png"),  "png")
-    }
-
-    test("normalizedFormat collapses jpg alias to jpeg") {
-        try expectEqual(CameraStream.normalizedFormat("jpg"), "jpeg")
+        try expectEqual(CameraStream.normalizedFormat("jpg"),  "jpeg")
     }
 
     test("normalizedFormat falls back to jpeg for nil / empty / unknown") {

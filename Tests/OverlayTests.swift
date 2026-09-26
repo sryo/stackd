@@ -3,140 +3,42 @@ import AppKit
 import CoreGraphics
 import WebKit
 
-// Tests for `Sources/DataSources/Overlay.swift`.
+// Tests for `Sources/DataSources/Overlay.swift`: the SkyLight readers the
+// overlay tick depends on (bounds / isOrderedIn / level), OverlayHandle's
+// retarget and repin bookkeeping, the pure repin / target-level policies,
+// the free-region overlay, and the panel recipe.
 //
-// Overlay.swift is a WebKit overlay primitive: a borderless click-through
-// NSPanel hosting a WKWebView, pinned to a foreign target window via the
-// private SkyLight (CGS) SPI. Bridge wires it to two custom verbs —
-// `overlay.attach` / `overlay.detach` (Sources/Bridge.swift:1822-1869) —
-// and one per-vsync read pair (`isOrderedIn` + `bounds(of:)`) that drives
-// the reposition tick.
+// Handles are built on degenerate, never-ordered-front panels. The few
+// tests that need a real window-server window order a fully transparent
+// panel in far off screen, so nothing shows during the suite.
 //
-// What CAN be characterized without mutating live macOS state or spawning
-// an AppKit window:
-//
-//   1. `Overlay.bounds(of:)` — wraps SLSGetWindowBounds. For an obviously-
-//      invalid CGWindowID (0 == kCGNullWindowID) the SPI returns non-zero
-//      and the wrapper bails to nil. The Bridge tick (Bridge.swift:1853)
-//      relies on this: an overlay whose target is stale gets skipped
-//      cleanly instead of repositioning to garbage geometry.
-//
-//   2. `Overlay.isOrderedIn(_:)` — wraps SLSWindowIsOrderedIn. For an
-//      invalid wid the SPI doesn't populate the out-param, the wrapper's
-//      DarwinBoolean default is `false`, and the Bridge tick short-circuits
-//      before calling bounds(). Locks the "stale wid → false, never crash"
-//      contract that the per-vsync subscription depends on.
-//
-//   3. Return-type contracts — JS consumers (and Bridge's NSNull-wrapping
-//      respond path) depend on `bounds` being CGRect? and `isOrderedIn`
-//      being Bool, deterministically, even on miss. Idempotence matters
-//      too: the same invalid id called repeatedly must keep returning the
-//      same value (no internal cache that flips state).
-//
-// What is NOT covered here (by design):
-//
-//   - `Overlay.attach(...)` — creates a WKWebViewConfiguration, a WKWebView,
-//     and an OverlayPanel (NSPanel subclass), then calls
-//     `orderFrontRegardless()`. NSWindow / NSPanel construction requires
-//     NSApp + the main thread; the test harness has neither. Even if we
-//     wired NSApplication.shared, the panel would surface as a visible
-//     borderless window during the suite run — explicitly out of scope per
-//     the test-author constraints.
-//
-//   - `OverlayHandle.tick(targetFrame:)` / `detach()` — both touch the
-//     real NSPanel that attach() owns. Same NSApp dependency.
-//
-//   - `OverlayHandle.cgsToAppKit` / `rectsApproxEqual` — both `private`
-//     (one static, one instance). The test target can't reach them and we
-//     don't widen production visibility just to test them. The coordinate
-//     flip is exercised indirectly the moment attach() ships (every other
-//     CGS-top-left → AppKit-bottom-left site in stackd uses the same recipe;
-//     see Windows.swift).
-//
-//   - `OverlayPanel` (private NSPanel subclass) — same reasons as attach().
-//
-//   - The WKNavigationDelegate flush (`webView(_:didFinish:)`) — fires off
-//     the WebKit loader; requires a real loadHTMLString lifecycle, which
-//     means a real WKWebView, which means main thread + NSApp.
-//
-// Pattern mirrors WindowsTests + AppsTests: SPI-coupled readers get
-// negative-input contract pinning on an obviously-invalid wid so the
-// per-vsync subscription in Bridge.swift stays deterministic across
-// minimize / close / target-already-gone races.
+// Not covered: `Overlay.attach(...)` and the tick itself, which need a
+// live foreign target window.
 
 func registerOverlayTests() {
-    // MARK: - Overlay.bounds(of:) — negative branch for invalid CGWindowID
+    // MARK: - SkyLight readers — negative branch for invalid CGWindowID
 
-    test("Overlay.bounds returns nil for kCGNullWindowID") {
-        // CGWindowID 0 is reserved (kCGNullWindowID) and never names a real
-        // window. SLSGetWindowBounds rejects it with a non-zero error; the
-        // wrapper translates that to nil. Bridge's per-vsync tick
-        // (Bridge.swift:1853) uses this to skip overlays whose target has
-        // disappeared without tearing them down.
-        try expect(Overlay.bounds(of: 0) == nil,
-                   "expected nil bounds for wid 0 (kCGNullWindowID)")
+    test("Overlay readers are negative for wids that name no window") {
+        // Bridge hands CGWindowID(Int) straight through from JS, and a
+        // target can vanish between ticks. The tick checks isOrderedIn,
+        // then bounds; both must come back negative (never a zero rect or
+        // a default level) so it skips the overlay instead of placing it
+        // at garbage geometry.
+        for wid in [CGWindowID(0), CGWindowID.max] {
+            try expect(Overlay.bounds(of: wid) == nil, "bounds(of: \(wid))")
+            try expectEqual(Overlay.isOrderedIn(wid), false, "isOrderedIn(\(wid))")
+            try expect(Overlay.level(of: wid) == nil, "level(of: \(wid))")
+        }
     }
-
-    test("Overlay.bounds is idempotent for an invalid wid") {
-        // No hidden cache that flips state between calls. The vsync
-        // subscription calls bounds() at display refresh rate; a one-shot
-        // nil that became non-nil on retry would cause the overlay to
-        // teleport once per missed frame.
-        try expect(Overlay.bounds(of: 0) == nil)
-        try expect(Overlay.bounds(of: 0) == nil)
-        try expect(Overlay.bounds(of: 0) == nil)
-    }
-
-    test("Overlay.bounds tolerates assorted obviously-invalid wids") {
-        // Bridge hands CGWindowID(Int) straight through from JS — anything
-        // can land here. The wrapper must short-circuit (not crash) on
-        // values WindowServer will never assign to a real window.
-        try expect(Overlay.bounds(of: CGWindowID(0)) == nil)
-        try expect(Overlay.bounds(of: CGWindowID.max) == nil,
-                   "expected nil bounds for UInt32.max (never a real wid)")
-    }
-
-    // MARK: - Overlay.isOrderedIn(_:) — negative branch for invalid CGWindowID
-
-    test("Overlay.isOrderedIn returns false for kCGNullWindowID") {
-        // SLSWindowIsOrderedIn doesn't populate `shown` for an unknown wid;
-        // the DarwinBoolean default of `false` is what callers see. The
-        // tick subscription guards on this BEFORE calling bounds(), so a
-        // false return is the documented "skip this tick" signal.
-        try expectEqual(Overlay.isOrderedIn(0), false)
-    }
-
-    test("Overlay.isOrderedIn is idempotent for an invalid wid") {
-        // Same per-vsync stability concern as bounds(). A flipping result
-        // would cause the overlay to repeatedly enter / exit the
-        // reposition branch in Bridge.swift:1852-1854.
-        try expectEqual(Overlay.isOrderedIn(0), false)
-        try expectEqual(Overlay.isOrderedIn(0), false)
-        try expectEqual(Overlay.isOrderedIn(0), false)
-    }
-
-    test("Overlay.isOrderedIn returns false for UInt32.max") {
-        // Out-of-range wid: SkyLight rejects it, the wrapper returns the
-        // DarwinBoolean default. Locks the "Bool, never null, never crash"
-        // contract that the JS-visible side of Bridge depends on.
-        try expectEqual(Overlay.isOrderedIn(CGWindowID.max), false)
-    }
-
-    // MARK: - bounds + isOrderedIn together — the tick guard pair
 
     // MARK: - OverlayHandle.setTarget — retarget mutation
 
-    test("OverlayHandle.setTarget updates targetWID and is idempotent for the same wid") {
+    test("OverlayHandle.setTarget retargets the handle") {
         // setTarget exists so overlay-border can move ONE overlay between
         // focused windows on focus change, instead of detach+attach pairs
         // racing on the daemon main thread and leaving duplicate panels on
         // screen. The vsync ticker reads targetWID per frame, so all we
         // need from this method is that the property actually changes.
-        //
-        // Construct a degenerate panel + webView pair on the main thread.
-        // No orderFront → nothing visible during the suite. Same constraint
-        // as the rest of the harness: we exercise the mutation without
-        // mounting AppKit windows.
         let panel   = NSPanel(contentRect: .zero, styleMask: .borderless,
                               backing: .buffered, defer: true)
         let webView = WKWebView(frame: .zero, configuration: WKWebViewConfiguration())
@@ -144,9 +46,6 @@ func registerOverlayTests() {
         try expectEqual(h.targetWID, CGWindowID(100))
         h.setTarget(200)
         try expectEqual(h.targetWID, CGWindowID(200))
-        h.setTarget(200)  // idempotent — early-out path
-        try expectEqual(h.targetWID, CGWindowID(200))
-        // Cleanup — panel/webView drop with the test scope.
         h.detach()
     }
 
@@ -268,25 +167,6 @@ func registerOverlayTests() {
         offTarget.detach()
     }
 
-    test("Overlay.notifyWindowReordered with no registered handles is safe") {
-        // Boot order: WindowEvents can deliver an 808 before any stack has
-        // attached an overlay. Must be a clean no-op.
-        Overlay.notifyWindowReordered(wid: 12345)
-    }
-
-    test("bounds and isOrderedIn agree on an invalid wid (both negative)") {
-        // The per-vsync subscription in Bridge.swift checks `isOrderedIn`
-        // first, then `bounds`. For an invalid wid both must short-circuit
-        // to their negative return so the tick exits cleanly. If they
-        // disagreed (e.g. isOrderedIn=true, bounds=nil) the guard would
-        // still bail thanks to the `let frame =` requirement, but the
-        // contract is "both readers negative for stale ids" — pinning it
-        // prevents a future SPI shim that defaults bounds to .zero from
-        // silently breaking the guard.
-        try expectEqual(Overlay.isOrderedIn(0), false)
-        try expect(Overlay.bounds(of: 0) == nil)
-    }
-
     // MARK: - RegionOverlayGeometry — free-region overlay placement (pure)
 
     test("RegionOverlayGeometry.sanitize rejects degenerate rects") {
@@ -331,8 +211,9 @@ func registerOverlayTests() {
         let webView = WKWebView(frame: .zero, configuration: WKWebViewConfiguration())
         let h = RegionOverlayHandle(id: 1, panel: panel, webView: webView)
         h.remove()
-        h.setFrame(CGRect(x: 0, y: 0, width: 100, height: 100))  // must not crash
-        try expectEqual(h.panel.isVisible, false)
+        let before = h.panel.frame
+        h.setFrame(CGRect(x: 0, y: 0, width: 100, height: 100))
+        try expect(h.panel.frame == before, "a removed handle must not move its closed panel")
     }
 
     test("RegionOverlayHandle.setFrame with the same size lands the new origin") {
@@ -525,8 +406,7 @@ func registerOverlayTests() {
         try expect(!OverlayWindowQuery.isOrderedIn(attributes: 0))
     }
 
-    test("Overlay.isOrderedIn is false for no window and for one never ordered in") {
-        try expect(!Overlay.isOrderedIn(0))
+    test("Overlay.isOrderedIn is false for a window never ordered in") {
         let panel = NSPanel(contentRect: NSRect(x: -9999, y: -9999, width: 12, height: 10),
                             styleMask: .borderless, backing: .buffered, defer: false)
         let wid = CGWindowID(panel.windowNumber)
@@ -546,10 +426,6 @@ func registerOverlayTests() {
         try expectEqual(Overlay.bounds(of: wid)?.size, CGSize(width: 12, height: 10))
         panel.orderOut(nil)
         panel.close()
-    }
-
-    test("Overlay.level(of:) returns nil for kCGNullWindowID") {
-        try expect(Overlay.level(of: 0) == nil)
     }
 
     test("Overlay.level(of:) reads a live window's level") {

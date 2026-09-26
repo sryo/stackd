@@ -44,23 +44,22 @@ func registerSignalFirstTests() {
         try expectEqual(out, "60")
     }
 
-    test("signal.first(): unsubscribes after resolving (subsequent pushes don't re-fire .then)") {
+    test("signal.first(): unsubscribes once it resolves") {
+        // A promise resolves only once anyway, so count predicate calls:
+        // pushes after the match must not reach the handler any more.
         _ = JSHarness.context.evaluateScript("""
             window.__sd_push('battery', null);
-            window.__sft_count = 0;
-            sd.battery.first().then(v => { window.__sft_count += 1; });
+            window.__sft_calls = 0;
+            sd.battery.first(v => { window.__sft_calls += 1; return v != null; });
             window.__sd_push('battery', { percent: 30 });
+        """)
+        let atMatch = JSHarness.context.evaluateScript("window.__sft_calls")?.toInt32()
+        _ = JSHarness.context.evaluateScript("""
             window.__sd_push('battery', { percent: 40 });
             window.__sd_push('battery', { percent: 50 });
         """)
-        let out = JSHarness.context.evaluateScript("window.__sft_count")?.toString()
-        try expectEqual(out, "1")
-    }
-
-    test("signal.first(): works through the Proxy wrapper (own key, not payload fall-through)") {
-        // `first` is on the base signal object; the Proxy returns it via
-        // Reflect.get. Regression guard if someone moves the method off `base`.
-        let out = JSHarness.context.evaluateScript("typeof sd.battery.first")?.toString()
-        try expectEqual(out, "function")
+        let after = JSHarness.context.evaluateScript("window.__sft_calls")?.toInt32()
+        try expect((atMatch ?? 0) > 0, "predicate never ran")
+        try expectEqual(after, atMatch)
     }
 }

@@ -1,84 +1,54 @@
 import Foundation
 
-// FileWatcher is almost entirely impure: it wraps FSEventStreamCreate
-// against real paths, fires a C callback on the main dispatch queue, and
-// debounces with DispatchQueue.main.asyncAfter. None of that is testable
-// without (a) real filesystem events on a real watched directory or
-// (b) reaching into a private static Set inside a C-trampoline closure.
+// FileWatcher drives hot reload from FSEvents. Its one policy is which
+// changes count: stack-source extensions (and directory create/rename/
+// remove) reload; runtime data files a stack writes into its own folder
+// (SQLite WALs, plists, .log/.pid/.lock) must not, or every commit would
+// cycle every stack.
 //
-// The one piece of *policy* worth characterizing is the reload-extension
-// allowlist (FileWatcher.reloadExtensions) — the regression it exists to
-// prevent (digup.db-wal: 17 spurious reloads per idle session, see the
-// source comment) is exactly the kind of thing that would silently regress
-// if someone "helpfully" added "db" or "wal" or "log" to the set.
-//
-// The set itself is `private static`, and the path predicate
-// (`reloadExtensions.contains((path as NSString).pathExtension.lowercased())`)
-// lives inside an FSEventStreamCallback C trampoline with no public exit.
-// So these tests are *witness* tests: they replicate the exact predicate
-// the production callback applies, mirror the allowlist as documented in
-// source, and assert on the contract. If someone changes the allowlist in
-// FileWatcher.swift without updating this mirror, the production behavior
-// drifts silently — but the test fixture below makes the intended set
-// explicit, which is the best we can do without changing visibility.
+// The extension allowlist is private and applied inside the FSEvents C
+// callback, so this is exercised end-to-end against a throwaway temp
+// directory that is removed afterwards.
 
-private let expectedReloadExtensions: Set<String> = [
-    "js", "mjs", "html", "htm", "css", "json", "svg", "wasm"
-]
-
-// Mirror of the production predicate (FileWatcher.swift line 38-39).
-// If this diverges from the source, the witness tests stop being a
-// faithful characterization — keep them in sync by hand.
-private func shouldReload(path: String) -> Bool {
-    let ext = (path as NSString).pathExtension.lowercased()
-    return expectedReloadExtensions.contains(ext)
+private func spinMainRunLoop(for seconds: TimeInterval, until done: () -> Bool = { false }) {
+    let deadline = Date().addingTimeInterval(seconds)
+    while !done() && Date() < deadline {
+        RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.02))
+    }
 }
 
 func registerFileWatcherTests() {
-    test("witness: reload allowlist contains the stack-source extensions") {
-        // Stack authors write these; edits must trigger reload.
-        for ext in ["js", "mjs", "html", "htm", "css", "json", "svg", "wasm"] {
-            try expect(expectedReloadExtensions.contains(ext), "expected \(ext) in allowlist")
+    test("FileWatcher fires for stack-source edits (any case) but not for runtime data files") {
+        let fm = FileManager.default
+        let created = fm.temporaryDirectory.appendingPathComponent("stackd-filewatcher-\(UUID().uuidString)")
+        try fm.createDirectory(at: created, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: created) }
+        // FSEvents reports canonical paths; watch the /private/var form
+        // rather than the /var symlink the temp directory API hands back.
+        guard let real = realpath(created.path, nil) else {
+            throw Expectation(message: "realpath failed for \(created.path)")
         }
-    }
+        let dir = URL(fileURLWithPath: String(cString: real))
+        free(real)
 
-    test("witness: reload allowlist excludes sqlite/wal/plist/pid/lock/log runtime extensions") {
-        // The digup.db-wal regression (see FileWatcher.swift source comment):
-        // runtime data files written by stacks must NOT cycle the host.
-        for ext in ["db", "sqlite", "sqlite-wal", "wal", "shm", "plist", "pid", "lock", "log"] {
-            try expect(!expectedReloadExtensions.contains(ext), "\(ext) must NOT be in allowlist")
+        var fires = 0
+        let watcher = FileWatcher(paths: [dir.path], debounceMs: 50) { fires += 1 }
+        defer { watcher.stop() }
+        // The temp directory's own creation event can still be in flight when
+        // the stream starts, and directory events reload by design. Let it
+        // drain before measuring.
+        spinMainRunLoop(for: 0.6)
+        fires = 0
+
+        for name in ["data.db", "data.db-wal", "sd.sqlite-shm", "settings.plist", "stack.log", "stack.pid", ".DS_Store"] {
+            try Data("x".utf8).write(to: dir.appendingPathComponent(name))
         }
-    }
+        // FSEvents latency (0.2s) + debounce (50ms), with generous headroom.
+        spinMainRunLoop(for: 1.0)
+        try expectEqual(fires, 0, "runtime data files must not trigger a reload")
 
-    test("predicate accepts stack-source files regardless of case") {
-        try expect(shouldReload(path: "/x/y/index.html"))
-        try expect(shouldReload(path: "/x/y/INDEX.HTML"))
-        try expect(shouldReload(path: "/x/y/style.CSS"))
-        try expect(shouldReload(path: "/x/y/manifest.JSON"))
-        try expect(shouldReload(path: "/x/y/mod.MJS"))
-    }
-
-    test("predicate rejects runtime data files (regression: digup.db-wal cycling)") {
-        try expect(!shouldReload(path: "/x/y/sd.sqlite"))
-        try expect(!shouldReload(path: "/x/y/sd.sqlite-wal"))
-        try expect(!shouldReload(path: "/x/y/digup.db-wal"))
-        try expect(!shouldReload(path: "/x/y/sd.settings.plist"))
-        try expect(!shouldReload(path: "/x/y/stack.pid"))
-        try expect(!shouldReload(path: "/x/y/stack.lock"))
-        try expect(!shouldReload(path: "/x/y/stack.log"))
-    }
-
-    test("predicate rejects extensionless and dotfile paths") {
-        try expect(!shouldReload(path: "/x/y/README"))
-        try expect(!shouldReload(path: "/x/y/Makefile"))
-        try expect(!shouldReload(path: "/x/y/.DS_Store"))
-        // .DS_Store has pathExtension "" via NSString — empty string is
-        // not in the allowlist, so we're safe.
-        try expectEqual(("/x/y/.DS_Store" as NSString).pathExtension, "")
-    }
-
-    test("predicate handles paths with no directory component") {
-        try expect(shouldReload(path: "index.html"))
-        try expect(!shouldReload(path: "stack.db"))
+        try Data("x".utf8).write(to: dir.appendingPathComponent("index.JS"))
+        spinMainRunLoop(for: 3.0, until: { fires > 0 })
+        try expect(fires >= 1, "a stack-source edit should trigger a reload")
     }
 }

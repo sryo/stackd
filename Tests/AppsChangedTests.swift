@@ -1,9 +1,9 @@
 import Foundation
 
 /// Tests for `Bridge.appsDelta` — the pure diff that drives `sd.apps.changed`.
-/// Mirrors DisplaysChangedTests in shape; identity is bundleId and the
-/// equality predicate compares active / hidden / name. Previously this delta
-/// was hand-rolled inline in `startApps` with no coverage.
+/// Only the adapter-specific parts are covered here (identity is bundleId, the
+/// equality predicate compares active / hidden / name); the generic
+/// added/removed walk is covered by ComputeDeltaTests.
 func registerAppsChangedTests() {
     func app(_ bundleId: String, active: Bool = false, hidden: Bool = false, name: String? = nil) -> [String: Any] {
         return [
@@ -12,19 +12,6 @@ func registerAppsChangedTests() {
             "active":   active,
             "hidden":   hidden
         ]
-    }
-
-    test("empty → empty: no changes, no nowByBundle entries") {
-        let d = Bridge.appsDelta(snapshot: [], previous: [:])
-        try expectEqual(d.added.count + d.removed.count + d.changed.count, 0)
-        try expectEqual(d.nowByBundle.count, 0)
-    }
-
-    test("first snapshot from empty previous: all entries are added") {
-        let d = Bridge.appsDelta(snapshot: [app("com.a"), app("com.b")], previous: [:])
-        try expectEqual(d.added.count, 2)
-        try expectEqual(d.removed.count, 0)
-        try expectEqual(d.changed.count, 0)
     }
 
     test("removed: a quit app lands in `removed`") {
@@ -56,6 +43,13 @@ func registerAppsChangedTests() {
     test("identical snapshot: nothing fires (regression guard against dict-key noise)") {
         let prev: [String: [String: Any]] = ["com.a": app("com.a", active: true, hidden: false, name: "A")]
         let d = Bridge.appsDelta(snapshot: [app("com.a", active: true, hidden: false, name: "A")], previous: prev)
+        try expectEqual(d.changed.count + d.added.count + d.removed.count, 0)
+    }
+
+    test("fields outside active/hidden/name don't fire `changed`") {
+        var before = app("com.a"); before["pid"] = 100; before["launchedAt"] = 1.0
+        var after  = app("com.a"); after["pid"]  = 200; after["launchedAt"]  = 2.0
+        let d = Bridge.appsDelta(snapshot: [after], previous: ["com.a": before])
         try expectEqual(d.changed.count + d.added.count + d.removed.count, 0)
     }
 

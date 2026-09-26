@@ -17,17 +17,12 @@ func registerOverlayEventFollowTests() {
         try expectEqual(t.wids, [100])
     }
 
-    test("OverlayFollowTargets: a second overlay on the same wid leaves the set alone") {
+    test("OverlayFollowTargets: a second overlay on the same wid, or a repeated set, leaves the set alone") {
         var t = OverlayFollowTargets<Int>()
         _ = t.set(1, wid: 100)
         try expect(!t.set(2, wid: 100))
         try expectEqual(t.wids, [100])
-    }
-
-    test("OverlayFollowTargets: re-setting the same target is not a change") {
-        var t = OverlayFollowTargets<Int>()
-        _ = t.set(1, wid: 100)
-        try expect(!t.set(1, wid: 100))
+        try expect(!t.set(1, wid: 100), "re-setting the same target is not a change")
     }
 
     test("OverlayFollowTargets: retarget swaps the wid") {
@@ -183,14 +178,8 @@ func registerOverlayEventFollowTests() {
     test("WindowFrameInterest: tracked windows and overlay targets, sorted, no duplicates") {
         try expectEqual(WindowFrameInterest.list(tracked: [30, 10, 20], targets: [20, 5]),
                         [5, 10, 20, 30])
-    }
-
-    test("WindowFrameInterest: an overlay target AX doesn't track is still listed") {
-        try expectEqual(WindowFrameInterest.list(tracked: [], targets: [42]), [42])
-    }
-
-    test("WindowFrameInterest: nothing tracked and no targets is an empty list") {
-        try expectEqual(WindowFrameInterest.list(tracked: [], targets: []), [])
+        try expectEqual(WindowFrameInterest.list(tracked: [], targets: [42]), [42],
+                        "an overlay target AX doesn't track is still listed")
     }
 
     // MARK: kill switch

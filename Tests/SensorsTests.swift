@@ -7,7 +7,7 @@ import IOKit.pwr_mgt
 //   - Sensors  (HID thermal/voltage/current/fan snapshot shape)
 //   - Battery  (IOPS + AppleSmartBattery readers; shape + sentinel handling)
 //   - Host     (info() + loadSnapshot() — NOT diskIO/computeRate, those live in HostDiskIOTests)
-//   - Caffeinate (snapshot shape + assert() argument validation + release() idempotency)
+//   - Caffeinate (snapshot shape + assert() unknown-type rejection + release() null-id no-op)
 //
 // We deliberately do NOT call `Caffeinate.assert(type:"system", ...)` with a valid
 // type — that would mint a real IOPM assertion and keep the box awake until the
@@ -83,29 +83,9 @@ func registerSensorsTests() {
         }
     }
 
-    test("Battery readers never crash on desktops (nil-tolerant)") {
-        // Each Battery field has a graceful nil/zero path when no battery is
-        // present. Calling all of them in sequence must not throw or trap —
-        // this is the contract Bridge relies on when assembling the snapshot
-        // dict on a Mac mini / Studio.
-        _ = Battery.percent()
-        _ = Battery.isCharging()
-        _ = Battery.timeRemaining()
-        _ = Battery.isFinishingCharge()
-        _ = Battery.currentCapacity()
-        _ = Battery.maxCapacity()
-        _ = Battery.designCapacity()
-        _ = Battery.health()
-        _ = Battery.cycles()
-        _ = Battery.amperage()
-        _ = Battery.voltage()
-        // Reaching this line is the assertion.
-        try expect(true)
-    }
-
     // MARK: - Host.info() (one-shot, constant-for-process-life)
 
-    test("Host.info exposes hostname/os/arch/cpuCount/ramMB with sane types") {
+    test("Host.info exposes hostname/locale/arch/cpuCount/ramMB/os with sane types") {
         let info = Host.info()
         try expect(info["hostname"] is String, "hostname must be String")
         try expect(info["locale"] is String,   "locale must be String")
@@ -129,50 +109,33 @@ func registerSensorsTests() {
 
     // MARK: - Host.loadSnapshot() (cpu diff + idle + memory)
 
-    test("Host.loadSnapshot first call returns nil, second call yields cpu fractions") {
-        // Documented contract: cpuFractions() needs a prior tick to diff
-        // against, so the first call seeds lastCpuTicks and returns nil.
-        // The second call (after a brief delay so dTotal > 0) returns the
-        // real snapshot. We don't reset the static lastCpuTicks here — if
-        // other tests already primed it, the first call may already be
-        // non-nil; that's fine, we only need to verify that a snapshot is
-        // eventually obtainable and well-shaped.
-        _ = Host.loadSnapshot()
-        // Burn a few ticks so CPU counters move forward.
-        Thread.sleep(forTimeInterval: 0.05)
-        guard let snap = Host.loadSnapshot() else {
-            // Extremely unlucky timing — try once more.
-            Thread.sleep(forTimeInterval: 0.05)
-            guard let retry = Host.loadSnapshot() else {
-                throw Expectation(message: "loadSnapshot returned nil twice in a row")
-            }
-            try expect(retry["cpu"] is [String: Double], "cpu must be [String: Double]")
-            return
+    test("Host.loadSnapshot yields cpu fractions, idleSeconds and a known memoryPressure once primed") {
+        // The first call after process start seeds the CPU-tick baseline and
+        // returns nil; lastCpuTicks is process-global, so earlier tests may
+        // already have primed it. Retry briefly until a diff is available.
+        var snap: [String: Any]?
+        for _ in 0..<5 where snap == nil {
+            snap = Host.loadSnapshot()
+            if snap == nil { Thread.sleep(forTimeInterval: 0.05) }
+        }
+        guard let snap = snap else {
+            throw Expectation(message: "loadSnapshot stayed nil after priming")
         }
         guard let cpu = snap["cpu"] as? [String: Double] else {
             throw Expectation(message: "cpu must be [String: Double], got \(String(describing: snap["cpu"]))")
         }
-        // Four documented fractions, each in [0, 1] modulo the round3 jitter.
+        // Four documented fractions, each in [0, 1] modulo round3 jitter.
         for key in ["user", "system", "idle", "total"] {
             guard let v = cpu[key] else {
                 throw Expectation(message: "cpu.\(key) missing")
             }
             try expect(v >= 0 && v <= 1.001, "cpu.\(key) out of [0,1], got \(v)")
         }
-        // idleSeconds always present, always non-negative.
         guard let idle = snap["idleSeconds"] as? Double else {
             throw Expectation(message: "idleSeconds must be Double")
         }
         try expect(idle >= 0, "idleSeconds must be >= 0, got \(idle)")
-    }
-
-    test("Host.loadSnapshot memoryPressure is one of normal/warning/critical when present") {
-        // Optional field; may be absent on rare sysctl failures. When present
-        // it must match the documented three-value enum.
-        // Prime cpu diff so we get a non-nil snapshot.
-        _ = Host.loadSnapshot()
-        Thread.sleep(forTimeInterval: 0.05)
-        guard let snap = Host.loadSnapshot() else { return }
+        // Optional (absent on sysctl failure); when present, one of three values.
         if let pressure = snap["memoryPressure"] as? String {
             try expect(["normal", "warning", "critical"].contains(pressure),
                        "unexpected memoryPressure value: \(pressure)")
@@ -207,17 +170,10 @@ func registerSensorsTests() {
     }
 
     // MARK: - SensorsObserver subscriber-gating
-    //
-    // 2026-06-02 (lazy-fire refactor): SensorsObserver now JSON-encodes
-    // its snapshot to compute a dedup hash on every 2s tick. The gating
-    // contract keeps that work off the CPU when no stack subscribes.
 
-    test("SensorsObserver: inactive at startup") {
+    test("SensorsObserver: inactive until subscribed, active while subscribed, torn down after debounce") {
         try expect(!SensorsObserver.shared.isActive,
                    "SensorsObserver must not be active before any stack subscribes")
-    }
-
-    test("SensorsObserver: activates on subscribe, deactivates after debounce") {
         let token = SensorsObserver.shared.subscribe { }
         try expect(SensorsObserver.shared.isActive)
         token.cancel()

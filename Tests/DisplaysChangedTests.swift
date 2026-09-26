@@ -1,8 +1,9 @@
 import Foundation
 
 /// Tests for `Bridge.displaysDelta` — the pure diff that drives
-/// `sd.displays.changed`. Mirrors WindowsChangedTests in shape; the
-/// equality predicate differs (brightness + frame vs title + frame).
+/// `sd.displays.changed`. Only the adapter-specific parts are covered here
+/// (identity is displayID, the equality predicate compares brightness +
+/// frame); the generic added/removed walk is covered by ComputeDeltaTests.
 func registerDisplaysChangedTests() {
     func disp(_ id: Int, brightness: Float? = 0.5, frame: (Int, Int, Int, Int) = (0, 0, 1512, 982)) -> [String: Any] {
         return [
@@ -11,19 +12,6 @@ func registerDisplaysChangedTests() {
             "brightness": brightness as Any? ?? NSNull(),
             "frame":      ["x": frame.0, "y": frame.1, "w": frame.2, "h": frame.3]
         ]
-    }
-
-    test("empty → empty: no changes, no nowByID entries") {
-        let d = Bridge.displaysDelta(snapshot: [], previous: [:])
-        try expectEqual(d.added.count + d.removed.count + d.changed.count, 0)
-        try expectEqual(d.nowByID.count, 0)
-    }
-
-    test("first snapshot from empty previous: all entries are added") {
-        let d = Bridge.displaysDelta(snapshot: [disp(1), disp(2)], previous: [:])
-        try expectEqual(d.added.count, 2)
-        try expectEqual(d.removed.count, 0)
-        try expectEqual(d.changed.count, 0)
     }
 
     test("removed: external display unplug lands in `removed`") {
@@ -52,13 +40,15 @@ func registerDisplaysChangedTests() {
         try expectEqual(d.changed.count + d.added.count + d.removed.count, 0)
     }
 
-    test("nil brightness on both sides isn't 'changed'") {
-        // Built-in DDC failure mode: getBrightness returns nil. Both ticks
-        // see nil → not a change. Guards against firing 'changed' on every
-        // poll of an external display that doesn't implement the VCP read.
+    test("unreadable brightness: nil → nil is quiet, nil → value is `changed`") {
+        // External displays without DDC read support report nil brightness
+        // on every poll; that must not fire 'changed' each tick. A read that
+        // starts succeeding is a real transition.
         let prev: [Int: [String: Any]] = [1: disp(1, brightness: nil)]
-        let d = Bridge.displaysDelta(snapshot: [disp(1, brightness: nil)], previous: prev)
-        try expectEqual(d.changed.count, 0)
+        let quiet = Bridge.displaysDelta(snapshot: [disp(1, brightness: nil)], previous: prev)
+        try expectEqual(quiet.changed.count, 0)
+        let readable = Bridge.displaysDelta(snapshot: [disp(1, brightness: 0.5)], previous: prev)
+        try expectEqual(readable.changed.count, 1)
     }
 
     test("mixed add+remove+change in one tick (display arrangement event)") {

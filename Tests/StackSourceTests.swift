@@ -3,8 +3,7 @@ import Foundation
 /// Characterization tests for `StackSource.loadFolder(at:defaults:)`. Channel
 /// inference is covered in ChannelInferenceTests; here we exercise manifest
 /// loading, defaults merging, sourceText aggregation, and the failure modes
-/// (missing dir, missing manifest, malformed JSON, decode failure). Required
-/// manifest fields per StackManifest: id, name, size, permissions.
+/// (missing dir, missing manifest, malformed JSON, decode failure).
 func registerStackSourceTests() {
     func makeTempDir() -> String {
         let dir = FileManager.default.temporaryDirectory
@@ -45,8 +44,7 @@ func registerStackSourceTests() {
     test("loadFolder: manifest missing required fields returns nil") {
         let dir = makeTempDir()
         defer { try? FileManager.default.removeItem(atPath: dir) }
-        // {} fails StackManifest decoding (id/name/size/permissions all
-        // required).
+        // {} fails StackManifest decoding (id / name / permissions are required).
         write("{}", to: dir + "/stack.json")
         try expect(StackSource.loadFolder(at: dir, defaults: [:]) == nil)
     }
@@ -65,12 +63,9 @@ func registerStackSourceTests() {
     }
 
     test("loadFolder: sourceText walks subdirectories recursively") {
-        // Real stacks (windowscape, cloudpad, bar) split source into
-        // `modules/`, `items/`, `assets/`. Without recursive scan the
-        // top-level index.html / index.js sees a stub and every
-        // permission referenced only in a submodule fails to infer —
-        // shipped 2026-06-04, broke windowscape tiling because every
-        // sd.windows.setFrame call lives in modules/tiler.js.
+        // Structured stacks split source into `modules/`, `items/`,
+        // `assets/`. A top-level-only scan would miss every permission
+        // referenced solely in a submodule.
         let dir = makeTempDir()
         defer { try? FileManager.default.removeItem(atPath: dir) }
         write(minimalManifest, to: dir + "/stack.json")
@@ -87,13 +82,9 @@ func registerStackSourceTests() {
         }
         try expect(src.sourceText.contains("sd.fs.read"), "module file missed by walker")
         try expect(src.sourceText.contains("sd.proc.exec"), "nested-subdir file missed by walker")
-        // Inference layered on top must see both submodule references.
-        let perms = ChannelInference.infer(from: src.sourceText)
-        try expect(perms.contains("fs"))
-        try expect(perms.contains("proc"))
     }
 
-    test("loadFolder: sourceText aggregates html/css/js/mjs contents") {
+    test("loadFolder: sourceText aggregates html/css/js/mjs, skips other and hidden files") {
         let dir = makeTempDir()
         defer { try? FileManager.default.removeItem(atPath: dir) }
         write(minimalManifest, to: dir + "/stack.json")
@@ -101,8 +92,9 @@ func registerStackSourceTests() {
         write(".b { color: red }", to: dir + "/index.css")
         write("const c = 1;", to: dir + "/index.js")
         write("export const d = 2;", to: dir + "/extra.mjs")
-        // README.md should NOT be scanned.
+        // Non-source files and hidden files are NOT scanned.
         write("# ignored", to: dir + "/README.md")
+        write("sd.hidden.leak", to: dir + "/.hidden.js")
 
         guard let src = StackSource.loadFolder(at: dir, defaults: [:]) else {
             try expect(false, "expected non-nil StackSource"); return
@@ -112,6 +104,7 @@ func registerStackSourceTests() {
         try expect(src.sourceText.contains("const c = 1;"), "js missing")
         try expect(src.sourceText.contains("export const d = 2;"), "mjs missing")
         try expect(!src.sourceText.contains("# ignored"), "md leaked into sourceText")
+        try expect(!src.sourceText.contains("sd.hidden.leak"), "hidden file leaked into sourceText")
     }
 
     test("loadFolder: defaults merge — manifest overrides defaults") {

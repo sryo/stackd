@@ -89,15 +89,17 @@ func registerHandlersRegisterTests() {
         try expectEqual(out, "20")
     }
 
-    test("legacy: bare window.onHotkey_<name> = fn assignment still works (no migration required)") {
+    test("hotkey.on: a stale disposer does not clear a newer handler") {
         let out = JSHarness.context.evaluateScript("""
         (function() {
-          window.__hr_legacy = 0;
-          window.onHotkey_hrLegacy = () => { window.__hr_legacy += 1; };
-          window.onHotkey_hrLegacy();
-          return String(window.__hr_legacy);
+          window.__hr_stale = "";
+          const stopFirst = sd.hotkey.on("hrStale", () => { window.__hr_stale = "first"; });
+          sd.hotkey.on("hrStale", () => { window.__hr_stale = "second"; });
+          stopFirst();
+          if (typeof window.onHotkey_hrStale === "function") window.onHotkey_hrStale();
+          return window.__hr_stale;
         })()
         """)?.toString()
-        try expectEqual(out, "1")
+        try expectEqual(out, "second")
     }
 }
