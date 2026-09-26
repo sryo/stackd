@@ -222,8 +222,8 @@ final class OverlayHandle: NSObject, WKNavigationDelegate {
         arm()
     }
 
-    /// The motion engine just wrote `frame` for the target: place the panel
-    /// there now, on the same main-thread turn as the write.
+    /// The target app just applied `frame`, written by the motion engine:
+    /// place the panel there now, ahead of the window server's report.
     func followCommanded(_ frame: CGRect) {
         if released || !started { return }
         commandedFrame = frame
@@ -1100,8 +1100,8 @@ enum Overlay {
         OverlayEventFollow.dropTarget(wid: wid)
     }
 
-    /// The motion engine wrote `frame` for `wid`: every overlay tracking it
-    /// moves there now. Main thread only.
+    /// A motion-engine write of `frame` for `wid` landed: every overlay
+    /// tracking it moves there now. Main thread only.
     static func followCommandedFrame(wid: CGWindowID, frame: CGRect) {
         for handle in liveHandles.allObjects where handle.targetWID == wid {
             handle.followCommanded(frame)

@@ -597,6 +597,34 @@ private extension CGRect {
     }
 }
 
+/// What overlays attached to an animating window do when one of the
+/// engine's writes for it lands.
+///
+/// Overlays follow frames the app has applied, not frames the tick has
+/// commanded. Moving or reshaping the panel while the target app is still
+/// applying the same frame on its writer queue lets the window server hold
+/// both windows' updates together: the target stops answering AX, the
+/// daemon's next synchronous window-server call (SLSWindowIsOrderedIn in the
+/// overlay tick) blocks, and the animation starts ~0.5s late and jumps to
+/// its end. After the write returns, the panel update no longer overlaps it.
+enum MotionOverlaySync {
+    enum Action: Equatable {
+        case follow(CGRect)
+        /// Back to live reads of the target's bounds.
+        case end
+        case none
+    }
+
+    /// `generation` is the write's registration; `current` the one now
+    /// animating the window (nil once it settled or was cancelled).
+    static func onLanded(_ write: MotionPlanner.FrameWrite, generation: UInt64,
+                         timedOut: Bool, current: UInt64?) -> Action {
+        if write.isFinal { return current == nil ? .end : .none }
+        guard !timedOut, current == generation else { return .none }
+        return .follow(write.frame)
+    }
+}
+
 /// Per-app cache of the AXEnhancedUserInterface probe, so a write batch
 /// doesn't pay an extra AX read every frame. Entries age out after `ttl`:
 /// assistive tools flip the attribute at runtime, and a stale "on" would
@@ -887,12 +915,8 @@ final class WindowMotionEngine {
         if planned.isFinal { enforcedSizes[wid] = nil }
         guard let write = planned.honoring(enforcedSize: enforced) else { return }
         FrameLedger.shared.recordWrite(windowID: wid, frame: write.frame)
-        // Overlays on the window follow the frame just commanded, in this
-        // same turn, rather than waiting for the window server to report
-        // the move. After the settle frame they go back to live reads.
-        Overlay.followCommandedFrame(wid: wid, frame: write.frame)
-        if write.isFinal { Overlay.endCommandedFrame(wid: wid) }
-
+        // Overlays on the window follow each frame when its write lands
+        // (finishDrain, see MotionOverlaySync), not here.
         let generation = settle?.key ?? planner.key(for: wid) ?? 0
         if write.isFinal {
             let el = elements.removeValue(forKey: wid)
@@ -903,6 +927,7 @@ final class WindowMotionEngine {
             guard WindowsByID.batchSink == nil,
                   let element = el ?? WindowsByID.elementFor(windowID: wid),
                   let writer = writer(for: element) else {
+                Overlay.endCommandedFrame(wid: wid)
                 done(WindowsByID.setFrame(
                     windowID: wid,
                     x: write.frame.origin.x, y: write.frame.origin.y,
@@ -987,6 +1012,12 @@ final class WindowMotionEngine {
                 let f = r.entry.write.frame
                 ok = WindowsByID.setFrame(windowID: wid, x: f.origin.x, y: f.origin.y,
                                           w: f.size.width, h: f.size.height)
+            }
+            switch MotionOverlaySync.onLanded(r.entry.write, generation: r.entry.generation,
+                                              timedOut: r.timedOut, current: current) {
+            case .follow(let frame): Overlay.followCommandedFrame(wid: wid, frame: frame)
+            case .end: Overlay.endCommandedFrame(wid: wid)
+            case .none: break
             }
             for id in r.entry.callbacks {
                 writeCallbacks.removeValue(forKey: id)?(ok)
