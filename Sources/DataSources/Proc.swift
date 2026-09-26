@@ -45,10 +45,22 @@ enum Proc {
             return
         }
 
-        // Drain pipes on a background queue; main-thread blocking is bad form.
+        // Drain both pipes concurrently: reading one to EOF before the other
+        // leaves a child that fills the unread pipe's buffer blocked on write.
+        var stdoutData = Data()
+        var stderrData = Data()
+        let drained = DispatchGroup()
+        drained.enter()
         DispatchQueue.global(qos: .utility).async {
-            let stdoutData = (try? outPipe.fileHandleForReading.readToEnd()) ?? Data()
-            let stderrData = (try? errPipe.fileHandleForReading.readToEnd()) ?? Data()
+            stdoutData = (try? outPipe.fileHandleForReading.readToEnd()) ?? Data()
+            drained.leave()
+        }
+        drained.enter()
+        DispatchQueue.global(qos: .utility).async {
+            stderrData = (try? errPipe.fileHandleForReading.readToEnd()) ?? Data()
+            drained.leave()
+        }
+        drained.notify(queue: .global(qos: .utility)) {
             task.waitUntilExit()
             DispatchQueue.main.async {
                 completion([
@@ -69,6 +81,8 @@ enum Proc {
     // Streaming counterpart of Proc.exec. The on-callback fires once per
     // chunk with { stream: "stdout"|"stderr", chunk: <utf8 string> } as the
     // child writes, and once at exit with { stream: "exit", code, signal? }.
+    // "exit" is always the last event: it fires only after both pipes reach
+    // EOF, so no chunk trails it.
     // Buffered payloads are NOT re-sent on exit — callers that need a final
     // joined buffer accumulate the chunks themselves.
     //
@@ -93,38 +107,36 @@ enum Proc {
         task.standardOutput = outPipe
         task.standardError  = errPipe
 
-        // readabilityHandler fires on the global IO queue. Each non-empty
-        // read becomes one "stdout"/"stderr" event; an empty read means the
-        // child closed that pipe — clear the handler so we don't spin.
-        let drain: (String, FileHandle) -> Void = { stream, handle in
-            let data = handle.availableData
-            if data.isEmpty {
-                handle.readabilityHandler = nil
-                return
-            }
-            let chunk = String(data: data, encoding: .utf8) ?? ""
-            DispatchQueue.main.async {
-                onEvent(["stream": stream, "chunk": chunk])
-            }
-        }
-        outPipe.fileHandleForReading.readabilityHandler = { drain("stdout", $0) }
-        errPipe.fileHandleForReading.readabilityHandler = { drain("stderr", $0) }
+        // "exit" waits for three things: EOF on both pipes and the child's
+        // termination. Descendants that inherit the pipes keep them open, so
+        // their output still streams and "exit" follows it — same as
+        // Proc.exec, which reads both pipes to EOF.
+        let finished = DispatchGroup()
+        var exitPayload: [String: Any] = [:]
 
-        task.terminationHandler = { proc in
-            // Flush whatever was buffered between the last readability tick
-            // and termination — availableData on a closed pipe returns the
-            // remaining bytes without blocking. Then clear handlers so the
-            // empty-data callback (if any) doesn't fire a stray event.
-            for (label, pipe) in [("stdout", outPipe), ("stderr", errPipe)] {
-                let leftover = pipe.fileHandleForReading.availableData
-                pipe.fileHandleForReading.readabilityHandler = nil
-                if !leftover.isEmpty {
-                    let chunk = String(data: leftover, encoding: .utf8) ?? ""
-                    DispatchQueue.main.async {
-                        onEvent(["stream": label, "chunk": chunk])
-                    }
+        // readabilityHandler fires on a background queue, serialized per
+        // handle. Each non-empty read becomes one "stdout"/"stderr" event
+        // hopped to main; the empty read at EOF clears the handler and
+        // leaves the group — after every chunk from that pipe is already
+        // queued on main, ahead of the group's notify block.
+        for (label, pipe) in [("stdout", outPipe), ("stderr", errPipe)] {
+            finished.enter()
+            pipe.fileHandleForReading.readabilityHandler = { handle in
+                let data = handle.availableData
+                if data.isEmpty {
+                    handle.readabilityHandler = nil
+                    finished.leave()
+                    return
+                }
+                let chunk = String(data: data, encoding: .utf8) ?? ""
+                DispatchQueue.main.async {
+                    onEvent(["stream": label, "chunk": chunk])
                 }
             }
+        }
+
+        finished.enter()
+        task.terminationHandler = { proc in
             var payload: [String: Any] = [
                 "stream": "exit",
                 "code":   Int(proc.terminationStatus)
@@ -133,9 +145,8 @@ enum Proc {
                 // terminationStatus on signal death is the signal number.
                 payload["signal"] = Int(proc.terminationStatus)
             }
-            DispatchQueue.main.async {
-                onEvent(payload)
-            }
+            exitPayload = payload
+            finished.leave()
         }
 
         do {
@@ -153,6 +164,7 @@ enum Proc {
             return nil
         }
 
+        finished.notify(queue: .main) { onEvent(exitPayload) }
         return ProcStreamHandle(task: task)
     }
 }

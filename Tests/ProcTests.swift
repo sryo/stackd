@@ -7,8 +7,9 @@ import Foundation
 // spin the main run loop with a deadline. Launch failure of exec is the one
 // synchronous path (completion fires inline with code -1).
 //
-// Subprocesses are limited to /usr/bin/true, /bin/sh, /bin/cat and
-// /bin/sleep — deterministic, fast, and present on every macOS install.
+// Subprocesses are limited to /usr/bin/true, /bin/sh, /bin/cat, /bin/sleep
+// and head/yes inside sh — deterministic, fast, and present on every macOS
+// install.
 // Nothing touches user state (no osascript, pmset, shortcuts, networking).
 //
 // Not covered: AppleScript.run (separate entry point, OSAKit).
@@ -78,6 +79,20 @@ func registerProcTests() {
         try expectEqual(r["code"] as? Int, 15)
     }
 
+    test("Proc.exec drains stderr concurrently so a chatty stderr can't deadlock the child") {
+        // 200KB is several times the pipe buffer; reading stdout to EOF
+        // before touching stderr would leave the child blocked on write.
+        // The timeout is the safety net: a deadlock surfaces as code 15.
+        var result: [String: Any]?
+        Proc.exec(cmd: "/bin/sh", args: ["-c", "head -c 200000 /dev/zero >&2; echo ok"],
+                  timeoutSeconds: 4) { result = $0 }
+        procSpin(timeout: 8) { result != nil }
+        guard let r = result else { throw Expectation(message: "exec never completed") }
+        try expectEqual(r["code"] as? Int, 0)
+        try expectEqual(r["stdout"] as? String, "ok\n")
+        try expectEqual((r["stderr"] as? String)?.utf8.count, 200000)
+    }
+
     // MARK: - Proc.stream
 
     test("Proc.stream returns nil when the cmd path doesn't exist") {
@@ -106,7 +121,6 @@ func registerProcTests() {
         }
         try expect(handle != nil, "/bin/sh should launch")
         procSpin(timeout: 5) { exitEvent != nil }
-        procSpin(timeout: 0.1) { false } // a readability chunk can trail the exit event
         try expectEqual(exitEvent?["code"] as? Int, 0)
         try expect(exitEvent?["signal"] == nil, "clean exit must not carry a signal")
         let home = (NSHomeDirectory() as NSString).resolvingSymlinksInPath
@@ -130,5 +144,33 @@ func registerProcTests() {
         procSpin(timeout: 0.1) { false } // let any duplicate exit event land
         try expectEqual(exits.count, 1, "exactly one exit event")
         try expectEqual(exits.first?["signal"] as? Int, 15)
+    }
+
+    test("Proc.stream delivers every chunk before the exit event") {
+        // The backgrounded subshell keeps both pipes open and writes after
+        // sh itself exits — output must keep flowing until the pipes hit
+        // EOF, and only then does "exit" fire.
+        var stdout = ""
+        var chunksAfterExit = 0
+        var exited = false
+        let handle = Proc.stream(
+            cmd: "/bin/sh",
+            args: ["-c", "(for i in 1 2 3; do sleep 0.05; echo $i; done) & echo early"],
+            env: nil, cwd: nil
+        ) { event in
+            switch event["stream"] as? String {
+            case "exit":   exited = true
+            case "stdout":
+                if exited { chunksAfterExit += 1 }
+                stdout += event["chunk"] as? String ?? ""
+            default:       break
+            }
+        }
+        try expect(handle != nil, "/bin/sh should launch")
+        procSpin(timeout: 5) { exited }
+        try expect(exited, "exit event never fired")
+        procSpin(timeout: 0.3) { false } // let any straggler land
+        try expectEqual(chunksAfterExit, 0, "chunks delivered after exit")
+        try expectEqual(stdout, "early\n1\n2\n3\n")
     }
 }
