@@ -1647,6 +1647,44 @@ enum Gesture {
     /// Private CGEventType for gesture-class events. Numeric value 29.
     static let cgEventType = CGEventType(rawValue: 29)!
 
+    // Private gesture CGEventFields (layout from the vendored TouchEvents.c
+    // synthesizer): 110 gesture HID subtype, 113 magnification (float, the
+    // per-event scale delta NSEvent.magnification reports), 114 rotation
+    // (float, degrees), 115 swipe direction bits, 132 IOHIDEventPhaseBits.
+    private static let subtypeField        = CGEventField(rawValue: 110)!
+    private static let magnificationField  = CGEventField(rawValue: 113)!
+    private static let rotationField       = CGEventField(rawValue: 114)!
+    private static let swipeDirectionField = CGEventField(rawValue: 115)!
+    private static let phaseField          = CGEventField(rawValue: 132)!
+
+    /// Motion values of one gesture event, read straight off the CGEvent so
+    /// no NSEvent accessor can throw for a mismatched subtype. Always has
+    /// `gesturePhase`; `magnification` only on magnify, `rotation` only on
+    /// rotate, `swipeDirection` only on swipe.
+    static func motion(cgEvent: CGEvent) -> [String: Any] {
+        let subtype = cgEvent.getIntegerValueField(subtypeField)
+        var m: [String: Any] = [
+            "gesturePhase": ScrollWheel.phaseName(cgEvent.getIntegerValueField(phaseField))
+        ]
+        switch subtype {
+        case 0x08:
+            m["magnification"] = cgEvent.getDoubleValueField(magnificationField)
+        case 0x05:
+            m["rotation"] = cgEvent.getDoubleValueField(rotationField)
+        case 0x10:
+            switch cgEvent.getIntegerValueField(swipeDirectionField) {
+            case 1:  m["swipeDirection"] = "up"
+            case 2:  m["swipeDirection"] = "down"
+            case 4:  m["swipeDirection"] = "left"
+            case 8:  m["swipeDirection"] = "right"
+            default: break
+            }
+        default:
+            break
+        }
+        return m
+    }
+
     static func describe(cgEvent: CGEvent) -> [String: Any]? {
         guard let nsEvent = NSEvent(cgEvent: cgEvent) else { return nil }
         let subtype = Int(nsEvent.subtype.rawValue)
@@ -1691,13 +1729,15 @@ enum Gesture {
             ])
         }
 
-        return [
+        var out: [String: Any] = [
             "subtype": subtype,
             "subtypeName": subtypeName(subtype),
             "fingers": fingers,
             "phases": phases,
             "touches": touches
         ]
+        for (k, v) in motion(cgEvent: cgEvent) { out[k] = v }
+        return out
     }
 
     private static func subtypeName(_ s: Int) -> String {

@@ -94,6 +94,8 @@ Lowercased, split on `+`. Modifiers (any order): `cmd`/`command`/`meta` (⌘), `
 
 **Callback payload:** `{ type, keyCode, flags, x, y }`, plus `deltaX`/`deltaY` for `mouseMoved` and dragged variants, gesture fields for `gesture`, and `phase` only when `emitLeave` is active.
 
+`gesture` payloads carry `{ subtype, subtypeName, fingers, phases, touches, gesturePhase }` plus `magnification` (per-event scale delta) on `magnify`, `rotation` (degrees) on `rotate`, and `swipeDirection` (`"up"|"down"|"left"|"right"`) on `swipe`. `gesturePhase` uses the scroll phase names below.
+
 `scrollWheel` adds `{ deltaX, deltaY, fixedDeltaX, fixedDeltaY, scrollPhase, momentumPhase, isContinuous, senderId }`. `deltaX`/`deltaY` are point deltas and `fixedDelta*` the fixed-point line deltas, both with raw CoreGraphics signs (natural scrolling already applied). `scrollPhase` is `"none"|"mayBegin"|"began"|"changed"|"ended"|"cancelled"`; `momentumPhase` is `"none"|"began"|"changed"|"ended"`. Wheel mice report `isContinuous:false` and both phases `"none"`. `senderId` identifies the physical HID device (the same value for a gesture's scroll and momentum events; `null` for synthesized events).
 
 ## `defaults.json` (repo-wide, not per-stack)
