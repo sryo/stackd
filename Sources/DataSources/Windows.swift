@@ -823,23 +823,69 @@ enum WindowsByID {
     /// Thread-agnostic; the element's timeout is restored to the default.
     static func writeAxesAX(element el: AXUIElement, frame: CGRect,
                             size writeSize: Bool, position writePosition: Bool,
-                            timeout: Float) -> Bool {
+                            order: FrameWriteOrder, timeout: Float) -> Bool {
         AXUIElementSetMessagingTimeout(el, timeout)
         defer { AXUIElementSetMessagingTimeout(el, 0) }
         var timedOut = false
-        if writeSize {
+        func setSize() {
+            guard writeSize, !timedOut else { return }
             var size = frame.size
             if let sizeVal = AXValueCreate(.cgSize, &size) {
                 timedOut = AXUIElementSetAttributeValue(el, kAXSizeAttribute as CFString, sizeVal) == .cannotComplete
             }
         }
-        if writePosition && !timedOut {
+        func setPosition() {
+            guard writePosition, !timedOut else { return }
             var pos = frame.origin
             if let posVal = AXValueCreate(.cgPoint, &pos) {
                 timedOut = AXUIElementSetAttributeValue(el, kAXPositionAttribute as CFString, posVal) == .cannotComplete
             }
         }
+        switch order {
+        case .positionThenSize: setPosition(); setSize()
+        case .sizeThenPosition: setSize(); setPosition()
+        }
         return timedOut
+    }
+
+    /// The motion engine's settle frame: two setters in `order`, then a
+    /// size read-back, and a third size set only when the app reports a
+    /// size other than the one written.
+    ///
+    /// Diverges from hs.window:setFrame (and `writeFrameAX`), which always
+    /// sets size, position, size. The blind third set exists because a size
+    /// set can be clamped against the old position; ordering by grow vs.
+    /// shrink (see FrameWriteOrder) already avoids that clamp in the common
+    /// case, and the read-back catches the rest. Skipping the third set
+    /// saves one AX round trip and one extra app layout pass per settle.
+    /// Thread-agnostic.
+    static func settleFrameAX(element el: AXUIElement, frame: CGRect, order: FrameWriteOrder) -> Bool {
+        var pos = frame.origin
+        var sz = frame.size
+        guard let posVal = AXValueCreate(.cgPoint, &pos),
+              let szVal = AXValueCreate(.cgSize, &sz) else { return false }
+        var pOK: AXError
+        var sOK: AXError
+        switch order {
+        case .positionThenSize:
+            pOK = AXUIElementSetAttributeValue(el, kAXPositionAttribute as CFString, posVal)
+            sOK = AXUIElementSetAttributeValue(el, kAXSizeAttribute as CFString, szVal)
+        case .sizeThenPosition:
+            sOK = AXUIElementSetAttributeValue(el, kAXSizeAttribute as CFString, szVal)
+            pOK = AXUIElementSetAttributeValue(el, kAXPositionAttribute as CFString, posVal)
+        }
+        var readRef: CFTypeRef?
+        var readBack: CGSize?
+        if AXUIElementCopyAttributeValue(el, kAXSizeAttribute as CFString, &readRef) == .success,
+           let v = readRef {
+            var s = CGSize.zero
+            // swiftlint:disable:next force_cast
+            if AXValueGetValue(v as! AXValue, .cgSize, &s) { readBack = s }
+        }
+        if FrameWriteOrder.needsSizeReassert(target: frame, readBack: readBack) {
+            sOK = AXUIElementSetAttributeValue(el, kAXSizeAttribute as CFString, szVal)
+        }
+        return pOK == .success && sOK == .success
     }
 
     /// Single-window CGWindowList attribute dict. `.optionIncludingWindow`

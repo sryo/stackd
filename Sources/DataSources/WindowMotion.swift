@@ -81,6 +81,29 @@ enum MotionMath {
     }
 }
 
+/// Which AX attribute a frame write sets first. Growing position-first
+/// keeps the larger size from being clamped against the old origin (a
+/// window near a screen edge); shrinking size-first keeps the move from
+/// pushing the still-large window past an edge.
+enum FrameWriteOrder: Equatable {
+    case positionThenSize
+    case sizeThenPosition
+
+    static func pick(current: CGRect?, target: CGRect) -> FrameWriteOrder {
+        guard let c = current else { return .sizeThenPosition }
+        if target.width > c.width + 0.5 || target.height > c.height + 0.5 { return .positionThenSize }
+        return .sizeThenPosition
+    }
+
+    /// After a settle's two setters: re-set the size only when the app
+    /// reports a size other than the one written (it clamped the size set
+    /// against the position it had at the time).
+    static func needsSizeReassert(target: CGRect, readBack: CGSize?) -> Bool {
+        guard let r = readBack else { return false }
+        return abs(r.width - target.width) > 1 || abs(r.height - target.height) > 1
+    }
+}
+
 /// Pure scheduling core. One registration per window (last-write-wins).
 /// Start times are assigned by the FIRST tick a registration sees, not at
 /// register time — every window registered between two ticks starts on the
@@ -96,6 +119,7 @@ struct MotionPlanner {
         // carry both — the settle frame must stick.
         var writeSize: Bool = true
         var writePosition: Bool = true
+        var order: FrameWriteOrder = .sizeThenPosition
 
         /// This write at a size the app enforces. Mid-animation the size
         /// is left alone (position only), and a step that only changed the
@@ -239,7 +263,8 @@ struct MotionPlanner {
             let elapsed = max(0, now - startTime)
 
             if Self.isComplete(reg, elapsed: elapsed) {
-                writes.append(FrameWrite(windowID: windowID, frame: reg.to.motionRounded, isFinal: true))
+                writes.append(FrameWrite(windowID: windowID, frame: reg.to.motionRounded, isFinal: true,
+                                         order: .pick(current: reg.lastWritten, target: reg.to.motionRounded)))
                 finished.append(Finished(windowID: windowID, key: reg.key, settled: true))
                 active[windowID] = nil
                 continue
@@ -249,7 +274,8 @@ struct MotionPlanner {
             if frame != reg.lastWritten && !reg.stalled {
                 writes.append(FrameWrite(windowID: windowID, frame: frame, isFinal: false,
                                          writeSize: frame.size != reg.lastWritten.size,
-                                         writePosition: frame.origin != reg.lastWritten.origin))
+                                         writePosition: frame.origin != reg.lastWritten.origin,
+                                         order: .pick(current: reg.lastWritten, target: frame)))
                 reg.lastWritten = frame
             }
             active[windowID] = reg
@@ -815,12 +841,15 @@ final class WindowMotionEngine {
             let results = writer.withEnhancedUIOff { jobs.map { entry, element -> WriteResult in
                 guard let el = element else { return WriteResult(entry: entry, ok: false, timedOut: false) }
                 if entry.write.isFinal {
-                    return WriteResult(entry: entry, ok: WindowsByID.writeFrameAX(element: el, frame: entry.write.frame),
+                    return WriteResult(entry: entry,
+                                       ok: WindowsByID.settleFrameAX(element: el, frame: entry.write.frame,
+                                                                     order: entry.write.order),
                                        timedOut: false)
                 }
                 let timedOut = WindowsByID.writeAxesAX(
                     element: el, frame: entry.write.frame,
                     size: entry.write.writeSize, position: entry.write.writePosition,
+                    order: entry.write.order,
                     timeout: Self.intermediateWriteTimeout)
                 return WriteResult(entry: entry, ok: !timedOut, timedOut: timedOut)
             } }

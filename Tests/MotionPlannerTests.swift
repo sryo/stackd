@@ -235,4 +235,40 @@ func registerMotionPlannerTests() {
         let step = MotionPlanner.FrameWrite(windowID: 1, frame: rect(100, 50, 600, 400), isFinal: false)
         try expectEqual(step.honoring(enforcedSize: nil), step)
     }
+
+    test("FrameWriteOrder: growing writes position first, shrinking writes size first") {
+        let base = rect(100, 100, 400, 300)
+        try expectEqual(FrameWriteOrder.pick(current: base, target: rect(0, 0, 800, 300)), .positionThenSize)
+        try expectEqual(FrameWriteOrder.pick(current: base, target: rect(0, 0, 400, 301)), .positionThenSize)
+        try expectEqual(FrameWriteOrder.pick(current: base, target: rect(500, 0, 200, 300)), .sizeThenPosition)
+        try expectEqual(FrameWriteOrder.pick(current: base, target: rect(500, 0, 400, 300)), .sizeThenPosition,
+                        "a pure move has nothing to grow")
+        try expectEqual(FrameWriteOrder.pick(current: base, target: rect(0, 0, 800, 100)), .positionThenSize,
+                        "any growing axis puts position first")
+        try expectEqual(FrameWriteOrder.pick(current: nil, target: base), .sizeThenPosition)
+    }
+
+    test("planned writes carry the order for their step") {
+        var p = MotionPlanner()
+        _ = p.register(windowID: 1, from: rect(0, 0, 400, 300), to: rect(0, 0, 800, 600),
+                       duration: 1.0, easing: .linear)
+        _ = p.register(windowID: 2, from: rect(0, 0, 800, 600), to: rect(0, 0, 400, 300),
+                       duration: 1.0, easing: .linear)
+        _ = p.tick(now: 0)
+        let mid = p.tick(now: 0.5)
+        try expectEqual(mid.writes.first { $0.windowID == 1 }?.order, .positionThenSize)
+        try expectEqual(mid.writes.first { $0.windowID == 2 }?.order, .sizeThenPosition)
+        let done = p.tick(now: 2)
+        try expectEqual(done.writes.first { $0.windowID == 1 }?.order, .positionThenSize)
+        try expectEqual(done.writes.first { $0.windowID == 2 }?.order, .sizeThenPosition)
+    }
+
+    test("settle: a third size set only when the read-back size is off") {
+        let target = rect(0, 0, 800, 600)
+        try expect(!FrameWriteOrder.needsSizeReassert(target: target, readBack: CGSize(width: 800, height: 600)))
+        try expect(!FrameWriteOrder.needsSizeReassert(target: target, readBack: CGSize(width: 800.5, height: 599.5)))
+        try expect(FrameWriteOrder.needsSizeReassert(target: target, readBack: CGSize(width: 780, height: 600)))
+        try expect(!FrameWriteOrder.needsSizeReassert(target: target, readBack: nil),
+                   "an unreadable size is not evidence of a mismatch")
+    }
 }
