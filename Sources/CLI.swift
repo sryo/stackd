@@ -9,7 +9,7 @@ enum CLI {
       set <id|/regex/> --css <prop>=<value>     set a CSS custom property on one or many stacks
       bang <name> [KEY=VAL ...]                 fire a bang to stacks that handle it
       new <name> [--template <t>]               scaffold a new stack at ~/stackd/stacks/<name>/
-      doctor                                    validate every stack manifest in ~/stackd/stacks/
+      doctor                                    validate stack manifests + check private SPI
       help                                      this text
 
     Selectors:
@@ -119,6 +119,9 @@ enum CLI {
         let gestureReport = TrackpadSystemGestures.doctorLines(gestures).joined(separator: "\n")
         // print, like StackDoctor's per-stack lines, so the output keeps its order.
         print("\n\(gestureReport)")
+        let missingSPI = SkyLight.missingSymbols()
+        print("\n" + SkyLight.doctorLines(missing: missingSPI).joined(separator: "\n"))
+        issues += missingSPI.count
         print("\nchecked \(checked) stack(s), \(issues) issue(s).")
         return issues == 0 ? 0 : 1
     }

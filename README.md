@@ -144,7 +144,7 @@ Reach for a `<script>` when you need async work, event handlers, state machines,
 
 `sd.bind(target, signal, fmt?)` covers the common case (textContent, innerHTML, attributes, CSS vars, class toggles). For anything else, signals are subscribable: `sd.battery.subscribe(b => …)`. Template + script forms work side-by-side in the same stack.
 
-`stackd doctor` checks every manifest in `~/stackd/stacks/` for missing fields, typo permissions, and a few other footguns. It also lists the trackpad gestures macOS itself handles (swipes, three-finger drag, pinches) and their finger counts, so a gesture stack can avoid competing with the system.
+`stackd doctor` checks every manifest in `~/stackd/stacks/` for missing fields, typo permissions, and a few other footguns. It also lists the trackpad gestures macOS itself handles (swipes, three-finger drag, pinches) and their finger counts, so a gesture stack can avoid competing with the system. Finally it checks that every private SkyLight function stackd calls still exists on this macOS, since a missing one makes its primitive silently do nothing.
 
 ## System data (`sd.*`)
 
@@ -175,7 +175,7 @@ Available inside `{{ }}` templates and `import { sd } from "sd://runtime/api.js"
 | `sd.windows.setFrame / minimize / fullscreen / raise / focus / close / cornerRadius / snapshot / batch` | per-window actions (by AX or CGWindowID) |
 | `sd.spaces.all` / `sd.spaces.windowSpaces(id)` / `sd.spaces.minimizedWindows(spaceID)` | Spaces info via SkyLight SPI |
 | `sd.overlay.attach(windowId, draw)` | CG-context overlay pinned to another app's window (JankyBorders pattern) |
-| `sd.menubar.suppress / restore` | hide/restore system menu bar |
+| `sd.menubar.suppress / restore` | make the system menu bar transparent / restore it (it still takes clicks where no stack covers it) |
 | `sd.menubar.addItem(spec)` | add an NSStatusItem |
 | `sd.menu.popup(items)` | native NSMenu at the cursor |
 

@@ -5,7 +5,7 @@ import ApplicationServices
 //
 //   - StatusItemHandle / Menubar  — NSStatusBar items (sd.menubar.addItem)
 //   - MenuBarVisibility          — system menu-bar suppress/restore via
-//                                  CGSSetMenuBarVisibility (sd.menubar.suppress)
+//                                  SLSSetMenuBarInsetAndAlpha (sd.menubar.suppress)
 //   - PopupMenu                  — transient cursor-position context menu
 //                                  (sd.menu.popup)
 //   - MenubarItems               — read-only enumeration of every visible
@@ -186,12 +186,28 @@ enum Menubar {
 // MARK: - System menu-bar visibility (sd.menubar.suppress / restore)
 
 private enum SkyLightMenuBar {
-    typealias SetMenuBarVisibilityFn = @convention(c) (Bool) -> Void
-    static let setMenuBarVisibility: SetMenuBarVisibilityFn? = SkyLight.sym("CGSSetMenuBarVisibility")
+    /// (cid, inset, _, alpha). Only `alpha` reaches WindowServer, as a
+    /// system-override alpha for the menu bar on every display. The floats are
+    /// 32-bit: passing Doubles lands a zero in the alpha register. The
+    /// override belongs to our connection, so WindowServer drops it if the
+    /// daemon exits without restoring.
+    typealias SetInsetAndAlphaFn = @convention(c) (Int32, Float, Float, Float) -> Int32
+    typealias ResetOverrideAlphasFn = @convention(c) (Int32) -> Int32
+    static let setInsetAndAlpha: SetInsetAndAlphaFn? = SkyLight.sym("SLSSetMenuBarInsetAndAlpha")
+    static let resetOverrideAlphas: ResetOverrideAlphasFn? = SkyLight.sym("SLSResetMenuBarSystemOverrideAlphas")
+
+    static var available: Bool { setInsetAndAlpha != nil && resetOverrideAlphas != nil }
+
+    static func apply(hidden: Bool) {
+        if hidden { _ = setInsetAndAlpha?(SkyLight.cid, 0, 1, 0) }
+        else { _ = resetOverrideAlphas?(SkyLight.cid) }
+    }
 }
 
 /// Reference-counted system menu-bar visibility. Multiple stacks can suppress;
 /// the menu bar reappears only when every suppressor has called restore().
+/// A suppressed bar is transparent, not removed: it still takes clicks where
+/// no stack window covers it.
 enum MenuBarVisibility {
     private static let lock = NSLock()
     private static var suppressorCount = 0
@@ -199,12 +215,12 @@ enum MenuBarVisibility {
     /// Each suppress() returns a Token whose cancel decrements the refcount.
     /// Stacks adopt the Token into their scope so unload always pairs with
     /// suppression — no more leaks if a stack dies between suppress/restore.
-    /// Returns nil if SkyLight failed to load.
+    /// Returns nil if the SkyLight symbols are unavailable.
     static func suppress() -> Token? {
-        guard let fn = SkyLightMenuBar.setMenuBarVisibility else { return nil }
+        guard SkyLightMenuBar.available else { return nil }
         lock.lock()
         suppressorCount += 1
-        if suppressorCount == 1 { fn(false) }
+        if suppressorCount == 1 { SkyLightMenuBar.apply(hidden: true) }
         lock.unlock()
         var released = false
         return Token {
@@ -213,31 +229,25 @@ enum MenuBarVisibility {
             guard !released else { return }
             released = true
             suppressorCount = max(0, suppressorCount - 1)
-            if suppressorCount == 0 { fn(true) }
+            if suppressorCount == 0 { SkyLightMenuBar.apply(hidden: false) }
         }
     }
 
     /// Called on daemon shutdown / reload so we never leak the menu bar hidden.
     static func resetForReload() {
-        guard let fn = SkyLightMenuBar.setMenuBarVisibility else { return }
         lock.lock(); defer { lock.unlock() }
         if suppressorCount > 0 {
             suppressorCount = 0
-            fn(true)
+            SkyLightMenuBar.apply(hidden: false)
         }
     }
 
-    /// Called once at daemon startup. If a previous daemon died with the menu
-    /// bar suppressed (kill -9, crash, power loss), inherit a known-good state
-    /// rather than the user's stale "menubar hidden" surprise.
+    /// Called once at daemon startup so the daemon starts from a visible bar.
     static func forceRestoreOnLaunch() {
-        let handleOK = SkyLight.handle != nil
-        let symOK    = SkyLightMenuBar.setMenuBarVisibility != nil
-        log("SkyLight handle=\(handleOK) sym=\(symOK)")
-        guard let fn = SkyLightMenuBar.setMenuBarVisibility else { return }
+        log("SkyLight handle=\(SkyLight.handle != nil) menubar alpha=\(SkyLightMenuBar.available)")
         lock.lock(); defer { lock.unlock() }
         suppressorCount = 0
-        fn(true)
+        SkyLightMenuBar.apply(hidden: false)
     }
 }
 
