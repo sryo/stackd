@@ -90,12 +90,25 @@ enum MotionMath {
 struct MotionPlanner {
     struct FrameWrite: Equatable {
         let windowID: CGWindowID
-        let frame: CGRect
+        var frame: CGRect
         let isFinal: Bool
         // Axes that differ from the previous write. Final writes always
         // carry both — the settle frame must stick.
         var writeSize: Bool = true
         var writePosition: Bool = true
+
+        /// This write at a size the app enforces. Mid-animation the size
+        /// is left alone (position only), and a step that only changed the
+        /// size has nothing left to write (nil). The settle frame still
+        /// writes both axes, at the enforced size.
+        func honoring(enforcedSize: CGSize?) -> FrameWrite? {
+            guard let size = enforcedSize else { return self }
+            var out = self
+            out.frame.size = size
+            if isFinal { return out }
+            out.writeSize = false
+            return out.writePosition ? out : nil
+        }
     }
 
     struct Finished: Equatable {
@@ -332,6 +345,9 @@ final class FrameLedger {
     private var sizeQuantum: [CGWindowID: CGSize] = [:]
     private var retryUsed: Set<CGWindowID> = []
     private var writeGeneration: [CGWindowID: UInt64] = [:]
+    // Size the app held the window at after refusing a target size, keyed
+    // to that target size.
+    private var enforced: [CGWindowID: (target: CGSize, size: CGSize)] = [:]
 
     func recordWrite(windowID: CGWindowID, frame: CGRect, now: Double = CFAbsoluteTimeGetCurrent()) {
         lastApplied[windowID] = Applied(frame: frame, at: now)
@@ -354,6 +370,21 @@ final class FrameLedger {
         sizeQuantum[windowID] = nil
         retryUsed.remove(windowID)
         writeGeneration[windowID] = nil
+        enforced[windowID] = nil
+    }
+
+    /// The size the app enforced the last time it refused `targetSize` for
+    /// this window, so animation steps toward that same target can move the
+    /// window at the size it will end up at instead of re-asserting a size
+    /// the app rejects every frame. Asking with a different target size
+    /// forgets the refusal: the new size may well be honored.
+    func enforcedSize(windowID: CGWindowID, targetSize: CGSize) -> CGSize? {
+        guard let e = enforced[windowID] else { return nil }
+        if abs(e.target.width - targetSize.width) < 0.5, abs(e.target.height - targetSize.height) < 0.5 {
+            return e.size
+        }
+        enforced[windowID] = nil
+        return nil
     }
 
     func isSelf(windowID: CGWindowID, observed: CGRect, now: Double) -> Bool {
@@ -378,6 +409,7 @@ final class FrameLedger {
            dw <= max(Self.sizeToleranceFloor, q.width),
            dh <= max(Self.sizeToleranceFloor, q.height) {
             retryUsed.remove(windowID)
+            enforced[windowID] = nil
             return .converged
         }
 
@@ -398,7 +430,11 @@ final class FrameLedger {
                 width: max(existing.width, dw.rounded(.up)),
                 height: max(existing.height, dh.rounded(.up))
             )
+            enforced[windowID] = nil
             return .converged
+        }
+        if dw > Self.sizeToleranceFloor || dh > Self.sizeToleranceFloor {
+            enforced[windowID] = (target: target.size, size: observed.size)
         }
         return .refused
     }
@@ -524,6 +560,9 @@ final class WindowMotionEngine {
     // everywhere else in Windows.swift); the final write re-resolves.
     private var elements: [CGWindowID: AXUIElement] = [:]
     private var writers: [pid_t: AppFrameWriter] = [:]
+    // Size the app enforced last time it refused this animation's target
+    // size; read once per animation from the FrameLedger.
+    private var enforcedSizes: [CGWindowID: CGSize] = [:]
     private var writeCallbacks: [UInt64: (Bool) -> Void] = [:]
     private var nextCallbackID: UInt64 = 1
 
@@ -595,6 +634,7 @@ final class WindowMotionEngine {
             return
         }
         elements[windowID] = el
+        enforcedSizes[windowID] = FrameLedger.shared.enforcedSize(windowID: windowID, targetSize: to.size)
         let result = planner.register(
             windowID: windowID, from: current, to: to,
             duration: duration, easing: easing
@@ -610,6 +650,7 @@ final class WindowMotionEngine {
     func instantWriteWins(windowID: CGWindowID) {
         if let old = planner.cancel(windowID: windowID) {
             resolve(old)
+            enforcedSizes[windowID] = nil
             Overlay.endCommandedFrame(wid: windowID)
         }
     }
@@ -619,6 +660,7 @@ final class WindowMotionEngine {
         guard let old = planner.cancel(windowID: windowID) else { return false }
         resolve(old)
         elements[windowID] = nil
+        enforcedSizes[windowID] = nil
         Overlay.endCommandedFrame(wid: windowID)
         return true
     }
@@ -669,8 +711,11 @@ final class WindowMotionEngine {
         for done in settles.values { resolve(done) }
     }
 
-    private func apply(_ write: MotionPlanner.FrameWrite, settle: MotionPlanner.Finished?) {
-        let wid = write.windowID
+    private func apply(_ planned: MotionPlanner.FrameWrite, settle: MotionPlanner.Finished?) {
+        let wid = planned.windowID
+        let enforced = enforcedSizes[wid]
+        if planned.isFinal { enforcedSizes[wid] = nil }
+        guard let write = planned.honoring(enforcedSize: enforced) else { return }
         FrameLedger.shared.recordWrite(windowID: wid, frame: write.frame)
         // Overlays on the window follow the frame just commanded, in this
         // same turn, rather than waiting for the window server to report

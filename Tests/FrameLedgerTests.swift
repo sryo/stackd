@@ -56,6 +56,43 @@ func registerFrameLedgerTests() {
         try expect(l.isSelf(windowID: 6, observed: clamped, now: 0.1), "clamp echo is ours")
     }
 
+    test("a size refusal is remembered for its target size") {
+        let l = FrameLedger()
+        let target = rect(0, 0, 800, 600)
+        let clamped = rect(0, 0, 232, 231)
+        try expectEqual(l.enforcedSize(windowID: 9, targetSize: target.size), nil)
+        _ = l.verify(windowID: 9, target: target, observed: clamped)
+        _ = l.verify(windowID: 9, target: target, observed: clamped)
+        try expectEqual(l.enforcedSize(windowID: 9, targetSize: target.size), CGSize(width: 232, height: 231))
+    }
+
+    test("a new target size forgets the enforced size") {
+        let l = FrameLedger()
+        let target = rect(0, 0, 800, 600)
+        _ = l.verify(windowID: 9, target: target, observed: rect(0, 0, 232, 231))
+        _ = l.verify(windowID: 9, target: target, observed: rect(0, 0, 232, 231))
+        try expectEqual(l.enforcedSize(windowID: 9, targetSize: CGSize(width: 500, height: 600)), nil)
+        try expectEqual(l.enforcedSize(windowID: 9, targetSize: target.size), nil,
+                        "cleared, not just hidden for the other size")
+    }
+
+    test("a confirmed write forgets the enforced size") {
+        let l = FrameLedger()
+        let target = rect(0, 0, 800, 600)
+        _ = l.verify(windowID: 9, target: target, observed: rect(0, 0, 232, 231))
+        _ = l.verify(windowID: 9, target: target, observed: rect(0, 0, 232, 231))
+        _ = l.verify(windowID: 9, target: target, observed: target)
+        try expectEqual(l.enforcedSize(windowID: 9, targetSize: target.size), nil)
+    }
+
+    test("a position-only refusal enforces no size") {
+        let l = FrameLedger()
+        let target = rect(0, 0, 800, 600)
+        _ = l.verify(windowID: 9, target: target, observed: rect(300, 0, 800, 600))
+        try expectEqual(l.verify(windowID: 9, target: target, observed: rect(300, 0, 800, 600)), .refused)
+        try expectEqual(l.enforcedSize(windowID: 9, targetSize: target.size), nil)
+    }
+
     test("retry budget resets after convergence") {
         let l = FrameLedger()
         let target = rect(0, 0, 500, 500)

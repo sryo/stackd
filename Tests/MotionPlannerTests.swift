@@ -209,4 +209,30 @@ func registerMotionPlannerTests() {
         let mid = p.tick(now: 1.5)
         try expect(mid.writes.contains { $0.windowID == 1 && !$0.isFinal })
     }
+
+    test("an enforced size turns intermediate steps into position-only writes") {
+        let step = MotionPlanner.FrameWrite(windowID: 1, frame: rect(100, 50, 600, 400), isFinal: false)
+        let pinned = step.honoring(enforcedSize: CGSize(width: 232, height: 231))
+        try expectEqual(pinned?.frame, rect(100, 50, 232, 231))
+        try expectEqual(pinned?.writeSize, false)
+        try expectEqual(pinned?.writePosition, true)
+    }
+
+    test("a size-only step at an enforced size writes nothing") {
+        let step = MotionPlanner.FrameWrite(windowID: 1, frame: rect(100, 50, 600, 400), isFinal: false,
+                                            writeSize: true, writePosition: false)
+        try expectEqual(step.honoring(enforcedSize: CGSize(width: 232, height: 231)), nil)
+    }
+
+    test("the settle frame at an enforced size still writes both axes") {
+        let final = MotionPlanner.FrameWrite(windowID: 1, frame: rect(100, 50, 600, 400), isFinal: true)
+        let pinned = final.honoring(enforcedSize: CGSize(width: 232, height: 231))
+        try expectEqual(pinned?.frame, rect(100, 50, 232, 231))
+        try expect(pinned?.writeSize == true && pinned?.writePosition == true)
+    }
+
+    test("no enforced size leaves the write alone") {
+        let step = MotionPlanner.FrameWrite(windowID: 1, frame: rect(100, 50, 600, 400), isFinal: false)
+        try expectEqual(step.honoring(enforcedSize: nil), step)
+    }
 }
