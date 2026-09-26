@@ -255,19 +255,9 @@ enum Apps {
         // apps lay out controls differently when this is on).
         let appEl = AXUIElementCreateApplication(pid)
         AXUIElementSetMessagingTimeout(appEl, 1.0)
-        var priorRef: AnyObject?
-        var hadPrior = false
-        if AXUIElementCopyAttributeValue(appEl, "AXEnhancedUserInterface" as CFString, &priorRef) == .success {
-            hadPrior = true
+        let tree = AXEnhancedUI.scope(appEl, want: true, prior: AXEnhancedUI.read(appEl)) {
+            walkMenu(bar)
         }
-        AXUIElementSetAttributeValue(appEl, "AXEnhancedUserInterface" as CFString, kCFBooleanTrue)
-        defer {
-            // Restore — kCFBooleanFalse if we don't have a prior, else the
-            // exact prior value (Bool / NSNumber / whatever it returned).
-            let restore: CFTypeRef = hadPrior ? (priorRef as CFTypeRef) : kCFBooleanFalse
-            AXUIElementSetAttributeValue(appEl, "AXEnhancedUserInterface" as CFString, restore)
-        }
-        let tree = walkMenu(bar)
         // Telemetry: log the walk size to stderr. When a palette shows only
         // a few menu items, this tells us up-front whether the AX walk
         // produced 200 items (problem is downstream) or 5 (problem is here —
@@ -491,5 +481,48 @@ enum Icons {
               let rep  = NSBitmapImageRep(data: tiff),
               let png  = rep.representation(using: .png, properties: [:]) else { return nil }
         return "data:image/png;base64," + png.base64EncodedString()
+    }
+}
+
+/// Scoped toggle of an app's AXEnhancedUserInterface. The attribute is
+/// app-wide: assistive tools (VoiceOver, some window managers) turn it on,
+/// menu walks need it on for apps that only populate menus then, and apps
+/// with it on animate their own frame changes, so AX frame writes land
+/// late and step-wise unless it is off for the write. Every scope restores
+/// what it found.
+enum AXEnhancedUI {
+    static let attribute = "AXEnhancedUserInterface" as CFString
+
+    struct Plan: Equatable {
+        /// Value to set before the body; nil = leave as is.
+        let set: Bool?
+        /// Value to restore after the body; nil = nothing to restore.
+        let restore: Bool?
+    }
+
+    /// `prior` nil = the app doesn't expose the attribute, which behaves
+    /// as off.
+    static func plan(prior: Bool?, want: Bool) -> Plan {
+        let current = prior ?? false
+        if current == want { return Plan(set: nil, restore: nil) }
+        return Plan(set: want, restore: current)
+    }
+
+    /// Current value, nil when the app doesn't expose it.
+    static func read(_ appEl: AXUIElement) -> Bool? {
+        var ref: AnyObject?
+        guard AXUIElementCopyAttributeValue(appEl, attribute, &ref) == .success else { return nil }
+        return (ref as? NSNumber)?.boolValue
+    }
+
+    /// Run `body` with the attribute at `want`, then put back what `prior`
+    /// says was there. Thread-agnostic.
+    static func scope<T>(_ appEl: AXUIElement, want: Bool, prior: Bool?, _ body: () -> T) -> T {
+        let p = plan(prior: prior, want: want)
+        if let v = p.set { AXUIElementSetAttributeValue(appEl, attribute, v ? kCFBooleanTrue : kCFBooleanFalse) }
+        defer {
+            if let r = p.restore { AXUIElementSetAttributeValue(appEl, attribute, r ? kCFBooleanTrue : kCFBooleanFalse) }
+        }
+        return body()
     }
 }

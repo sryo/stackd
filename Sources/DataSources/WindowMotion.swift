@@ -523,6 +523,22 @@ private extension CGRect {
     }
 }
 
+/// Per-app cache of the AXEnhancedUserInterface probe, so a write batch
+/// doesn't pay an extra AX read every frame. Entries age out after `ttl`:
+/// assistive tools flip the attribute at runtime, and a stale "on" would
+/// have the batch restore it to on after the tool turned it off.
+struct AXEnhancedUIProbeCache {
+    static let ttl: Double = 1.0
+    private var entry: (value: Bool?, at: Double)?
+
+    mutating func value(now: Double, probe: () -> Bool?) -> Bool? {
+        if let e = entry, now - e.at < Self.ttl { return e.value }
+        let v = probe()
+        entry = (value: v, at: now)
+        return v
+    }
+}
+
 /// One app's AX writer: a serial queue the writes run on, and the mailbox
 /// (main-thread state) that feeds it. A slow or hung app only backs up its
 /// own queue; the display-link tick and every other app keep moving.
@@ -534,10 +550,23 @@ final class AppFrameWriter {
     var mailbox = MotionWriteMailbox()
     /// Element per window for the next drain. Main thread.
     var elements: [CGWindowID: AXUIElement] = [:]
+    /// Writer queue only.
+    private let appElement: AXUIElement
+    private var enhancedUI = AXEnhancedUIProbeCache()
 
     init(pid: pid_t) {
         self.pid = pid
         queue = DispatchQueue(label: "stackd.axwrite.\(pid)", qos: .userInteractive)
+        appElement = AXUIElementCreateApplication(pid)
+        AXUIElementSetMessagingTimeout(appElement, 0.1)
+    }
+
+    /// Run one batch of writes with AXEnhancedUserInterface off, restoring
+    /// it after when the app had it on. Writer queue only.
+    func withEnhancedUIOff<T>(_ body: () -> T) -> T {
+        let el = appElement
+        let prior = enhancedUI.value(now: CFAbsoluteTimeGetCurrent()) { AXEnhancedUI.read(el) }
+        return AXEnhancedUI.scope(el, want: false, prior: prior, body)
     }
 }
 
@@ -783,7 +812,7 @@ final class WindowMotionEngine {
         let batch = writer.mailbox.take()
         let jobs = batch.map { ($0, writer.elements[$0.write.windowID]) }
         writer.queue.async { [weak self] in
-            let results = jobs.map { entry, element -> WriteResult in
+            let results = writer.withEnhancedUIOff { jobs.map { entry, element -> WriteResult in
                 guard let el = element else { return WriteResult(entry: entry, ok: false, timedOut: false) }
                 if entry.write.isFinal {
                     return WriteResult(entry: entry, ok: WindowsByID.writeFrameAX(element: el, frame: entry.write.frame),
@@ -794,7 +823,7 @@ final class WindowMotionEngine {
                     size: entry.write.writeSize, position: entry.write.writePosition,
                     timeout: Self.intermediateWriteTimeout)
                 return WriteResult(entry: entry, ok: !timedOut, timedOut: timedOut)
-            }
+            } }
             DispatchQueue.main.async { self?.finishDrain(writer, results) }
         }
     }
