@@ -144,7 +144,7 @@ Reach for a `<script>` when you need async work, event handlers, state machines,
 
 `sd.bind(target, signal, fmt?)` covers the common case (textContent, innerHTML, attributes, CSS vars, class toggles). For anything else, signals are subscribable: `sd.battery.subscribe(b => …)`. Template + script forms work side-by-side in the same stack.
 
-`stackd doctor` checks every manifest in `~/stackd/stacks/` for missing fields, typo permissions, and a few other footguns.
+`stackd doctor` checks every manifest in `~/stackd/stacks/` for missing fields, typo permissions, and a few other footguns. It also lists the trackpad gestures macOS itself handles (swipes, three-finger drag, pinches) and their finger counts, so a gesture stack can avoid competing with the system.
 
 ## System data (`sd.*`)
 

@@ -115,7 +115,11 @@ enum CLI {
             checked += 1
             issues += StackDoctor.check(stackDir: path)
         }
-        FileHandle.standardOutput.write(Data("\nchecked \(checked) stack(s), \(issues) issue(s).\n".utf8))
+        let gestures = TrackpadSystemGestures.probe(read: TrackpadSystemGestures.liveRead)
+        let gestureReport = TrackpadSystemGestures.doctorLines(gestures).joined(separator: "\n")
+        // print, like StackDoctor's per-stack lines, so the output keeps its order.
+        print("\n\(gestureReport)")
+        print("\nchecked \(checked) stack(s), \(issues) issue(s).")
         return issues == 0 ? 0 : 1
     }
 
