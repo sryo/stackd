@@ -131,6 +131,110 @@ func registerURLSchemeHandlerTests() {
         try expectEqual(String(data: load(h, "sd://dup/index.html").body, encoding: .utf8), "second")
     }
 
+    // Escape fixtures: `base/root` is the registered root and `base/secret.txt`
+    // sits one level above it, so any resolution that leaves the root reaches it.
+    func makeEscapeTree() -> (base: URL, root: URL) {
+        let base = makeTree(["root/index.html": "ok", "secret.txt": "SECRET"])
+        return (base, base.appendingPathComponent("root", isDirectory: true))
+    }
+    func expectRefused(_ task: RecordingSchemeTask, _ url: String) throws {
+        try expectEqual(task.failure?.code, 404, url)
+        try expect(task.response == nil && !task.finished, "\(url) must not respond")
+        try expect(String(data: task.body, encoding: .utf8)?.contains("SECRET") != true,
+                   "\(url) leaked a file outside the root")
+    }
+
+    test("stack host: percent-encoded ../ cannot escape the root") {
+        let (base, root) = makeEscapeTree()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let h = StackdSchemeHandler(runtimePath: "/nonexistent")
+        h.register(stackId: "demo", rootURL: root)
+
+        for url in ["sd://demo/..%2Fsecret.txt",
+                    "sd://demo/%2E%2E%2Fsecret.txt",
+                    "sd://demo/sub/..%2F..%2Fsecret.txt"] {
+            try expectRefused(load(h, url), url)
+        }
+    }
+
+    test("stack host: plain .. segments cannot escape the root") {
+        let (base, root) = makeEscapeTree()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let h = StackdSchemeHandler(runtimePath: "/nonexistent")
+        h.register(stackId: "demo", rootURL: root)
+
+        for url in ["sd://demo/../secret.txt", "sd://demo/sub/../../secret.txt"] {
+            try expectRefused(load(h, url), url)
+        }
+    }
+
+    test("stack host: a sibling dir sharing the root's name prefix is outside it") {
+        let base = makeTree(["root/index.html": "ok", "root-evil/secret.txt": "SECRET"])
+        defer { try? FileManager.default.removeItem(at: base) }
+        let h = StackdSchemeHandler(runtimePath: "/nonexistent")
+        h.register(stackId: "demo", rootURL: base.appendingPathComponent("root"))
+
+        let url = "sd://demo/..%2Froot-evil%2Fsecret.txt"
+        try expectRefused(load(h, url), url)
+    }
+
+    test("stack host: a symlink inside the root pointing outside is refused") {
+        let (base, root) = makeEscapeTree()
+        defer { try? FileManager.default.removeItem(at: base) }
+        try FileManager.default.createSymbolicLink(
+            at: root.appendingPathComponent("link.txt"),
+            withDestinationURL: base.appendingPathComponent("secret.txt"))
+        try FileManager.default.createSymbolicLink(
+            at: root.appendingPathComponent("up"), withDestinationURL: base)
+        let h = StackdSchemeHandler(runtimePath: "/nonexistent")
+        h.register(stackId: "demo", rootURL: root)
+
+        for url in ["sd://demo/link.txt", "sd://demo/up/secret.txt"] {
+            try expectRefused(load(h, url), url)
+        }
+    }
+
+    test("stack host: in-root symlinks and a symlinked root still serve") {
+        let base = makeTree(["real/index.html": "ok", "real/assets/a.css": "css"])
+        defer { try? FileManager.default.removeItem(at: base) }
+        let real = base.appendingPathComponent("real")
+        try FileManager.default.createSymbolicLink(
+            at: real.appendingPathComponent("alias.css"),
+            withDestinationURL: real.appendingPathComponent("assets/a.css"))
+        let linkedRoot = base.appendingPathComponent("linked")
+        try FileManager.default.createSymbolicLink(at: linkedRoot, withDestinationURL: real)
+        let h = StackdSchemeHandler(runtimePath: "/nonexistent")
+        h.register(stackId: "demo", rootURL: linkedRoot)
+
+        try expectEqual(String(data: load(h, "sd://demo/index.html").body, encoding: .utf8), "ok")
+        try expectEqual(String(data: load(h, "sd://demo/alias.css").body, encoding: .utf8), "css")
+        try expectEqual(String(data: load(h, "sd://demo/assets/../index.html").body, encoding: .utf8), "ok")
+    }
+
+    test("runtime host: encoded and plain ../ plus symlinks cannot escape runtimePath") {
+        let (base, runtime) = makeEscapeTree()
+        defer { try? FileManager.default.removeItem(at: base) }
+        try FileManager.default.createSymbolicLink(
+            at: runtime.appendingPathComponent("link.txt"),
+            withDestinationURL: base.appendingPathComponent("secret.txt"))
+        let h = StackdSchemeHandler(runtimePath: runtime.path)
+
+        for url in ["sd://runtime/..%2Fsecret.txt",
+                    "sd://runtime/../secret.txt",
+                    "sd://runtime/link.txt"] {
+            try expectRefused(load(h, url), url)
+        }
+        try expectEqual(String(data: load(h, "sd://runtime/index.html").body, encoding: .utf8), "ok")
+    }
+
+    test("the root itself (empty path) is not served as a file") {
+        let (base, root) = makeEscapeTree()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let h = StackdSchemeHandler(runtimePath: "/nonexistent")
+        h.register(stackId: "demo", rootURL: root)
+        try expectEqual(load(h, "sd://demo/").failure?.code, 404)
+    }
+
     test("Content-Type follows the file extension (case-insensitive)") {
         let cases: [(file: String, mime: String)] = [
             ("a.html",  "text/html; charset=utf-8"),

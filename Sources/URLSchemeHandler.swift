@@ -33,9 +33,9 @@ final class StackdSchemeHandler: NSObject, WKURLSchemeHandler {
 
         var fileURL: URL?
         if host == "runtime" {
-            fileURL = URL(fileURLWithPath: runtimePath).appendingPathComponent(path)
+            fileURL = Self.contained(path, under: URL(fileURLWithPath: runtimePath))
         } else if let root = stacks[host] {
-            fileURL = root.appendingPathComponent(path)
+            fileURL = Self.contained(path, under: root)
         }
 
         guard let file = fileURL, let data = try? Data(contentsOf: file) else {
@@ -65,6 +65,26 @@ final class StackdSchemeHandler: NSObject, WKURLSchemeHandler {
     }
 
     func webView(_ webView: WKWebView, stop task: WKURLSchemeTask) {}
+
+    /// `root/path` with `..` and every symlink resolved, or nil unless the
+    /// result is a descendant of the equally resolved root. `url.path` has
+    /// already percent-decoded `..%2F`, so encoded traversal lands here too.
+    private static func contained(_ path: String, under root: URL) -> URL? {
+        guard let base = realPath(root.path),
+              let file = realPath(root.appendingPathComponent(path).path) else { return nil }
+        let prefix = base.hasSuffix("/") ? base : base + "/"
+        guard file.hasPrefix(prefix) else {
+            log("403 \(path) resolves outside \(base)")
+            return nil
+        }
+        return URL(fileURLWithPath: file)
+    }
+
+    private static func realPath(_ path: String) -> String? {
+        guard let resolved = realpath(path, nil) else { return nil }
+        defer { free(resolved) }
+        return String(cString: resolved)
+    }
 
     private func mimeType(for ext: String) -> String {
         switch ext.lowercased() {
