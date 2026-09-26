@@ -178,7 +178,10 @@ final class OverlayHandle: NSObject, WKNavigationDelegate {
     private func armedTick() {
         let changed = step()
         let stay = tickArm.afterTick(now: CFAbsoluteTimeGetCurrent(), changed: changed,
-                                     buttonDown: Mouse.isLeftButtonDown)
+                                     busy: { [targetWID] in
+                                         Mouse.isLeftButtonDown()
+                                             || WindowEvents.isAnimating(windowID: targetWID)
+                                     })
         if !stay {
             linkToken?.cancel()
             linkToken = nil
@@ -667,8 +670,9 @@ enum OverlayRepinPolicy {
 /// outset change, app hide / unhide, space and display changes. Once armed
 /// the tick keeps itself alive while the frame or visibility keeps changing
 /// (and while a mouse button is held, so a paused drag resumes without
-/// waiting for the next coalesced AX event), and disarms after `idle`
-/// seconds of no change.
+/// waiting for the next coalesced AX event, or the target is mid system
+/// animation, so the panel returns on the frame the animation ends), and
+/// disarms after `idle` seconds of no change.
 ///
 /// Apps that move or resize windows without posting AX notifications, and
 /// windows that vanish silently, are caught by the backstop: one tick every
@@ -697,12 +701,13 @@ struct OverlayTickArm {
     }
 
     /// After an armed tick. `changed` = the frame, visibility or payload
-    /// changed this tick. `buttonDown` is only consulted once the idle spell
-    /// has run out. False means disarmed: the caller unsubscribes.
-    mutating func afterTick(now: Double, changed: Bool, buttonDown: () -> Bool) -> Bool {
+    /// changed this tick. `busy` = a mouse button is held or the target is
+    /// mid system animation; it is only consulted once the idle spell has
+    /// run out. False means disarmed: the caller unsubscribes.
+    mutating func afterTick(now: Double, changed: Bool, busy: () -> Bool) -> Bool {
         if changed { deadline = max(deadline, now + Self.idle) }
         if now < deadline { return true }
-        if buttonDown() {
+        if busy() {
             deadline = now + Self.idle
             return true
         }
@@ -724,10 +729,10 @@ enum OverlayArmEvents {
         case "sd.window.minimized", "sd.window.deminimized", "sd.window.destroyed":
             return OverlayTickArm.visibilityHold
         case "sd.window.animating":
-            // Outlasts isAnimating so the tick is still running when a
-            // window that didn't minimize (deminimize, false positive)
-            // becomes eligible to show again.
-            return WindowAnimationWatch.holdDuration + OverlayTickArm.idle
+            // The tick then stays armed for as long as the target animates
+            // (OverlayTickArm.afterTick's `busy`), so it is running on the
+            // frame a deminimizing window's warp ends.
+            return OverlayTickArm.idle
         default:
             return nil
         }

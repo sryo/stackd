@@ -29,16 +29,16 @@ func registerOverlayTickArmTests() {
         var t = 0.0
         for _ in 0..<30 {
             t += 0.016
-            try expect(a.afterTick(now: t, changed: true, buttonDown: { false }))
+            try expect(a.afterTick(now: t, changed: true, busy: { false }))
         }
     }
 
     test("OverlayTickArm: disarms after the idle spell with no change") {
         var a = OverlayTickArm()
         _ = a.arm(now: 0)
-        try expect(a.afterTick(now: 0.05, changed: true, buttonDown: { false }))
-        try expect(a.afterTick(now: 0.05 + idle - 0.01, changed: false, buttonDown: { false }))
-        try expect(!a.afterTick(now: 0.05 + idle + 0.01, changed: false, buttonDown: { false }))
+        try expect(a.afterTick(now: 0.05, changed: true, busy: { false }))
+        try expect(a.afterTick(now: 0.05 + idle - 0.01, changed: false, busy: { false }))
+        try expect(!a.afterTick(now: 0.05 + idle + 0.01, changed: false, busy: { false }))
         try expect(!a.armed)
         try expect(a.wantsBackstop)
     }
@@ -46,7 +46,7 @@ func registerOverlayTickArmTests() {
     test("OverlayTickArm: an event with no follow-up change still disarms") {
         var a = OverlayTickArm()
         _ = a.arm(now: 1)
-        try expect(!a.afterTick(now: 1 + idle + 0.001, changed: false, buttonDown: { false }))
+        try expect(!a.afterTick(now: 1 + idle + 0.001, changed: false, busy: { false }))
     }
 
     test("OverlayTickArm: a longer hold keeps ticking through an animation with no change yet") {
@@ -54,15 +54,15 @@ func registerOverlayTickArmTests() {
         // end of a system animation, well after the event.
         var a = OverlayTickArm()
         _ = a.arm(now: 0, hold: 0.6)
-        try expect(a.afterTick(now: 0.5, changed: false, buttonDown: { false }))
-        try expect(!a.afterTick(now: 0.61, changed: false, buttonDown: { false }))
+        try expect(a.afterTick(now: 0.5, changed: false, busy: { false }))
+        try expect(!a.afterTick(now: 0.61, changed: false, busy: { false }))
     }
 
     test("OverlayTickArm: a short arm never cuts an earlier longer hold") {
         var a = OverlayTickArm()
         _ = a.arm(now: 0, hold: 0.6)
         _ = a.arm(now: 0.1)
-        try expect(a.afterTick(now: 0.5, changed: false, buttonDown: { false }))
+        try expect(a.afterTick(now: 0.5, changed: false, busy: { false }))
     }
 
     test("OverlayTickArm: a held button keeps it armed through a paused drag") {
@@ -70,24 +70,24 @@ func registerOverlayTickArmTests() {
         // the next coalesced AX bang to re-arm.
         var a = OverlayTickArm()
         _ = a.arm(now: 0)
-        try expect(a.afterTick(now: 0.5, changed: false, buttonDown: { true }))
-        try expect(a.afterTick(now: 0.5 + idle - 0.01, changed: false, buttonDown: { false }),
+        try expect(a.afterTick(now: 0.5, changed: false, busy: { true }))
+        try expect(a.afterTick(now: 0.5 + idle - 0.01, changed: false, busy: { false }),
                    "release starts a fresh idle spell")
-        try expect(!a.afterTick(now: 0.5 + idle + 0.01, changed: false, buttonDown: { false }))
+        try expect(!a.afterTick(now: 0.5 + idle + 0.01, changed: false, busy: { false }))
     }
 
     test("OverlayTickArm: doesn't query the button while inside the idle spell") {
         var a = OverlayTickArm()
         _ = a.arm(now: 0)
         var queried = false
-        _ = a.afterTick(now: 0.01, changed: false, buttonDown: { queried = true; return true })
+        _ = a.afterTick(now: 0.01, changed: false, busy: { queried = true; return true })
         try expect(!queried)
     }
 
     test("OverlayTickArm: re-arms after disarming") {
         var a = OverlayTickArm()
         _ = a.arm(now: 0)
-        _ = a.afterTick(now: 1, changed: false, buttonDown: { false })
+        _ = a.afterTick(now: 1, changed: false, busy: { false })
         try expect(a.arm(now: 2))
     }
 
@@ -110,9 +110,22 @@ func registerOverlayTickArmTests() {
         try expect(OverlayTickArm.visibilityHold > OverlayTickArm.idle)
     }
 
-    test("OverlayArmEvents: animating holds past the animation window so the overlay can return") {
-        let hold = OverlayArmEvents.hold(forBang: "sd.window.animating") ?? 0
-        try expect(hold > WindowAnimationWatch.holdDuration)
+    test("OverlayTickArm: stays armed while the target animates, however long the animation") {
+        // Deminimize: the panel stays hidden (no change) for the whole genie
+        // and must come back on the frame the warp ends, not at the next
+        // backstop tick.
+        var a = OverlayTickArm()
+        _ = a.arm(now: 0)
+        var t = 0.0
+        while t < 1.2 {
+            t += 0.016
+            try expect(a.afterTick(now: t, changed: false, busy: { true }), "animating at \(t)")
+        }
+        try expect(a.afterTick(now: t + 0.016, changed: true, busy: { false }), "shown on the warp's end")
+    }
+
+    test("OverlayArmEvents: animating arms for the idle spell — the animation itself keeps it armed") {
+        try expectEqual(OverlayArmEvents.hold(forBang: "sd.window.animating"), OverlayTickArm.idle)
     }
 
     test("OverlayArmEvents: unrelated bangs don't arm") {

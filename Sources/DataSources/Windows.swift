@@ -1958,9 +1958,11 @@ enum WindowEvents {
 
     /// True while a window-server animation (the genie into the Dock, and
     /// any other animation that warps a window's listed bounds) is
-    /// carrying `windowID`, from the first frame it is seen warped until
-    /// `WindowAnimationWatch.holdDuration` after. A minimize reads true
-    /// ~25ms in, long before AX reports the window minimized. Main thread.
+    /// carrying `windowID`: from the first frame it is seen warped until
+    /// the frame its listed size matches its own again, or, when the
+    /// animation takes it off screen, until shortly after (see
+    /// `WindowAnimationWatch`). A minimize reads true ~25ms in, long before
+    /// AX reports the window minimized. Main thread.
     static func isAnimating(windowID: CGWindowID) -> Bool {
         WindowAnimationObserver.shared.isAnimating(windowID: windowID)
     }
@@ -2083,20 +2085,44 @@ enum WindowEvents {
 /// Pure bookkeeping for the early "animating" signal. The window server
 /// reports a minimize through AX only after the ~500ms genie, but posts
 /// CGS 1327 (animation began) within a few frames. 1327 carries no window
-/// id, so each one opens a short watch; while it's open, a window whose
+/// id, so each one opens a watch; while it's open, a window whose
 /// window-list bounds (which show the genie's warp) differ in size from
 /// SkyLight's own frame (which doesn't) is animating.
+///
+/// The signal follows the warp frame by frame rather than holding for a
+/// fixed time: it ends on the first sample where a still-listed window's
+/// sizes match again (the end of a deminimize), and the watch keeps
+/// sampling for as long as any window is still warped. A warped window
+/// that leaves the on-screen list instead (the end of a minimize) keeps
+/// reading animating for `vanishHold`, bridging the frames until SkyLight
+/// reports it ordered out.
 struct WindowAnimationWatch {
-    /// How long a 1327 keeps the per-frame comparison running.
+    /// How long a 1327 (or stackd's own minimize) samples while waiting
+    /// for a warp to show.
     static let watchDuration: Double = 0.35
-    /// How long a sighting keeps `isAnimating` true — past the end of the
-    /// genie, after which AX's minimized state takes over.
-    static let holdDuration: Double = 0.8
+    /// Sampling never runs longer than this after the latest begin, even if
+    /// a window stays warped.
+    static let maxWatch: Double = 1.5
+    /// A warped sighting stays current this long without a fresh sample —
+    /// covers a couple of dropped frames, not the animation.
+    static let freshness: Double = 0.1
+    /// How long a warped window that left the on-screen list keeps reading
+    /// animating.
+    static let vanishHold: Double = 0.5
     /// Listed-vs-own size difference below this is rounding, not a warp.
     static let sizeTolerance: CGFloat = 1
 
+    private struct Anim {
+        var until: Double
+        /// Seen warped at least once (vs. announced ahead of the warp).
+        var warped: Bool
+        /// Left the on-screen list after being seen warped.
+        var vanished: Bool
+    }
+
     private var watchEnd: Double = 0
-    private var animatingUntil: [CGWindowID: Double] = [:]
+    private var capEnd: Double = 0
+    private var anims: [CGWindowID: Anim] = [:]
 
     static func isAnimating(listed: CGRect, own: CGRect) -> Bool {
         abs(listed.size.width - own.size.width) > sizeTolerance
@@ -2108,26 +2134,52 @@ struct WindowAnimationWatch {
     mutating func begin(now: Double) -> Bool {
         let opened = !isWatching(now: now)
         watchEnd = now + Self.watchDuration
+        capEnd = now + Self.maxWatch
         return opened
     }
 
-    func isWatching(now: Double) -> Bool { now < watchEnd }
+    func isWatching(now: Double) -> Bool {
+        if now < watchEnd { return true }
+        guard now < capEnd else { return false }
+        return anims.values.contains { $0.warped && !$0.vanished && now < $0.until }
+    }
 
-    /// Records a sighting; true when it is the first of this animation
-    /// (the window wasn't already held), i.e. the caller should announce it.
-    mutating func noteAnimating(_ windowID: CGWindowID, now: Double) -> Bool {
-        let first = !isAnimating(windowID, now: now)
-        animatingUntil[windowID] = now + Self.holdDuration
-        return first
+    /// stackd is minimizing `windowID` itself: it reads animating from now,
+    /// ahead of the warp, for up to `watchDuration` unless a warp takes
+    /// over. Opens the watch. True when the caller should announce it.
+    mutating func expect(_ windowID: CGWindowID, now: Double) -> Bool {
+        _ = begin(now: now)
+        if isAnimating(windowID, now: now) { return false }
+        anims[windowID] = Anim(until: now + Self.watchDuration, warped: false, vanished: false)
+        return true
+    }
+
+    /// One frame's comparison. `warped` are the tracked windows whose sizes
+    /// differ this frame, `listed` every window on the on-screen list.
+    /// Returns the windows whose animation starts this frame, to announce.
+    mutating func sample(warped: Set<CGWindowID>, listed: Set<CGWindowID>, now: Double) -> [CGWindowID] {
+        var started: [CGWindowID] = []
+        for wid in warped.sorted() {
+            if !isAnimating(wid, now: now) { started.append(wid) }
+            anims[wid] = Anim(until: now + Self.freshness, warped: true, vanished: false)
+        }
+        for (wid, anim) in anims where !warped.contains(wid) && anim.warped && now < anim.until {
+            if listed.contains(wid) {
+                anims[wid] = nil
+            } else if !anim.vanished {
+                anims[wid] = Anim(until: now + Self.vanishHold, warped: true, vanished: true)
+            }
+        }
+        return started
     }
 
     func isAnimating(_ windowID: CGWindowID, now: Double) -> Bool {
-        guard let until = animatingUntil[windowID] else { return false }
-        return now < until
+        guard let anim = anims[windowID] else { return false }
+        return now < anim.until
     }
 
     mutating func prune(now: Double) {
-        animatingUntil = animatingUntil.filter { now < $0.value }
+        anims = anims.filter { now < $0.value.until }
     }
 }
 
@@ -2150,11 +2202,8 @@ final class WindowAnimationObserver {
     private var clock: Token?
 
     func animationBegan() {
-        let now = CFAbsoluteTimeGetCurrent()
-        _ = watch.begin(now: now)
-        guard clock == nil else { return }
-        // subscribe primes the callback, so the first comparison runs now.
-        clock = DisplayLinkObserver.shared.subscribe { [weak self] in self?.tick() }
+        _ = watch.begin(now: CFAbsoluteTimeGetCurrent())
+        startClock()
     }
 
     func isAnimating(windowID: CGWindowID) -> Bool {
@@ -2166,7 +2215,16 @@ final class WindowAnimationObserver {
     /// are the same: the warp hasn't begun.
     func noteMinimizing(windowID: CGWindowID) {
         guard let own = Self.ownBounds(windowID) else { return }
-        report(windowID, frame: own, visualFrame: own)
+        if watch.expect(windowID, now: CFAbsoluteTimeGetCurrent()) {
+            announce(windowID, frame: own, visualFrame: own)
+        }
+        startClock()
+    }
+
+    private func startClock() {
+        guard clock == nil else { return }
+        // subscribe primes the callback, so the first comparison runs now.
+        clock = DisplayLinkObserver.shared.subscribe { [weak self] in self?.tick() }
     }
 
     private func tick() {
@@ -2180,21 +2238,27 @@ final class WindowAnimationObserver {
         guard let info = CGWindowListCopyWindowInfo(
             [.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]]
         else { return }
+        var listed = Set<CGWindowID>()
+        var warped: [CGWindowID: (own: CGRect, listed: CGRect)] = [:]
         for entry in info {
+            guard let wid = entry[kCGWindowNumber as String] as? CGWindowID else { continue }
+            listed.insert(wid)
             guard (entry[kCGWindowLayer as String] as? Int) == 0,
-                  let wid = entry[kCGWindowNumber as String] as? CGWindowID,
                   WindowsAXObserver.shared.pidFor(wid: wid) != nil,
                   let dict = entry[kCGWindowBounds as String] as? NSDictionary,
-                  let listed = CGRect(dictionaryRepresentation: dict),
+                  let bounds = CGRect(dictionaryRepresentation: dict),
                   let own = Self.ownBounds(wid),
-                  WindowAnimationWatch.isAnimating(listed: listed, own: own)
+                  WindowAnimationWatch.isAnimating(listed: bounds, own: own)
             else { continue }
-            report(wid, frame: own, visualFrame: listed)
+            warped[wid] = (own, bounds)
+        }
+        for wid in watch.sample(warped: Set(warped.keys), listed: listed, now: now) {
+            guard let w = warped[wid] else { continue }
+            announce(wid, frame: w.own, visualFrame: w.listed)
         }
     }
 
-    private func report(_ wid: CGWindowID, frame: CGRect, visualFrame: CGRect) {
-        guard watch.noteAnimating(wid, now: CFAbsoluteTimeGetCurrent()) else { return }
+    private func announce(_ wid: CGWindowID, frame: CGRect, visualFrame: CGRect) {
         func rect(_ r: CGRect) -> [String: Int] {
             ["x": Int(r.origin.x), "y": Int(r.origin.y), "w": Int(r.size.width), "h": Int(r.size.height)]
         }
