@@ -278,16 +278,7 @@ final class OverlayHandle: NSObject, WKNavigationDelegate {
     }
 
     private func moveAndOrderAboveTarget(cgsOrigin: CGPoint) -> Bool {
-        guard let create = WindowTransaction.create,
-              let move   = WindowTransaction.moveWithGroup,
-              let order  = WindowTransaction.orderWindow,
-              let commit = WindowTransaction.commit else { return false }
-        let cid = SkyLight.cid
-        guard cid != 0, let txRef = create(cid)?.takeRetainedValue() else { return false }
-        let panelWID = UInt32(panel.windowNumber)
-        _ = move(txRef, panelWID, cgsOrigin)
-        _ = order(txRef, panelWID, 1, UInt32(targetWID))
-        return commit(txRef, 0) == 0
+        Overlay.serverMove(panel, cgsOrigin: cgsOrigin, above: targetWID)
     }
 
     private func reorderAboveTarget() {
@@ -556,6 +547,28 @@ enum Overlay {
         _ = commit(txRef, 0)
     }
 
+    /// Move the panel at the window server in one transaction, optionally
+    /// ordering it one slot above `above` in the same commit. No AppKit
+    /// round-trip and no redisplay, so `panel.frame` keeps the old origin
+    /// until the caller resyncs it. False when the SPI is unavailable or the
+    /// panel has no window-server window yet; the caller falls back to
+    /// setFrameOrigin.
+    static func serverMove(_ panel: NSPanel, cgsOrigin: CGPoint, above: CGWindowID? = nil) -> Bool {
+        guard let create = WindowTransaction.create,
+              let move   = WindowTransaction.moveWithGroup,
+              let order  = WindowTransaction.orderWindow,
+              let commit = WindowTransaction.commit else { return false }
+        let cid = SkyLight.cid
+        guard cid != 0, panel.windowNumber > 0,
+              let txRef = create(cid)?.takeRetainedValue() else { return false }
+        let panelWID = UInt32(panel.windowNumber)
+        _ = move(txRef, panelWID, cgsOrigin)
+        if let above = above {
+            _ = order(txRef, panelWID, 1, UInt32(above))
+        }
+        return commit(txRef, 0) == 0
+    }
+
     /// Shared NSPanel recipe for attach() and region(): borderless,
     /// transparent, click-through, never key. `frame` is AppKit coordinates.
     static func makeOverlayPanel(frame: NSRect) -> NSPanel {
@@ -742,21 +755,52 @@ final class RegionOverlayHandle: NSObject, WKNavigationDelegate {
     private var navigationReady = false
     private var pendingEvalJS: String?
     private var released = false
+    // Last applied frame (AppKit coords) and whether a window-server move
+    // left `panel.frame` behind it — same bookkeeping as OverlayHandle.
+    private var lastFrame: CGRect
+    private var appKitStale = false
 
     init(id: Int, panel: NSPanel, webView: WKWebView) {
         self.id = id
         self.panel = panel
         self.webView = webView
+        self.lastFrame = panel.frame
         super.init()
         webView.navigationDelegate = self
     }
 
     /// Move/resize to a new global rect. A rejected rect is ignored (the prior
-    /// frame stays) rather than collapsing the panel.
+    /// frame stays) rather than collapsing the panel. A same-size change is a
+    /// window-server move with no redisplay (cursor follow hits this every
+    /// frame); only a size change goes through AppKit's displaying setFrame.
     func setFrame(_ globalRect: CGRect) {
         if released { return }
         guard let r = RegionOverlayGeometry.sanitize(globalRect) else { return }
-        panel.setFrame(RegionOverlayGeometry.toAppKit(r), display: true)
+        let appKit = RegionOverlayGeometry.toAppKit(r)
+        let op = OverlayTickPlan.frameOp(next: appKit, last: lastFrame)
+        switch op {
+        case .none:
+            if OverlayTickPlan.needsAppKitSync(frameOp: op, appKitStale: appKitStale) { syncAppKitFrame() }
+        case .move(let origin):
+            if Overlay.serverMove(panel, cgsOrigin: r.origin) {
+                appKitStale = true
+            } else {
+                panel.setFrameOrigin(origin)
+            }
+        case .reshape(let frame):
+            panel.setFrame(frame, display: true)
+            appKitStale = false
+        }
+        lastFrame = appKit
+    }
+
+    /// Bring AppKit's cached frame in line after window-server moves. Called
+    /// once motion stops (the follow tick's first idle frame, unfollow), never
+    /// mid-motion.
+    func syncAppKitFrame() {
+        if released || !appKitStale { return }
+        panel.setFrameOrigin(lastFrame.origin)
+        appKitStale = false
     }
 
     /// Evaluate JS in the overlay's WebView, buffering until didFinish so calls

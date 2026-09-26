@@ -339,6 +339,33 @@ func registerOverlayTests() {
         try expectEqual(h.panel.isVisible, false)
     }
 
+    test("RegionOverlayHandle.setFrame with the same size lands the new origin") {
+        // A deferred panel has no window-server window yet, so the move takes
+        // the AppKit fallback and panel.frame reflects it straight away.
+        let start = CGRect(x: 100, y: 100, width: 80, height: 40)
+        let panel = NSPanel(contentRect: RegionOverlayGeometry.toAppKit(start), styleMask: .borderless,
+                            backing: .buffered, defer: true)
+        let webView = WKWebView(frame: .zero, configuration: WKWebViewConfiguration())
+        let h = RegionOverlayHandle(id: 1, panel: panel, webView: webView)
+        let moved = start.offsetBy(dx: 30, dy: 12)
+        h.setFrame(moved)
+        h.syncAppKitFrame()
+        try expect(h.panel.frame == RegionOverlayGeometry.toAppKit(moved))
+        h.remove()
+    }
+
+    test("RegionOverlayHandle.setFrame with a new size reshapes the panel") {
+        let start = CGRect(x: 100, y: 100, width: 80, height: 40)
+        let panel = NSPanel(contentRect: RegionOverlayGeometry.toAppKit(start), styleMask: .borderless,
+                            backing: .buffered, defer: true)
+        let webView = WKWebView(frame: .zero, configuration: WKWebViewConfiguration())
+        let h = RegionOverlayHandle(id: 1, panel: panel, webView: webView)
+        let grown = CGRect(x: 90, y: 100, width: 120, height: 60)
+        h.setFrame(grown)
+        try expect(h.panel.frame == RegionOverlayGeometry.toAppKit(grown))
+        h.remove()
+    }
+
     test("Overlay.makeOverlayPanel orders out without an animation") {
         // Stack reloads (e.g. on a display change) block the main thread
         // while every stack rebuilds; an animated order-out can't run until

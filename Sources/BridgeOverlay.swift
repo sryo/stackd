@@ -277,7 +277,12 @@ extension Bridge {
                         // later. Stay dormant (mirrors the attach tick).
                         if ScreenshotHider.shared.active { return }
                         let cursor = Mouse.location()
-                        if cursor == lastCursor { return }
+                        if cursor == lastCursor {
+                            // Cursor at rest: the moves so far went straight
+                            // to the window server; catch AppKit up once.
+                            h.syncAppKitFrame()
+                            return
+                        }
                         lastCursor = cursor
                         h.setFrame(RegionFollowGeometry.frame(
                             cursor: cursor, offset: offset,
@@ -295,6 +300,10 @@ extension Bridge {
             .syncBridge("overlay.region.unfollow", permission: "overlay", denyValue: false) { b, body in
                 guard let id = body["id"] as? Int else { return false }
                 b.regionFollowTokens.removeValue(forKey: id)?.cancel()
+                if let h = b.regionOverlayHandles[id] {
+                    if Thread.isMainThread { h.syncAppKitFrame() }
+                    else { DispatchQueue.main.sync { h.syncAppKitFrame() } }
+                }
                 return true
             },
             // Tear down: cancel any live cursor follow, then close the panel
