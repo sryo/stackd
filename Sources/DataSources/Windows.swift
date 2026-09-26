@@ -366,6 +366,30 @@ enum Windows {
     }
 }
 
+// MARK: - AXWakeRefresh
+//
+// When to rebuild the AX layer after the system wakes. While the session is
+// locked AX vends no window lists, so a rebuild then attaches no per-window
+// observers and minimize/move/resize events stay dead; a wake behind the
+// lock screen waits for the unlock instead.
+enum AXWakeRefresh {
+    enum Event { case wake, unlock }
+
+    static func shouldRefresh(on event: Event, screenLocked: Bool) -> Bool {
+        switch event {
+        case .wake:   return !screenLocked
+        case .unlock: return true
+        }
+    }
+
+    static func screenLocked() -> Bool {
+        guard let dict = CGSessionCopyCurrentDictionary() as? [String: Any],
+              let locked = dict["CGSSessionScreenIsLocked"] as? Bool
+        else { return false }
+        return locked
+    }
+}
+
 // MARK: - WindowTraits
 //
 // Whether a window can take an arbitrary size. Tilers read these to tell a
@@ -3860,9 +3884,20 @@ final class WindowsAXObserver {
         // Rebuild the AX layer once the system has settled after wake.
         for name in [NSWorkspace.didWakeNotification, NSWorkspace.screensDidWakeNotification] {
             workspaceTokens.append(center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                guard AXWakeRefresh.shouldRefresh(on: .wake, screenLocked: AXWakeRefresh.screenLocked()) else {
+                    log("ax: wake behind the lock screen — AX rebuild waits for unlock")
+                    return
+                }
                 self?.scheduleRefreshAfterWake()
             })
         }
+        let dnc = DistributedNotificationCenter.default()
+        workspaceTokens.append(dnc.addObserver(
+            forName: NSNotification.Name("com.apple.screenIsUnlocked"), object: nil, queue: .main
+        ) { [weak self] _ in
+            guard AXWakeRefresh.shouldRefresh(on: .unlock, screenLocked: false) else { return }
+            self?.scheduleRefreshAfterWake()
+        })
         workspaceTokens.append(center.addObserver(
             forName: NSWorkspace.didLaunchApplicationNotification,
             object: nil, queue: .main
@@ -3977,8 +4012,15 @@ final class WindowsAXObserver {
         for app in NSWorkspace.shared.runningApplications where shouldObserve(app) {
             installForAppRetry(app: app, delays: WindowsAXObserver.startupRetryDelays, fireForExisting: false)
         }
-        log("ax: refreshed after wake — \(appCount) apps, \(windowCount) windows re-observed")
+        log("ax: refreshed after wake — \(appCount) apps, \(windowCount) windows torn down")
         AppDelegate.shared?.host?.pumpWindowsListForAllStacks()
+        // Installs retry for a few seconds; report what actually came back so
+        // a rebuild that attached nothing is visible without debug logging.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5.0) { [weak self] in
+            guard let self = self else { return }
+            let observed = self.windows.values.reduce(0) { $0 + $1.count }
+            log("ax: after wake rebuild — \(self.appObservers.count) apps, \(observed) windows observed")
+        }
     }
 
     /// A window re-found without an AX create (safety poll, CGS 1325): make

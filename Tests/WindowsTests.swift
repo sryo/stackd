@@ -33,6 +33,15 @@ private var rawWindowCandidatesExist: Bool {
 }
 
 func registerWindowsTests() {
+    test("AXWakeRefresh — a wake behind the lock screen waits for the unlock") {
+        // AX vends no window lists while the session is locked: a rebuild
+        // then attaches no per-window observers, and minimize/move/resize
+        // events stay dead until the daemon restarts.
+        try expectEqual(AXWakeRefresh.shouldRefresh(on: .wake, screenLocked: false), true)
+        try expectEqual(AXWakeRefresh.shouldRefresh(on: .wake, screenLocked: true), false)
+        try expectEqual(AXWakeRefresh.shouldRefresh(on: .unlock, screenLocked: false), true)
+    }
+
     // MARK: - WindowsLifecycleObserver.detail (pure: Snap → JSON dict)
 
     test("detail maps a Snap into the documented bang-detail dict shape") {
