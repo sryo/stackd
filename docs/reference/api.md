@@ -345,7 +345,7 @@ Operates on the stack's own NSPanel; no separate permission.
 - Lifecycle bang-channels (require manifest `handles`): `created, destroyed, moved, resized, minimized, deminimized` — `.subscribe(fn)` with bang payloads.
 
 **Methods** (no id = AX focused window of frontmost app; numeric id = specific CGWindowID):
-- `setFrame(frame)` or `setFrame(id, frame) → Promise`.
+- `setFrame(frame)` or `setFrame(id, frame, opts?) → Promise`. `opts:{duration?, easing?("easeOutCubic"|"linear"|"spring"), respectReduceMotion?(true)}` animates the id form on the daemon's display-link clock and resolves at settle. With the system Reduce Motion setting on, animations become an instant write unless `respectReduceMotion: false`.
 - `setFrameProbed(id, frame) → Promise<{ok, actual{x,y,w,h}|null}>`.
 - `minimize([id,] value?)` · `fullscreen([id,] value?)` · `raise([id])` · `focus(id)` · `close(id)` `→ Promise`.
 - `frame(id) → Promise<{x,y,w,h}>` · `cornerHints(id) → Promise<{toolbarPresent,role,subrole}>`.

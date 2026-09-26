@@ -271,4 +271,21 @@ func registerMotionPlannerTests() {
         try expect(!FrameWriteOrder.needsSizeReassert(target: target, readBack: nil),
                    "an unreadable size is not evidence of a mismatch")
     }
+
+    test("MotionRouting: duration or spring animates when Reduce Motion is off") {
+        try expect(MotionRouting.animates(duration: 0.25, easing: nil, reduceMotion: false, respectReduceMotion: true))
+        try expect(MotionRouting.animates(duration: 0, easing: .spring, reduceMotion: false, respectReduceMotion: true))
+        try expect(!MotionRouting.animates(duration: 0, easing: nil, reduceMotion: false, respectReduceMotion: true))
+        try expect(!MotionRouting.animates(duration: 0, easing: .linear, reduceMotion: false, respectReduceMotion: true))
+    }
+
+    test("MotionRouting: Reduce Motion collapses animations to an instant write") {
+        try expect(!MotionRouting.animates(duration: 0.25, easing: nil, reduceMotion: true, respectReduceMotion: true))
+        try expect(!MotionRouting.animates(duration: 0, easing: .spring, reduceMotion: true, respectReduceMotion: true))
+    }
+
+    test("MotionRouting: a caller can opt out of honoring Reduce Motion") {
+        try expect(MotionRouting.animates(duration: 0.25, easing: nil, reduceMotion: true, respectReduceMotion: false))
+        try expect(MotionRouting.animates(duration: 0, easing: .spring, reduceMotion: true, respectReduceMotion: false))
+    }
 }

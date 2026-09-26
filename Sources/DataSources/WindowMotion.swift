@@ -81,6 +81,18 @@ enum MotionMath {
     }
 }
 
+/// Whether a setFrame request animates. A duration or a spring asks for
+/// motion; the system Reduce Motion setting turns that into an instant write
+/// unless the caller opted out (a stack whose motion carries meaning, or
+/// that honors the setting itself).
+enum MotionRouting {
+    static func animates(duration: Double, easing: MotionEasing?,
+                         reduceMotion: Bool, respectReduceMotion: Bool) -> Bool {
+        guard duration > 0 || easing == .spring else { return false }
+        return !(reduceMotion && respectReduceMotion)
+    }
+}
+
 /// Which AX attribute a frame write sets first. Growing position-first
 /// keeps the larger size from being clamped against the old origin (a
 /// window near a screen edge); shrinking size-first keeps the move from
@@ -634,17 +646,21 @@ final class WindowMotionEngine {
     /// bridge entry: no options → instant AX write, cancelling any
     /// in-flight animation first so its next tick can't clobber the
     /// instant frame; duration or spring → the engine, easing defaulting
-    /// to easeOutCubic. Keeping the predicate here means setFrame and
-    /// setFrameProbed can't drift into animating under different
-    /// conditions.
+    /// to easeOutCubic, unless Reduce Motion is on and the caller didn't
+    /// opt out (see MotionRouting). Keeping the predicate here means
+    /// setFrame and setFrameProbed can't drift into animating under
+    /// different conditions.
     func performFrameWrite(
         windowID: CGWindowID,
         frame: CGRect,
         duration: Double,
         easing: MotionEasing?,
+        respectReduceMotion: Bool = true,
         completion: @escaping (FrameWriteOutcome) -> Void
     ) {
-        guard duration > 0 || easing == .spring else {
+        guard MotionRouting.animates(duration: duration, easing: easing,
+                                     reduceMotion: ReduceMotion.enabled,
+                                     respectReduceMotion: respectReduceMotion) else {
             instantWriteWins(windowID: windowID)
             let cached = elements.removeValue(forKey: windowID)
             // Animation writes for this window still queued or in flight

@@ -77,12 +77,16 @@ sd.windows = {
     // multi-window pass moves in lockstep — no per-window rAF stagger. The
     // promise resolves at settle: true = reached target, false = superseded
     // by a later setFrame / cancelAnimation on the same window.
+    // With the system Reduce Motion setting on, the animation collapses to
+    // an instant write (the promise resolves with the instant result) unless
+    // the options carry { respectReduceMotion: false }.
     setFrame(arg1, arg2, arg3) {
       if (typeof arg1 === "number") {
         const f = arg2 || {};
         const o = arg3 || {};
         return request({ type: "windows.byId.setFrame", id: arg1, x: f.x, y: f.y, w: f.w, h: f.h,
-                         duration: o.duration, easing: o.easing });
+                         duration: o.duration, easing: o.easing,
+                         respectReduceMotion: o.respectReduceMotion });
       }
       const f = arg1 || {};
       return request({ type: "windows.setFrame", x: f.x, y: f.y, w: f.w, h: f.h });

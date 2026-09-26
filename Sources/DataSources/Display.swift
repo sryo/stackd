@@ -578,6 +578,28 @@ enum Appearance {
     }
 }
 
+/// The system Reduce Motion setting, kept current from
+/// accessibilityDisplayOptionsDidChangeNotification rather than read per
+/// call. The observer is installed on first read. Main thread.
+enum ReduceMotion {
+    private static var cached: Bool?
+    private static var observer: NSObjectProtocol?
+
+    static var enabled: Bool {
+        if let c = cached { return c }
+        let center = NSWorkspace.shared.notificationCenter
+        observer = center.addObserver(
+            forName: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification,
+            object: nil, queue: .main
+        ) { _ in
+            cached = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        }
+        let v = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        cached = v
+        return v
+    }
+}
+
 /// Light/dark + accent + reduce-motion. Push on:
 ///   - AppleInterfaceThemeChangedNotification (distributed) — dark/light flip
 ///   - NSWorkspace.accessibilityDisplayOptionsDidChangeNotification — reduce motion

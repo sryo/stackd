@@ -55,7 +55,7 @@ import Foundation
 /// One spelling of the setFrame/setFrameProbed request body — id, frame,
 /// and the animation options both handlers forward to performFrameWrite.
 private func parseFrameWrite(_ body: [String: Any])
-    -> (id: CGWindowID, frame: CGRect, duration: Double, easing: MotionEasing?)
+    -> (id: CGWindowID, frame: CGRect, duration: Double, easing: MotionEasing?, respectReduceMotion: Bool)
 {
     (
         id: CGWindowID((body["id"] as? Int) ?? 0),
@@ -63,7 +63,8 @@ private func parseFrameWrite(_ body: [String: Any])
             x: body["x"] as? Double ?? 0, y: body["y"] as? Double ?? 0,
             width: body["w"] as? Double ?? 0, height: body["h"] as? Double ?? 0),
         duration: body["duration"] as? Double ?? 0,
-        easing: (body["easing"] as? String).flatMap(MotionEasing.init(rawValue:))
+        easing: (body["easing"] as? String).flatMap(MotionEasing.init(rawValue:)),
+        respectReduceMotion: body["respectReduceMotion"] as? Bool ?? true
     )
 }
 
@@ -97,10 +98,11 @@ extension Bridge {
             // instant-write-cancels-animation rule) lives in ONE place:
             // WindowMotionEngine.performFrameWrite.
             .custom("windows.byId.setFrame", permission: "windows", denyValue: false) { bridge, body, requestId in
-                let (id, frame, duration, easing) = parseFrameWrite(body)
+                let (id, frame, duration, easing, respectReduceMotion) = parseFrameWrite(body)
                 DispatchQueue.main.async { [weak bridge] in
                     WindowMotionEngine.shared.performFrameWrite(
-                        windowID: id, frame: frame, duration: duration, easing: easing
+                        windowID: id, frame: frame, duration: duration, easing: easing,
+                        respectReduceMotion: respectReduceMotion
                     ) { outcome in
                         switch outcome {
                         case .instant(let ok):       bridge?.respond(requestId: requestId, value: ok)
@@ -125,7 +127,7 @@ extension Bridge {
             // target?" sweep. With {duration, easing} the probe runs at
             // settle, so the promise IS the post-animation refusal check.
             .custom("windows.byId.setFrameProbed", permission: "windows") { bridge, body, requestId in
-                let (id, frame, duration, easing) = parseFrameWrite(body)
+                let (id, frame, duration, easing, respectReduceMotion) = parseFrameWrite(body)
                 DispatchQueue.main.async { [weak bridge] in
                     let probe: (Bool) -> Void = { ok in
                         WindowsByID.settleProbe(
@@ -137,7 +139,8 @@ extension Bridge {
                         }
                     }
                     WindowMotionEngine.shared.performFrameWrite(
-                        windowID: id, frame: frame, duration: duration, easing: easing
+                        windowID: id, frame: frame, duration: duration, easing: easing,
+                        respectReduceMotion: respectReduceMotion
                     ) { outcome in
                         switch outcome {
                         case .instant(let ok):
