@@ -557,6 +557,9 @@ final class WindowMotionEngine {
     }
 
     private func apply(_ write: MotionPlanner.FrameWrite) {
+        // The window's own AX moved/resized bangs are swallowed while it
+        // animates, so overlays tracking it are armed from here instead.
+        Overlay.noteWindowActivity(wid: write.windowID)
         if write.isFinal {
             // Full size→pos→size dance — the settle frame is the one that
             // must stick. Reuses the element every intermediate frame just

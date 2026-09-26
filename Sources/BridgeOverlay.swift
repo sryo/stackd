@@ -6,8 +6,9 @@ import Foundation
 ///
 ///   - `overlay.attach` — async on main; creates a borderless click-
 ///     through NSPanel + WKWebView pinned to a foreign target window we
-///     don't own. Subscribes to the shared `DisplayLinkObserver` so the
-///     panel repositions per vsync to track `SLSGetWindowBounds`. The
+///     don't own. The handle repositions it to track `SLSGetWindowBounds`
+///     every vsync while window events arm it, on a slow backstop otherwise
+///     (see `OverlayTickArm`). The
 ///     stack supplies {html, css?, js?}; rendering is plain WebKit, the
 ///     daemon is observe + set only.
 ///
@@ -44,8 +45,8 @@ extension Bridge {
             // ── Overlay (WebKit overlay primitive) ─────────────────────────────
             // Attach a borderless click-through NSPanel + WKWebView pinned to a
             // target window we don't own. The stack supplies {html, css?, js?};
-            // per vsync we reposition the panel to SLSGetWindowBounds(targetWID)
-            // and push `window.sd.target = {x,y,w,h}` into the overlay's WebView.
+            // while armed, per vsync we reposition the panel to
+            // SLSGetWindowBounds(targetWID) and push `window.sd.target = {x,y,w,h}` into the overlay's WebView.
             // The daemon is observe + set only — no CGContext drawing, no spec
             // DSL. Rendering is plain WebKit. Permission: "overlay".
             .custom("overlay.attach", permission: "overlay") { bridge, body, requestId in
@@ -78,43 +79,14 @@ extension Bridge {
                     }
                     bridge.overlayHandles[id] = handle
 
-                    // Vsync tick → reposition + sd.target push. We subscribe to
-                    // the shared DisplayLinkObserver (also drives sd.displayLink)
-                    // so multiple overlays share one CVDisplayLink —
-                    // RefCountedObserver handles install/teardown.
-                    let token = DisplayLinkObserver.shared.subscribe { [weak bridge] in
-                        guard let bridge = bridge,
-                              let h = bridge.overlayHandles[id] else { return }
-                        // Screenshot session in progress: ScreenshotHider
-                        // ordered the panel out; the re-show branch below
-                        // would undo that one frame later. Stay dormant —
-                        // geometry resumes on session exit (the hider's
-                        // restore + repinAllAfterScreenshot handles z-order).
-                        if ScreenshotHider.shared.active { return }
-                        // Target gone or hidden (user closed / minimized /
-                        // cmd-H'd the underlying window mid-overlay): hide
-                        // the panel and bail. Without this, the panel stayed
-                        // drawn at lastFrame after the target vanished — a
-                        // ghost border floating in space. Show it again on
-                        // the next tick where the target returns (e.g. user
-                        // un-minimizes).
-                        guard Overlay.isOrderedIn(h.targetWID),
-                              let frame = Overlay.bounds(of: h.targetWID) else {
-                            if h.panel.isVisible { h.panel.orderOut(nil) }
-                            return
-                        }
-                        if !h.panel.isVisible {
-                            h.syncAppKitFrame()
-                            h.panel.orderFrontRegardless()
-                            // Coming back from the target-hidden branch: the
-                            // target may have returned at its exact old frame
-                            // (un-minimize restores geometry), so the frame
-                            // diff alone would skip the SLS reorder and the
-                            // panel could sit BELOW the freshly-restored
-                            // target. Force the full repin path this tick.
-                            h.forceRepin()
-                        }
-                        h.tick(targetFrame: frame)
+                    // Tick driving lives in the handle: vsync ticks while
+                    // window events say the target may be changing, a slow
+                    // backstop otherwise (see OverlayTickArm). The token
+                    // stops both on detach / scope drain.
+                    handle.start()
+                    let token = Token { [weak handle] in
+                        if Thread.isMainThread { handle?.stop() }
+                        else { DispatchQueue.main.async { handle?.stop() } }
                     }
                     bridge.overlayTokens[id] = token
                     bridge.respond(requestId: requestId, value: id)

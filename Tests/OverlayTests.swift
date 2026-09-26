@@ -167,42 +167,38 @@ func registerOverlayTests() {
 
     // MARK: - OverlayRepinPolicy — z-order re-assert decision (pure)
 
-    test("OverlayRepinPolicy reorders on frame change regardless of tick count") {
+    test("OverlayRepinPolicy reorders on frame change regardless of elapsed time") {
         // Frame changed = the target moved/resized/retargeted. The reorder
         // must ride along every time — this is the event-driven primary.
-        try expectEqual(OverlayRepinPolicy.shouldReorder(frameChanged: true, ticksSinceReorder: 0), true)
-        try expectEqual(OverlayRepinPolicy.shouldReorder(frameChanged: true, ticksSinceReorder: 1), true)
+        try expectEqual(OverlayRepinPolicy.shouldReorder(frameChanged: true, sinceReorder: 0), true)
+        try expectEqual(OverlayRepinPolicy.shouldReorder(frameChanged: true, sinceReorder: 0.01), true)
     }
 
     test("OverlayRepinPolicy holds off below the cadence when the frame is static") {
         // Static frame + recent reorder → skip the WindowServer round-trip.
-        // This is the short-circuit that keeps the per-vsync tick cheap.
         try expectEqual(
             OverlayRepinPolicy.shouldReorder(
                 frameChanged: false,
-                ticksSinceReorder: OverlayRepinPolicy.reorderCadenceTicks - 1),
+                sinceReorder: OverlayRepinPolicy.reorderCadence - 0.01),
             false)
-        try expectEqual(OverlayRepinPolicy.shouldReorder(frameChanged: false, ticksSinceReorder: 0), false)
+        try expectEqual(OverlayRepinPolicy.shouldReorder(frameChanged: false, sinceReorder: 0), false)
     }
 
     test("OverlayRepinPolicy fires the safety reorder at the cadence ceiling") {
-        // Regression pin for the "border invisible behind its own target"
-        // bug: clicking an already-focused window raises it above the panel
-        // WITHOUT changing its frame, so the frame-diff alone never
-        // reordered again. CGS 808 → forceRepin is the event-driven fix;
-        // this cadence is the documented ceiling if 808 ever goes quiet
-        // (audio-processes precedent: registered listeners that never fire).
+        // Clicking an already-focused window raises it above the panel
+        // WITHOUT changing its frame, so the frame-diff alone never reorders.
+        // CGS 808 → forceRepin is the event-driven path; this cadence is the
+        // ceiling if 808 goes quiet. Measured in seconds, not ticks: ticks
+        // only run while armed or on the backstop.
         try expectEqual(
             OverlayRepinPolicy.shouldReorder(
                 frameChanged: false,
-                ticksSinceReorder: OverlayRepinPolicy.reorderCadenceTicks),
+                sinceReorder: OverlayRepinPolicy.reorderCadence),
             true)
-        // Cadence must stay low-frequency-but-finite: more than a handful
-        // of frames (not a per-tick hammer), bounded so staleness self-heals.
-        try expect(OverlayRepinPolicy.reorderCadenceTicks > 10,
-                   "cadence this low would reorder nearly every tick")
-        try expect(OverlayRepinPolicy.reorderCadenceTicks <= 600,
-                   "cadence this high leaves a wrong z-order visible for 5s+ at 120Hz")
+        try expect(OverlayRepinPolicy.reorderCadence >= OverlayTickArm.backstopInterval,
+                   "a cadence below the backstop would reorder on every backstop tick")
+        try expect(OverlayRepinPolicy.reorderCadence <= 2,
+                   "a cadence this high leaves a wrong z-order visible for seconds")
     }
 
     // MARK: - OverlayHandle.forceRepin — explicit z-order invalidation

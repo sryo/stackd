@@ -106,9 +106,10 @@ final class Bridge: NSObject, WKScriptMessageHandler {
     var nextURLHandlerId: Int = 1
     // sd.overlay handles: id → (handle, displayLink subscription token).
     // Each handle owns a borderless NSPanel + WKWebView pinned to a foreign
-    // target wid; the token drives per-vsync reposition + sd.target push via
-    // DisplayLinkObserver. Scope drains both on unload (detach closes the
-    // panel, token cancel removes the subscription).
+    // target wid and drives its own reposition + sd.target push (vsync while
+    // armed, backstop timer otherwise); the token stops that driving. Scope
+    // drains both on unload (detach closes the panel, token cancel stops
+    // the ticks).
     // Widened from fileprivate to internal so BridgeOverlay.swift's
     // overlay.attach / .setTarget / .eval / .detach closures can mint and
     // release OverlayHandles.

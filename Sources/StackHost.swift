@@ -312,6 +312,7 @@ final class StackHost {
 
     @discardableResult
     func bang(name: String, detail: [String: Any]) -> Int {
+        if name.hasPrefix("sd.window.") { Overlay.noteWindowBang(name: name, detail: detail) }
         var fired = 0
         var handlerIds: [String] = []
         var json: String?

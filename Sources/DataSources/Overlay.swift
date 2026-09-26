@@ -4,10 +4,11 @@ import CoreGraphics
 
 // WebKit overlay primitive: a borderless click-through NSPanel hosting a
 // WKWebView, pinned to a target window we don't own. The stack supplies
-// {html, css?, js?}; per vsync the daemon repositions the panel to match
-// SLSGetWindowBounds(targetWID) and, when the target's size or the outset
-// changes, pushes `window.sd.target = {x,y,w,h}` into the overlay's
-// WebView. Rendering is WebKit; the daemon only observes and sets geometry.
+// {html, css?, js?}; the daemon repositions the panel to match
+// SLSGetWindowBounds(targetWID) — every vsync while window events say the
+// target may be changing, on a slow backstop otherwise (OverlayTickArm) —
+// and, when the target's size or the outset changes, pushes
+// `window.sd.target = {x,y,w,h}` into the overlay's WebView. Rendering is WebKit; the daemon only observes and sets geometry.
 //
 // Why NSPanel + WKWebView instead of an SLS-owned sibling window (the
 // JankyBorders pattern):
@@ -68,9 +69,15 @@ final class OverlayHandle: NSObject, WKNavigationDelegate {
     // window content. Survives setTarget — retargeting a border overlay
     // keeps its ring geometry.
     private(set) var outset: CGFloat = 0
-    // Ticks since the last SLSTransactionOrderWindow. Drives the
-    // low-frequency safety reorder in tick() — see OverlayRepinPolicy.
-    private var ticksSinceReorder: Int = 0
+    // Time of the last SLSTransactionOrderWindow. Drives the low-frequency
+    // safety reorder in tick() — see OverlayRepinPolicy.
+    private var lastReorderAt: Double = -.infinity
+    // Tick driving: a vsync subscription while armed, a slow backstop timer
+    // otherwise. Only live between start() and stop().
+    private var tickArm = OverlayTickArm()
+    private var started = false
+    private var linkToken: Token?
+    private var backstop: Timer?
     // The WKWebView only accepts evaluateJavaScript after didFinish lands.
     // Until then we buffer the latest target geometry; on finish we flush.
     private var navigationReady: Bool = false
@@ -120,14 +127,100 @@ final class OverlayHandle: NSObject, WKNavigationDelegate {
     }
 
     /// Mark the cached frame dirty so the next tick re-runs setFrame +
-    /// reorderAboveTarget unconditionally. Callers (all main thread):
-    /// setTarget, Overlay.notifyWindowReordered (CGS 808 for our target),
-    /// and Bridge's tick closure when the panel transitions hidden→shown
-    /// after the target returns from minimize — in all three cases the
-    /// target's geometry may be unchanged while the z-order is stale.
+    /// reorderAboveTarget unconditionally, and arm the tick so that happens
+    /// on the next vsync. Callers (all main thread): setTarget, setOutset,
+    /// Overlay.notifyWindowReordered (CGS 808 for our target) and
+    /// repinAllAfterScreenshot — in each case the target's geometry may be
+    /// unchanged while the z-order is stale.
     func forceRepin() {
         if released { return }
         repinRequested = true
+        arm()
+    }
+
+    // MARK: - Tick driving
+
+    /// Begin ticking: one immediate tick to place the panel, then the
+    /// backstop. Main thread only.
+    func start() {
+        if released || started { return }
+        started = true
+        let timer = Timer(timeInterval: OverlayTickArm.backstopInterval, repeats: true) { [weak self] _ in
+            self?.backstopTick()
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        backstop = timer
+        arm()
+    }
+
+    /// Stop ticking. Idempotent; detach() calls it too.
+    func stop() {
+        started = false
+        backstop?.invalidate()
+        backstop = nil
+        linkToken?.cancel()
+        linkToken = nil
+        tickArm = OverlayTickArm()
+    }
+
+    /// Something about the target may be changing: tick every vsync until
+    /// it has been quiet for `hold` (at least OverlayTickArm.idle).
+    func arm(hold: Double = OverlayTickArm.idle) {
+        if released || !started { return }
+        guard tickArm.arm(now: CFAbsoluteTimeGetCurrent(), hold: hold) else { return }
+        // subscribe() primes the callback synchronously, so the first armed
+        // tick runs before the token is stored.
+        let token = DisplayLinkObserver.shared.subscribe { [weak self] in self?.armedTick() }
+        if tickArm.armed && started { linkToken = token } else { token.cancel() }
+    }
+
+    private func armedTick() {
+        let changed = step()
+        let stay = tickArm.afterTick(now: CFAbsoluteTimeGetCurrent(), changed: changed,
+                                     buttonDown: Mouse.isLeftButtonDown)
+        if !stay {
+            linkToken?.cancel()
+            linkToken = nil
+        }
+    }
+
+    private func backstopTick() {
+        guard tickArm.wantsBackstop else { return }
+        if step() { arm() }
+    }
+
+    /// One observation of the target: hide the panel when the target is
+    /// gone or hidden, re-show it when it returns, otherwise follow its
+    /// frame. True when anything visible changed.
+    @discardableResult
+    func step() -> Bool {
+        if released { return false }
+        // Screenshot session in progress: ScreenshotHider ordered the panel
+        // out; the re-show branch below would undo that one frame later.
+        // Stay dormant — the hider's restore + repinAllAfterScreenshot
+        // handle z-order on session exit.
+        if ScreenshotHider.shared.active { return false }
+        // Target gone or hidden (closed / minimized / cmd-H'd): hide the
+        // panel rather than leave a ghost border at the last frame.
+        guard Overlay.isOrderedIn(targetWID),
+              let frame = Overlay.bounds(of: targetWID) else {
+            if panel.isVisible {
+                panel.orderOut(nil)
+                return true
+            }
+            return false
+        }
+        var changed = false
+        if !panel.isVisible {
+            syncAppKitFrame()
+            panel.orderFrontRegardless()
+            // The target may have returned at its exact old frame (un-
+            // minimize restores geometry), so the frame diff alone would
+            // skip the SLS reorder and leave the panel below it.
+            repinRequested = true
+            changed = true
+        }
+        return tick(targetFrame: frame) || changed
     }
 
     /// Evaluate JS in the overlay's WebView. Used by stacks that drive the
@@ -154,8 +247,9 @@ final class OverlayHandle: NSObject, WKNavigationDelegate {
     /// overlay's WebView.
     /// `targetFrame` comes from SLSGetWindowBounds(targetWID) (top-left,
     /// screen-points).
-    func tick(targetFrame: CGRect) {
-        if released { return }
+    @discardableResult
+    func tick(targetFrame: CGRect) -> Bool {
+        if released { return false }
 
         // Convert CGS top-left coords to AppKit bottom-left for NSPanel.
         // The target's top edge in CGS == the panel's top edge in AppKit;
@@ -201,13 +295,13 @@ final class OverlayHandle: NSObject, WKNavigationDelegate {
         // app boundaries. Reordered on frame change, on explicit repin
         // (folded into frameChanged above), and on a low-frequency safety
         // cadence — see OverlayRepinPolicy for why the cadence exists.
-        ticksSinceReorder += 1
+        let now = CFAbsoluteTimeGetCurrent()
         if reordered {
-            ticksSinceReorder = 0
+            lastReorderAt = now
         } else if OverlayRepinPolicy.shouldReorder(frameChanged: frameChanged,
-                                                   ticksSinceReorder: ticksSinceReorder) {
+                                                   sinceReorder: now - lastReorderAt) {
             reorderAboveTarget()
-            ticksSinceReorder = 0
+            lastReorderAt = now
         }
 
         // Push target geometry into the WebView. Spec authors absolute-position
@@ -215,11 +309,13 @@ final class OverlayHandle: NSObject, WKNavigationDelegate {
         // coordinates, so the target's top-left sits at (outset, outset).
         // With outset 0 that's (0,0), byte-compatible with the pre-outset
         // payload plus the new field.
-        let resizing = resizeDetector.update(size: targetFrame.size, now: CFAbsoluteTimeGetCurrent(),
+        let resizing = resizeDetector.update(size: targetFrame.size, now: now,
                                              buttonDown: Mouse.isLeftButtonDown)
         let payload = OverlayGeometry.targetPayloadJS(targetFrame: targetFrame, outset: outset,
                                                       resizing: resizing)
-        guard let js = OverlayTickPlan.payloadToPush(payload, lastPushed: lastPushedTargetJS) else { return }
+        guard let js = OverlayTickPlan.payloadToPush(payload, lastPushed: lastPushedTargetJS) else {
+            return frameChanged
+        }
         lastPushedTargetJS = js
         if navigationReady {
             pushTarget(js)
@@ -227,6 +323,7 @@ final class OverlayHandle: NSObject, WKNavigationDelegate {
             // Buffer — flushed in webView(_:didFinish:).
             pendingTargetJS = js
         }
+        return true
     }
 
     private func pushTarget(_ js: String) {
@@ -246,6 +343,7 @@ final class OverlayHandle: NSObject, WKNavigationDelegate {
     /// target window — we only own our panel.
     func detach() {
         if released { return }
+        stop()
         released = true
         Overlay.orderOutNow(panel)
         panel.orderOut(nil)
@@ -460,20 +558,96 @@ struct NewestWinsPush {
 ///
 /// Primary signal is event-driven: frame changes (move/resize/retarget) and
 /// explicit repins (CGS 808 "window reordered" for the target wid, routed
-/// via `Overlay.notifyWindowReordered`). The tick cadence is a SAFETY
-/// CEILING, not the mechanism: 808 is registered per-connection in
-/// WindowEvents and is yabai's canonical reorder source, but a listener
-/// that registers fine can silently never fire, so we don't trust an
-/// unverified listener alone for a user-visible invariant. One SLSTransactionOrderWindow per
-/// ~cadence is a single WindowServer transaction — imperceptible cost
-/// against "border silently behind its own target until the next move."
+/// via `Overlay.notifyWindowReordered`). The cadence is a SAFETY CEILING,
+/// not the mechanism: 808 is registered per-connection in WindowEvents and
+/// is yabai's canonical reorder source, but a listener that registers fine
+/// can silently never fire, so we don't trust an unverified listener alone
+/// for a user-visible invariant. It is measured in seconds because ticks
+/// only run while armed or on the backstop; an idle overlay reorders on
+/// every other backstop tick. One SLSTransactionOrderWindow per cadence is
+/// a single WindowServer transaction — imperceptible cost against "border
+/// silently behind its own target until the next move."
 enum OverlayRepinPolicy {
-    /// ~1s at 120Hz, ~2s at 60Hz. Chosen ceiling — raises that 808 misses
-    /// stay wrong for at most this long.
-    static let reorderCadenceTicks = 120
+    /// Chosen ceiling — raises that 808 misses stay wrong for at most this
+    /// long (plus up to one backstop interval).
+    static let reorderCadence: Double = 1.0
 
-    static func shouldReorder(frameChanged: Bool, ticksSinceReorder: Int) -> Bool {
-        frameChanged || ticksSinceReorder >= reorderCadenceTicks
+    static func shouldReorder(frameChanged: Bool, sinceReorder: Double) -> Bool {
+        frameChanged || sinceReorder >= reorderCadence
+    }
+}
+
+// MARK: - Tick arming (pure, testable)
+
+/// When a window-tracking overlay runs its per-vsync tick. Each tick costs
+/// two window-server reads (SLSWindowIsOrderedIn + SLSGetWindowBounds), so
+/// an idle overlay shouldn't pay them every frame forever.
+///
+/// Events that say the target may be changing arm the tick: AX moved /
+/// resized / minimized / deminimized / focused and CGS reorder / destroy
+/// (through the host's window bangs), daemon-driven frame writes, retarget,
+/// outset change, app hide / unhide, space and display changes. Once armed
+/// the tick keeps itself alive while the frame or visibility keeps changing
+/// (and while a mouse button is held, so a paused drag resumes without
+/// waiting for the next coalesced AX event), and disarms after `idle`
+/// seconds of no change.
+///
+/// Apps that move or resize windows without posting AX notifications, and
+/// windows that vanish silently, are caught by the backstop: one tick every
+/// `backstopInterval` while disarmed, which arms the vsync tick as soon as
+/// it sees a change. That interval is a chosen ceiling on how stale an
+/// overlay can be for a target nothing tells us about.
+struct OverlayTickArm {
+    static let idle: Double = 0.100
+    static let backstopInterval: Double = 0.5
+    /// Hold for events whose visible effect lands at the end of a system
+    /// animation (minimize genie, app hide, space slide).
+    static let visibilityHold: Double = 0.6
+
+    private(set) var armed = false
+    private var deadline: Double = -.infinity
+
+    var wantsBackstop: Bool { !armed }
+
+    /// Keep ticking until at least `now + hold`. True on the disarmed →
+    /// armed edge, where the caller subscribes to vsync.
+    mutating func arm(now: Double, hold: Double = OverlayTickArm.idle) -> Bool {
+        deadline = max(deadline, now + hold)
+        if armed { return false }
+        armed = true
+        return true
+    }
+
+    /// After an armed tick. `changed` = the frame, visibility or payload
+    /// changed this tick. `buttonDown` is only consulted once the idle spell
+    /// has run out. False means disarmed: the caller unsubscribes.
+    mutating func afterTick(now: Double, changed: Bool, buttonDown: () -> Bool) -> Bool {
+        if changed { deadline = max(deadline, now + Self.idle) }
+        if now < deadline { return true }
+        if buttonDown() {
+            deadline = now + Self.idle
+            return true
+        }
+        armed = false
+        return false
+    }
+}
+
+/// Which host window bangs arm overlay ticks, and for how long. Frame and
+/// z-order events arm for the idle spell (the tick then keeps itself alive
+/// while the frame moves); visibility events hold through the system
+/// animation that precedes the change.
+enum OverlayArmEvents {
+    static func hold(forBang name: String) -> Double? {
+        switch name {
+        case "sd.window.moved", "sd.window.resized", "sd.window.reordered",
+             "sd.window.focused", "sd.window.focusedByMouse":
+            return OverlayTickArm.idle
+        case "sd.window.minimized", "sd.window.deminimized", "sd.window.destroyed":
+            return OverlayTickArm.visibilityHold
+        default:
+            return nil
+        }
     }
 }
 
@@ -504,6 +678,60 @@ enum Overlay {
     /// notifyWindowReordered against degenerate handles.
     static func register(_ handle: OverlayHandle) {
         liveHandles.add(handle)
+        installArmObservers()
+    }
+
+    /// Something about window `wid` may be changing (AX move / resize,
+    /// daemon frame write, minimize, …): arm the tick of every overlay
+    /// tracking it. Main thread only.
+    static func noteWindowActivity(wid: CGWindowID, hold: Double = OverlayTickArm.idle) {
+        for handle in liveHandles.allObjects where handle.targetWID == wid {
+            handle.arm(hold: hold)
+        }
+    }
+
+    /// Host window-bang tap: every `sd.window.*` bang the host fans out to
+    /// stacks also arms the overlays tracking that window.
+    static func noteWindowBang(name: String, detail: [String: Any]) {
+        guard let hold = OverlayArmEvents.hold(forBang: name) else { return }
+        if !Thread.isMainThread {
+            DispatchQueue.main.async { noteWindowBang(name: name, detail: detail) }
+            return
+        }
+        if let id = detail["id"] as? Int {
+            noteWindowActivity(wid: CGWindowID(id), hold: hold)
+        } else {
+            armAll(hold: hold)
+        }
+    }
+
+    static func armAll(hold: Double = OverlayTickArm.idle) {
+        for handle in liveHandles.allObjects { handle.arm(hold: hold) }
+    }
+
+    private static var armObserversInstalled = false
+
+    /// App hide / unhide, space switches and display changes can hide,
+    /// show or move any target without a per-window event. Rare, so they
+    /// arm every overlay rather than resolving which targets they touched.
+    /// Installed once, on the first attach, for the process lifetime.
+    private static func installArmObservers() {
+        if armObserversInstalled { return }
+        armObserversInstalled = true
+        let ws = NSWorkspace.shared.notificationCenter
+        for name in [NSWorkspace.didHideApplicationNotification,
+                     NSWorkspace.didUnhideApplicationNotification,
+                     NSWorkspace.activeSpaceDidChangeNotification] {
+            ws.addObserver(forName: name, object: nil, queue: .main) { _ in
+                armAll(hold: OverlayTickArm.visibilityHold)
+            }
+        }
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.didChangeScreenParametersNotification,
+            object: nil, queue: .main
+        ) { _ in
+            armAll(hold: OverlayTickArm.visibilityHold)
+        }
     }
 
     /// CGS 808 ("window reordered") landed for `wid`. If any live overlay
