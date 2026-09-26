@@ -2315,8 +2315,12 @@ private enum SkyLightWindowEvents {
 //
 // Probe-only codes, named per CGSInternal's CGSNotificationType list. They
 // are counted and, under STACKD_CGS_DEBUG, logged with their payload's
-// leading words; nothing consumes them until a live run shows whether and
-// how they fire on this macOS:
+// leading words; nothing consumes them. On macOS 27 only 811 fires (len 4,
+// the new window's wid as the only word, at window creation). The others
+// never reach the notify proc, not even through the [700, 2000) debug
+// catch-all, across window create/close/minimize and user edge drags —
+// so the drag codes can't bracket a resize and sd.window.resizing keeps
+// its mouse-button gate:
 //   802  — window ordered in
 //   803  — window ordered out
 //   809  — window geometry did change

@@ -821,6 +821,7 @@ final class WindowMotionEngine {
         let route = MotionRouting.route(duration: duration, easing: easing, live: live,
                                         reduceMotion: ReduceMotion.enabled,
                                         respectReduceMotion: respectReduceMotion)
+        WindowDebug.log("setFrame: wid=\(windowID) route=\(route) frame=\(frame)")
         if route == .live {
             liveWrite(windowID: windowID, frame: frame) { ok in completion(.instant(ok: ok)) }
             return

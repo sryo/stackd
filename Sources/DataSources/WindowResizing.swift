@@ -10,10 +10,10 @@ import CoreGraphics
 /// decides when a user drag of a window edge begins, changes and ends.
 ///
 /// The begin/end sources are inputs, not baked in: `interacting` gates
-/// begins (today the left mouse button; the window-drag codes 1411/1412
-/// could stand in for it) and `release` ends every active drag (today a
-/// left mouse-up; 1412 could call it just as well). `expireQuiet` is the
-/// fallback when the release is missed.
+/// begins (the left mouse button) and `release` ends every active drag (a
+/// left mouse-up). The window-drag CGS codes 1411/1412 would fit either
+/// role but don't fire on macOS 27 (see the probe-only codes in
+/// Windows.swift). `expireQuiet` is the fallback when the release is missed.
 ///
 /// - begin: the first size change of a window, relative to the last frame
 ///   seen for it, while interacting and not an echo of a daemon write.
