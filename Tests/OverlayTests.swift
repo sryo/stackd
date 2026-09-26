@@ -430,4 +430,86 @@ func registerOverlayTests() {
         try expect(b.contains(.ignoresCycle))
         panel.close()
     }
+
+    // MARK: - OverlayTargetLevel — an attached panel shares its target's level (pure)
+
+    test("OverlayTargetLevel reads the level of a new target") {
+        var cache = OverlayTargetLevel()
+        var reads: [CGWindowID] = []
+        let level = cache.resolve(target: 42, refresh: false) { wid in reads.append(wid); return 3 }
+        try expectEqual(level, 3)
+        try expectEqual(reads, [42])
+    }
+
+    test("OverlayTargetLevel serves the cached level for the same target without a read") {
+        var cache = OverlayTargetLevel()
+        _ = cache.resolve(target: 42, refresh: false) { _ in 3 }
+        var reads = 0
+        let level = cache.resolve(target: 42, refresh: false) { _ in reads += 1; return 8 }
+        try expectEqual(level, 3)
+        try expectEqual(reads, 0, "a static target must not cost a window-server read per tick")
+    }
+
+    test("OverlayTargetLevel re-reads on retarget and on an explicit refresh") {
+        var cache = OverlayTargetLevel()
+        _ = cache.resolve(target: 42, refresh: false) { _ in 0 }
+        try expectEqual(cache.resolve(target: 43, refresh: false) { _ in 3 }, 3)
+        try expectEqual(cache.resolve(target: 43, refresh: true) { _ in 8 }, 8,
+                        "a repin must pick up a target that changed level in place")
+    }
+
+    test("OverlayTargetLevel keeps the known level when a refresh read fails") {
+        var cache = OverlayTargetLevel()
+        _ = cache.resolve(target: 42, refresh: false) { _ in 3 }
+        try expectEqual(cache.resolve(target: 42, refresh: true) { _ in nil }, 3)
+    }
+
+    test("OverlayTargetLevel falls back to the normal level when a new target can't be read") {
+        // Never the statusBar level: that sits above the Dock. The failed
+        // read is retried on the next resolve instead of being cached.
+        var cache = OverlayTargetLevel()
+        _ = cache.resolve(target: 42, refresh: false) { _ in 3 }
+        let level = cache.resolve(target: 43, refresh: false) { _ in nil }
+        try expectEqual(level, OverlayTargetLevel.fallback)
+        try expectEqual(OverlayTargetLevel.fallback, NSWindow.Level.normal.rawValue)
+        var retried = false
+        try expectEqual(cache.resolve(target: 43, refresh: false) { _ in retried = true; return 3 }, 3)
+        try expect(retried, "an unread target must be read again, not served the fallback forever")
+    }
+
+    test("Overlay.makeOverlayPanel: a window-attached panel starts at the normal level, below the Dock") {
+        let panel = Overlay.makeOverlayPanel(frame: NSRect(x: -9999, y: -9999, width: 1, height: 1),
+                                             attachedToWindow: true)
+        try expectEqual(panel.level, .normal)
+        try expect(panel.level < .dock)
+        panel.close()
+    }
+
+    test("Overlay.makeOverlayPanel: a free region panel keeps the statusBar level") {
+        let panel = Overlay.makeOverlayPanel(frame: NSRect(x: -9999, y: -9999, width: 1, height: 1),
+                                             attachedToWindow: false)
+        try expectEqual(panel.level, .statusBar)
+        panel.close()
+    }
+
+    test("Overlay.level(of:) returns nil for kCGNullWindowID") {
+        try expect(Overlay.level(of: 0) == nil)
+    }
+
+    test("Overlay.level(of:) reads a live window's level") {
+        let panel = NSPanel(contentRect: NSRect(x: -9999, y: -9999, width: 1, height: 1),
+                            styleMask: .borderless, backing: .buffered, defer: false)
+        // AppKit hands the level to the window server on the next
+        // CATransaction commit of an ordered-in window; a fully transparent
+        // 1pt panel far off screen is ordered in without showing anything.
+        panel.alphaValue = 0
+        panel.orderFrontRegardless()
+        panel.level = .floating
+        CATransaction.flush()
+        let wid = CGWindowID(panel.windowNumber)
+        try expect(wid != 0, "panel has no window-server window")
+        try expectEqual(Overlay.level(of: wid), NSWindow.Level.floating.rawValue)
+        panel.orderOut(nil)
+        panel.close()
+    }
 }

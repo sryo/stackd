@@ -26,9 +26,11 @@ import CoreGraphics
 private enum SkyLightOverlay {
     typealias GetWindowBoundsFn   = @convention(c) (Int32, UInt32, UnsafeMutablePointer<CGRect>) -> Int32
     typealias WindowIsOrderedInFn = @convention(c) (Int32, UInt32, UnsafeMutablePointer<DarwinBoolean>) -> Int32
+    typealias GetWindowLevelFn    = @convention(c) (Int32, UInt32, UnsafeMutablePointer<Int32>) -> Int32
 
     static let getWindowBounds:   GetWindowBoundsFn?   = SkyLight.sym("SLSGetWindowBounds")
     static let windowIsOrderedIn: WindowIsOrderedInFn? = SkyLight.sym("SLSWindowIsOrderedIn")
+    static let getWindowLevel:    GetWindowLevelFn?    = SkyLight.sym("SLSGetWindowLevel")
 }
 
 // MARK: - OverlayHandle
@@ -72,6 +74,8 @@ final class OverlayHandle: NSObject, WKNavigationDelegate {
     // Time of the last SLSTransactionOrderWindow. Drives the low-frequency
     // safety reorder in tick() — see OverlayRepinPolicy.
     private var lastReorderAt: Double = -.infinity
+    // The target's window level, which the panel shares.
+    private var targetLevel = OverlayTargetLevel()
     // Tick driving: a vsync subscription while armed, a slow backstop timer
     // otherwise. Only live between start() and stop().
     private var tickArm = OverlayTickArm()
@@ -276,6 +280,10 @@ final class OverlayHandle: NSObject, WKNavigationDelegate {
         if !panel.isVisible {
             syncAppKitFrame()
             panel.orderFrontRegardless()
+            // The panel shares its target's level, so an order-front that
+            // reaches the window server after this tick's reorder would
+            // leave it over windows that cover the target. Commit it now.
+            CATransaction.flush()
             // The target may have returned at its exact old frame (un-
             // minimize restores geometry), so the frame diff alone would
             // skip the SLS reorder and leave the panel below it.
@@ -315,6 +323,11 @@ final class OverlayHandle: NSObject, WKNavigationDelegate {
     func tick(targetFrame: CGRect) -> Bool {
         if released { return false }
         let now = CFAbsoluteTimeGetCurrent()
+
+        // Level first: the reorder below is relative to the target, which
+        // only lands directly above it when both share a level. A repin
+        // re-reads it; a retarget reads the new target's.
+        applyTargetLevel(refresh: repinRequested)
 
         // A requested repin invalidates the frame cache so BOTH the
         // setFrame and the reorder below re-run this tick.
@@ -454,6 +467,21 @@ final class OverlayHandle: NSObject, WKNavigationDelegate {
         guard appKitStale, lastFrame != .zero else { return }
         panel.setFrameOrigin(lastFrame.origin)
         appKitStale = false
+    }
+
+    /// Put the panel at its target's window level. Only writes on change.
+    /// AppKit sends a level write to the window server at the next
+    /// CATransaction commit, and that write puts the panel at the front of
+    /// the level; flushing here lands it before this tick's reorder, which
+    /// the dirty frame forces, instead of after it.
+    private func applyTargetLevel(refresh: Bool) {
+        let raw = targetLevel.resolve(target: targetWID, refresh: refresh,
+                                      read: { Overlay.level(of: $0) })
+        if panel.level.rawValue != raw {
+            panel.level = NSWindow.Level(rawValue: raw)
+            CATransaction.flush()
+            lastFrame = .zero
+        }
     }
 
     private func moveAndOrderAboveTarget(cgsOrigin: CGPoint) -> Bool {
@@ -740,6 +768,36 @@ enum OverlayRepinPolicy {
 
     static func shouldReorder(frameChanged: Bool, sinceReorder: Double) -> Bool {
         frameChanged || sinceReorder >= reorderCadence
+    }
+}
+
+// MARK: - Target level (pure, testable)
+
+/// The window level a window-attached panel sits at: its target's own level,
+/// so the per-tick "one slot above the target" order puts the panel directly
+/// over the target and under everything the window server stacks above it —
+/// windows in front of the target, the Dock, the menu bar, notifications.
+///
+/// The level is one window-server read per target, cached for that wid. A
+/// retarget reads the new target; a repin (`refresh`) re-reads so a target
+/// that changed level in place (an app toggling float-on-top) is picked up.
+/// A read that fails keeps the level already known for the same target, or
+/// falls back to the normal level for a new one and tries again next time.
+struct OverlayTargetLevel {
+    static let fallback = NSWindow.Level.normal.rawValue
+
+    private var wid: CGWindowID = 0
+    private var level: Int?
+
+    mutating func resolve(target: CGWindowID, refresh: Bool, read: (CGWindowID) -> Int?) -> Int {
+        if target != wid {
+            wid = target
+            level = nil
+        }
+        if level == nil || refresh, let fresh = read(target) {
+            level = fresh
+        }
+        return level ?? Self.fallback
     }
 }
 
@@ -1258,11 +1316,12 @@ enum Overlay {
         panel.isOpaque = false
         panel.backgroundColor = .clear
         panel.hasShadow = false
-        // .statusBar gets us above most app windows; the per-tick
-        // SLSTransactionOrderWindow call explicitly pins us above the
-        // specific target on the WindowServer side, which is what
-        // ultimately wins for foreign-window ordering.
-        panel.level = .statusBar
+        // An attached panel starts at the normal level and takes its
+        // target's level on the first tick (OverlayTargetLevel); the per-tick
+        // SLSTransactionOrderWindow then places it one slot above the target,
+        // so whatever covers the target (other windows, the Dock, the menu
+        // bar) covers the panel too. A free region floats like a HUD stack.
+        panel.level = attachedToWindow ? .normal : .statusBar
         // Sticky across spaces, usable over full-screen apps, never in the
         // window cycle. Region panels add .stationary (StackWindow's recipe);
         // attached panels use .transient instead, which is mutually
@@ -1389,6 +1448,14 @@ enum Overlay {
         var shown: DarwinBoolean = false
         _ = fn(SkyLight.cid, UInt32(wid), &shown)
         return shown.boolValue
+    }
+
+    /// The window-server level of a window we don't own (the raw
+    /// NSWindow.Level / CGWindowLevel value). nil if SLS rejects the wid.
+    static func level(of wid: CGWindowID) -> Int? {
+        guard wid != 0, let fn = SkyLightOverlay.getWindowLevel else { return nil }
+        var level: Int32 = 0
+        return fn(SkyLight.cid, UInt32(wid), &level) == 0 ? Int(level) : nil
     }
 }
 
