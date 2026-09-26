@@ -1033,6 +1033,9 @@ struct TouchFrame: Equatable {
     var frame: Int
     var touches: [TouchContact]
     var synthetic: Bool = false
+    /// systemUptime when the MultitouchSupport callback delivered the frame.
+    /// `timestamp` is the device's own clock, which isn't comparable to it.
+    var receivedAt: Double? = nil
 
     /// MTPathStage → consumer-friendly state name. MakeTouch=began,
     /// Touching=moved, BreakTouch=ended, OutOfRange=lifted,
@@ -1057,8 +1060,8 @@ struct TouchFrame: Equatable {
         stage != 2 && stage != 4 && stage != 6
     }
 
-    /// The sd.touchdevice payload. `ageMs` is how long ago the hardware
-    /// stamped the frame (null when the clocks disagree), and `emittedAt` is
+    /// The sd.touchdevice payload. `ageMs` is how long ago the daemon
+    /// received the frame from MultitouchSupport (null when unknown), and `emittedAt` is
     /// the epoch-ms wall clock at emit, so a stack can add its own delivery
     /// lag: `ageMs + (performance.timeOrigin + performance.now() - emittedAt)`.
     static func payload(_ f: TouchFrame, uptimeNow: Double, epochMsNow: Double) -> [String: Any] {
@@ -1079,14 +1082,14 @@ struct TouchFrame: Equatable {
                 "minorAxis":  Double(t.minorAxis)
             ])
         }
-        let age = (uptimeNow - f.timestamp) * 1000
+        let age = f.receivedAt.map { (uptimeNow - $0) * 1000 }
         var p: [String: Any] = [
             "timestamp": f.timestamp,
             "frame":     f.frame,
             "device":    f.device,
             "touches":   touches,
             "emittedAt": epochMsNow,
-            "ageMs":     (age >= 0 && age < 10_000) ? age as Any : NSNull()
+            "ageMs":     age.flatMap { $0 >= 0 && $0 < 10_000 ? $0 : nil } as Any? ?? NSNull()
         ]
         if f.synthetic { p["synthetic"] = true }
         return p
@@ -1183,7 +1186,8 @@ final class TouchFrameMailbox {
                                          timestamp: last.timestamp + (now - dev.lastOfferAt),
                                          frame: last.frame,
                                          touches: [],
-                                         synthetic: true)
+                                         synthetic: true,
+                                         receivedAt: now)
                 dev.lastAccepted = release
                 devices[id] = dev
                 enqueue(Pending(frame: release, isEdge: true))
@@ -1355,7 +1359,8 @@ private func touchDeviceFrameCallback(_ device: UnsafeMutableRawPointer?,
                 minorAxis: t.minorAxis))
         }
     }
-    observer.accept(TouchFrame(device: deviceId, timestamp: timestamp, frame: frame, touches: contacts))
+    observer.accept(TouchFrame(device: deviceId, timestamp: timestamp, frame: frame, touches: contacts,
+                               receivedAt: ProcessInfo.processInfo.systemUptime))
 }
 
 // IOKit matching callback for AppleMultitouchDevice arrival/removal. The

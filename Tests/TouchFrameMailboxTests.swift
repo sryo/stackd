@@ -161,14 +161,22 @@ func registerTouchFrameMailboxTests() {
         try expectEqual(t["y"] as? Double, 0.75)
     }
 
-    test("TouchFrame.payload: stamps emittedAt and the frame's age") {
-        let f = frame(1, [contact(1, touching)], t: 100.0)
+    test("TouchFrame.payload: ages the frame from when the daemon received it") {
+        // The device timestamp runs on MultitouchSupport's own clock, which
+        // doesn't match systemUptime, so age comes from receivedAt.
+        var f = frame(1, [contact(1, touching)], t: 867_460.0)
+        f.receivedAt = 100.0
         let p = TouchFrame.payload(f, uptimeNow: 100.004, epochMsNow: 1234.5)
         try expectEqual(p["emittedAt"] as? Double, 1234.5)
+        try expectEqual(p["timestamp"] as? Double, 867_460.0)
         let age = (p["ageMs"] as? Double) ?? -1
         try expect(abs(age - 4.0) < 0.001, "ageMs \(age)")
-        let skewed = TouchFrame.payload(frame(1, [], t: 200.0), uptimeNow: 100.0, epochMsNow: 0)
-        try expect(skewed["ageMs"] is NSNull, "a frame from the future has no age")
+        var skewed = frame(1, [], t: 0)
+        skewed.receivedAt = 200.0
+        try expect(TouchFrame.payload(skewed, uptimeNow: 100.0, epochMsNow: 0)["ageMs"] is NSNull,
+                   "a frame received in the future has no age")
+        try expect(TouchFrame.payload(frame(1, [], t: 100.0), uptimeNow: 100.004, epochMsNow: 0)["ageMs"] is NSNull,
+                   "a frame with no receive stamp has no age")
     }
 
     test("TouchFrame.payload: names the source device") {

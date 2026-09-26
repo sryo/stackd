@@ -130,7 +130,7 @@ sd.sensors = channel("sensors");
   // senderId — so frames from two devices can be told apart.
   // If the device goes quiet for 120ms mid-touch the daemon sends that
   // release itself, marked synthetic: true.
-  // Latency: ageMs is hardware stamp → daemon emit (null if unknown);
+  // Latency: ageMs is daemon receive → daemon emit (null if unknown);
   // emittedAt is epoch ms at emit, so total event age on arrival is
   //   e.ageMs + (performance.timeOrigin + performance.now() - e.emittedAt).
   // subscribe(fn, { interval }) is accepted but ignored on this channel.
