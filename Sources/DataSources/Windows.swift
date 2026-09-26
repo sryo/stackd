@@ -790,6 +790,14 @@ enum WindowsByID {
     /// settle frame reuses the element it animated through). Bypasses the
     /// batch sink — callers check it first.
     static func setFrame(element el: AXUIElement, windowID: CGWindowID, frame: CGRect) -> Bool {
+        let ok = writeFrameAX(element: el, frame: frame)
+        if ok { FrameLedger.shared.recordWrite(windowID: windowID, frame: frame) }
+        return ok
+    }
+
+    /// The size→position→size write alone, with no main-thread bookkeeping,
+    /// so an app's AX writer queue can run it.
+    static func writeFrameAX(element el: AXUIElement, frame: CGRect) -> Bool {
         let x = frame.origin.x, y = frame.origin.y, w = frame.size.width, h = frame.size.height
         var pos = CGPoint(x: x, y: y)
         var sz  = CGSize(width: w, height: h)
@@ -806,13 +814,32 @@ enum WindowsByID {
         _ = AXUIElementSetAttributeValue(el, kAXSizeAttribute     as CFString, szVal)
         let pOK = AXUIElementSetAttributeValue(el, kAXPositionAttribute as CFString, posVal)
         let sOK = AXUIElementSetAttributeValue(el, kAXSizeAttribute     as CFString, szVal)
-        if pOK == .success && sOK == .success {
-            FrameLedger.shared.recordWrite(
-                windowID: windowID,
-                frame: CGRect(x: x, y: y, width: w, height: h)
-            )
-        }
         return pOK == .success && sOK == .success
+    }
+
+    /// One animation step: size and/or position, each only when asked for,
+    /// under a bounded messaging timeout so a hung app costs its own writer
+    /// queue at most `timeout` per step. True when a write timed out.
+    /// Thread-agnostic; the element's timeout is restored to the default.
+    static func writeAxesAX(element el: AXUIElement, frame: CGRect,
+                            size writeSize: Bool, position writePosition: Bool,
+                            timeout: Float) -> Bool {
+        AXUIElementSetMessagingTimeout(el, timeout)
+        defer { AXUIElementSetMessagingTimeout(el, 0) }
+        var timedOut = false
+        if writeSize {
+            var size = frame.size
+            if let sizeVal = AXValueCreate(.cgSize, &size) {
+                timedOut = AXUIElementSetAttributeValue(el, kAXSizeAttribute as CFString, sizeVal) == .cannotComplete
+            }
+        }
+        if writePosition && !timedOut {
+            var pos = frame.origin
+            if let posVal = AXValueCreate(.cgPoint, &pos) {
+                timedOut = AXUIElementSetAttributeValue(el, kAXPositionAttribute as CFString, posVal) == .cannotComplete
+            }
+        }
+        return timedOut
     }
 
     /// Single-window CGWindowList attribute dict. `.optionIncludingWindow`

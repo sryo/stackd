@@ -142,6 +142,11 @@ struct MotionPlanner {
         active[windowID] != nil
     }
 
+    /// Key of the registration currently animating `windowID`.
+    func key(for windowID: CGWindowID) -> UInt64? {
+        active[windowID]?.key
+    }
+
     @discardableResult
     mutating func register(
         windowID: CGWindowID,
@@ -399,6 +404,75 @@ final class FrameLedger {
     }
 }
 
+/// Write queue policy for one app's AX writer. Latest frame wins per
+/// window, and at most one drain is in flight: frames posted while a drain
+/// runs wait, replacing each other, and the drain's finish asks for another
+/// pass when any arrived. The settle frame and instant writes that race an
+/// animation go through the same mailbox, so a write for a window can never
+/// land before an older one.
+///
+/// Main-thread state; only the batch handed out by `take` crosses to the
+/// writer's queue.
+struct MotionWriteMailbox {
+    struct Entry: Equatable {
+        var write: MotionPlanner.FrameWrite
+        /// The motion registration the write belongs to (0 for an instant
+        /// write). A result whose generation is no longer current is stale.
+        var generation: UInt64
+        /// Callback ids to run with the write's outcome once it lands.
+        var callbacks: [UInt64] = []
+    }
+
+    private var pending: [CGWindowID: Entry] = [:]
+    private var order: [CGWindowID] = []
+    private var inFlight: Set<CGWindowID> = []
+    private(set) var draining = false
+
+    var isIdle: Bool { !draining && pending.isEmpty }
+
+    func involves(_ windowID: CGWindowID) -> Bool {
+        pending[windowID] != nil || inFlight.contains(windowID)
+    }
+
+    /// Queue `entry`. True when no drain is running: the caller takes the
+    /// batch and starts one now.
+    mutating func post(_ entry: Entry) -> Bool {
+        let wid = entry.write.windowID
+        if let old = pending[wid] {
+            var merged = entry
+            // An axis the replaced write would have changed still has to be
+            // written, or a size step followed by a position-only step
+            // would lose the size.
+            merged.write.writeSize = entry.write.writeSize || old.write.writeSize
+            merged.write.writePosition = entry.write.writePosition || old.write.writePosition
+            merged.callbacks = old.callbacks + entry.callbacks
+            pending[wid] = merged
+        } else {
+            pending[wid] = entry
+            order.append(wid)
+        }
+        return !draining
+    }
+
+    /// Everything pending, first-seen order, now in flight.
+    mutating func take() -> [Entry] {
+        let batch = order.compactMap { pending[$0] }
+        pending = [:]
+        order = []
+        inFlight = Set(batch.map { $0.write.windowID })
+        draining = true
+        return batch
+    }
+
+    /// The in-flight batch landed. True when newer entries are waiting: the
+    /// caller takes them and drains again.
+    mutating func finish() -> Bool {
+        inFlight = []
+        draining = false
+        return !pending.isEmpty
+    }
+}
+
 private extension CGRect {
     /// AX frames are integral; rounding here is also what powers the
     /// skip-unchanged write suppression (most ticks near the end of an
@@ -413,11 +487,30 @@ private extension CGRect {
     }
 }
 
+/// One app's AX writer: a serial queue the writes run on, and the mailbox
+/// (main-thread state) that feeds it. A slow or hung app only backs up its
+/// own queue; the display-link tick and every other app keep moving.
+/// Every motion write for a window goes through its app's one serial queue,
+/// so two writes to the same window never run concurrently.
+final class AppFrameWriter {
+    let pid: pid_t
+    let queue: DispatchQueue
+    var mailbox = MotionWriteMailbox()
+    /// Element per window for the next drain. Main thread.
+    var elements: [CGWindowID: AXUIElement] = [:]
+
+    init(pid: pid_t) {
+        self.pid = pid
+        queue = DispatchQueue(label: "stackd.axwrite.\(pid)", qos: .userInteractive)
+    }
+}
+
 /// Impure shell: owns the planner, holds a DisplayLinkObserver subscription
-/// while any animation is live, and issues the AX writes each tick.
+/// while any animation is live, and hands each tick's AX writes to the
+/// owning app's writer queue.
 /// Main-thread only — every entry point is called from `.ax` / `.custom`
-/// bridge handlers that already hop to main, and the display-link fires
-/// subscribers on main.
+/// bridge handlers that already hop to main, the display-link fires
+/// subscribers on main, and writer results hop back to main.
 final class WindowMotionEngine {
     static let shared = WindowMotionEngine()
     private init() {}
@@ -430,6 +523,9 @@ final class WindowMotionEngine {
     // animation makes the intermediate writes no-op (-25204 tolerated
     // everywhere else in Windows.swift); the final write re-resolves.
     private var elements: [CGWindowID: AXUIElement] = [:]
+    private var writers: [pid_t: AppFrameWriter] = [:]
+    private var writeCallbacks: [UInt64: (Bool) -> Void] = [:]
+    private var nextCallbackID: UInt64 = 1
 
     /// How a routed frame write ended. Instant and animated failures mean
     /// different things to callers: a failed instant write may still be
@@ -456,6 +552,19 @@ final class WindowMotionEngine {
     ) {
         guard duration > 0 || easing == .spring else {
             instantWriteWins(windowID: windowID)
+            let cached = elements.removeValue(forKey: windowID)
+            // Animation writes for this window still queued or in flight
+            // would land after a direct write; queue behind them instead.
+            if WindowsByID.batchSink == nil,
+               let el = cached ?? WindowsByID.elementFor(windowID: windowID),
+               let writer = writer(for: el, create: false), writer.mailbox.involves(windowID) {
+                FrameLedger.shared.recordWrite(windowID: windowID, frame: frame)
+                post(MotionPlanner.FrameWrite(windowID: windowID, frame: frame, isFinal: true),
+                     element: el, writer: writer, generation: 0) { ok in
+                    completion(.instant(ok: ok))
+                }
+                return
+            }
             completion(.instant(ok: WindowsByID.setFrame(
                 windowID: windowID,
                 x: frame.origin.x, y: frame.origin.y,
@@ -501,7 +610,6 @@ final class WindowMotionEngine {
     func instantWriteWins(windowID: CGWindowID) {
         if let old = planner.cancel(windowID: windowID) {
             resolve(old)
-            elements[windowID] = nil
             Overlay.endCommandedFrame(wid: windowID)
         }
     }
@@ -546,76 +654,136 @@ final class WindowMotionEngine {
         guard !planner.isEmpty else {
             linkToken?.cancel()
             linkToken = nil
+            writers = writers.filter { !$0.value.mailbox.isIdle }
             return
         }
         let out = planner.tick(now: CFAbsoluteTimeGetCurrent())
-        for write in out.writes {
-            apply(write)
-        }
+        var settles: [CGWindowID: MotionPlanner.Finished] = [:]
         for done in out.finished {
-            if done.settled { elements[done.windowID] = nil }
-            resolve(done)
+            if done.settled { settles[done.windowID] = done } else { resolve(done) }
         }
+        for write in out.writes {
+            let settle = write.isFinal ? settles.removeValue(forKey: write.windowID) : nil
+            apply(write, settle: settle)
+        }
+        for done in settles.values { resolve(done) }
     }
 
-    private func apply(_ write: MotionPlanner.FrameWrite) {
-        writeFrame(write)
+    private func apply(_ write: MotionPlanner.FrameWrite, settle: MotionPlanner.Finished?) {
+        let wid = write.windowID
+        FrameLedger.shared.recordWrite(windowID: wid, frame: write.frame)
         // Overlays on the window follow the frame just commanded, in this
         // same turn, rather than waiting for the window server to report
         // the move. After the settle frame they go back to live reads.
-        Overlay.followCommandedFrame(wid: write.windowID, frame: write.frame)
-        if write.isFinal { Overlay.endCommandedFrame(wid: write.windowID) }
-    }
+        Overlay.followCommandedFrame(wid: wid, frame: write.frame)
+        if write.isFinal { Overlay.endCommandedFrame(wid: wid) }
 
-    private func writeFrame(_ write: MotionPlanner.FrameWrite) {
+        let generation = settle?.key ?? planner.key(for: wid) ?? 0
         if write.isFinal {
-            // Full size→pos→size dance — the settle frame is the one that
-            // must stick. Reuses the element every intermediate frame just
-            // wrote through; a fresh lookup only if it went stale.
-            if WindowsByID.batchSink == nil, let el = elements[write.windowID],
-               WindowsByID.setFrame(element: el, windowID: write.windowID, frame: write.frame) {
+            let el = elements.removeValue(forKey: wid)
+            let done: (Bool) -> Void = { [weak self] _ in
+                if let settle = settle { self?.resolve(settle) }
+            }
+            // Batch mode queues the settle frame in the batch instead.
+            guard WindowsByID.batchSink == nil,
+                  let element = el ?? WindowsByID.elementFor(windowID: wid),
+                  let writer = writer(for: element) else {
+                done(WindowsByID.setFrame(
+                    windowID: wid,
+                    x: write.frame.origin.x, y: write.frame.origin.y,
+                    w: write.frame.size.width, h: write.frame.size.height))
                 return
             }
-            _ = WindowsByID.setFrame(
-                windowID: write.windowID,
-                x: write.frame.origin.x, y: write.frame.origin.y,
-                w: write.frame.size.width, h: write.frame.size.height
-            )
+            post(write, element: element, writer: writer, generation: generation, callback: done)
             return
         }
-        // Intermediate ticks: at most two writes (size, position) on the
-        // cached element, skipping any axis that didn't change since the
-        // last tick. The belt-and-suspenders second size set is deferred to
-        // the final frame; per-tick it would double the AX volume for a
-        // correction no one can see mid-flight.
-        // setFrame records final frames itself, on success.
-        FrameLedger.shared.recordWrite(windowID: write.windowID, frame: write.frame)
-        guard let el = elements[write.windowID] else { return }
-        // Bounded so a hung app can't hold main for the ~6s system default
-        // on every frame; generous enough that a busy-but-alive app (a
-        // Chromium re-layout) still animates. Reset after so other callers
-        // sharing the cached element keep the default.
-        AXUIElementSetMessagingTimeout(el, Self.intermediateWriteTimeout)
-        defer { AXUIElementSetMessagingTimeout(el, 0) }
-        var timedOut = false
-        if write.writeSize {
-            var size = write.frame.size
-            if let sizeVal = AXValueCreate(.cgSize, &size) {
-                timedOut = AXUIElementSetAttributeValue(el, kAXSizeAttribute as CFString, sizeVal) == .cannotComplete
-            }
+        guard let el = elements[wid], let writer = writer(for: el) else { return }
+        post(write, element: el, writer: writer, generation: generation, callback: nil)
+    }
+
+    private func writer(for element: AXUIElement, create: Bool = true) -> AppFrameWriter? {
+        var pid: pid_t = 0
+        guard AXUIElementGetPid(element, &pid) == .success, pid > 0 else { return nil }
+        if let w = writers[pid] { return w }
+        guard create else { return nil }
+        let w = AppFrameWriter(pid: pid)
+        writers[pid] = w
+        return w
+    }
+
+    private func post(_ write: MotionPlanner.FrameWrite, element: AXUIElement,
+                      writer: AppFrameWriter, generation: UInt64,
+                      callback: ((Bool) -> Void)?) {
+        var ids: [UInt64] = []
+        if let cb = callback {
+            let id = nextCallbackID
+            nextCallbackID += 1
+            writeCallbacks[id] = cb
+            ids = [id]
         }
-        if write.writePosition && !timedOut {
-            var pos = write.frame.origin
-            if let posVal = AXValueCreate(.cgPoint, &pos) {
-                timedOut = AXUIElementSetAttributeValue(el, kAXPositionAttribute as CFString, posVal) == .cannotComplete
-            }
-        }
-        if timedOut {
-            WindowDebug.log("motion: wid=\(write.windowID) stalled — skipping to the final frame")
-            planner.markStalled(windowID: write.windowID)
+        writer.elements[write.windowID] = element
+        if writer.mailbox.post(MotionWriteMailbox.Entry(write: write, generation: generation,
+                                                         callbacks: ids)) {
+            drain(writer)
         }
     }
 
+    private struct WriteResult {
+        let entry: MotionWriteMailbox.Entry
+        let ok: Bool
+        let timedOut: Bool
+    }
+
+    private func drain(_ writer: AppFrameWriter) {
+        let batch = writer.mailbox.take()
+        let jobs = batch.map { ($0, writer.elements[$0.write.windowID]) }
+        writer.queue.async { [weak self] in
+            let results = jobs.map { entry, element -> WriteResult in
+                guard let el = element else { return WriteResult(entry: entry, ok: false, timedOut: false) }
+                if entry.write.isFinal {
+                    return WriteResult(entry: entry, ok: WindowsByID.writeFrameAX(element: el, frame: entry.write.frame),
+                                       timedOut: false)
+                }
+                let timedOut = WindowsByID.writeAxesAX(
+                    element: el, frame: entry.write.frame,
+                    size: entry.write.writeSize, position: entry.write.writePosition,
+                    timeout: Self.intermediateWriteTimeout)
+                return WriteResult(entry: entry, ok: !timedOut, timedOut: timedOut)
+            }
+            DispatchQueue.main.async { self?.finishDrain(writer, results) }
+        }
+    }
+
+    private func finishDrain(_ writer: AppFrameWriter, _ results: [WriteResult]) {
+        for r in results {
+            let wid = r.entry.write.windowID
+            let current = planner.key(for: wid)
+            if r.timedOut, current == r.entry.generation {
+                WindowDebug.log("motion: wid=\(wid) stalled — skipping to the final frame")
+                planner.markStalled(windowID: wid)
+            }
+            var ok = r.ok
+            if r.entry.write.isFinal, !ok, current == nil {
+                // The element went stale; one fresh lookup, as the direct
+                // path would.
+                let f = r.entry.write.frame
+                ok = WindowsByID.setFrame(windowID: wid, x: f.origin.x, y: f.origin.y,
+                                          w: f.size.width, h: f.size.height)
+            }
+            for id in r.entry.callbacks {
+                writeCallbacks.removeValue(forKey: id)?(ok)
+            }
+        }
+        if writer.mailbox.finish() {
+            drain(writer)
+        } else if writer.mailbox.isIdle {
+            writer.elements = [:]
+        }
+    }
+
+    // Bounded so a hung app can't hold its writer queue for the ~6s system
+    // default on every frame; generous enough that a busy-but-alive app (a
+    // Chromium re-layout) still animates.
     private static let intermediateWriteTimeout: Float = 0.1
 
     private func resolve(_ finished: MotionPlanner.Finished) {
