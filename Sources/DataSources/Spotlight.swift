@@ -41,7 +41,8 @@ enum Spotlight {
     /// Returns items as `[[String: Any]]` with attribute keys preserved
     /// verbatim (e.g. `"kMDItemFSName"`). Dates are converted to UNIX
     /// timestamps (Double) and URLs to path strings so JSON serialization
-    /// works directly. Returns nil only if the predicate fails to parse.
+    /// works directly. A predicate that fails to parse is logged and yields
+    /// an empty array, indistinguishable from a query with no matches.
     static func find(predicate: String?,
                      scopes: [String]?,
                      attributes: [String]?,

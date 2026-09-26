@@ -72,8 +72,8 @@ extension Bridge {
     /// displayID (CGDirectDisplayID); the "changed" detector compares
     /// frame.{x,y,w,h} and brightness — the two fields that change at
     /// macro frequency (arrangement / resolution / slider). Name, scale,
-    /// uuid, builtin are treated as immutable; if they ever do change
-    /// they'll surface as a paired removed+added.
+    /// uuid and builtin are not compared: a change to only those fields
+    /// emits nothing, though the returned `nowByID` carries the new values.
     static func displaysDelta(snapshot: [[String: Any]], previous: [Int: [String: Any]])
         -> (added: [[String: Any]], removed: [[String: Any]], changed: [[String: Any]], nowByID: [Int: [String: Any]])
     {

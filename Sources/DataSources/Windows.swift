@@ -370,9 +370,8 @@ enum Windows {
 // AX probe results for each (pid, CGWindowID) cached with a TTL. Used to
 // enrich Windows.all() without paying an AX round-trip per window per push.
 // First call for an id pays the elementFor + subrole lookup; subsequent
-// reads within the TTL hit the cache. Cache is invalidated when the pid
-// goes away (WindowsByID.invalidateCache(pid:) is called from
-// WindowsLifecycleObserver on window-destroyed events).
+// reads within the TTL hit the cache. Entries are dropped per window on
+// window-destroyed events and per pid when the app terminates.
 //
 // Why on the daemon side: lets every stack consume sd.windows.all without
 // each one re-implementing per-pass probing — otherwise a tiler does
@@ -879,23 +878,6 @@ enum WindowsByID {
     // pid → (CGWindowID → AXUIElement). Repopulated lazily on lookup miss.
     private static var axCache: [pid_t: [CGWindowID: AXUIElement]] = [:]
     private static let cacheLock = NSLock()
-
-    // Invalidate all cached AX handles for a pid. Called from the lifecycle
-    // observer when a window of that pid is destroyed (we don't know which one
-    // without doing the lookup, so drop the whole pid's cache).
-    static func invalidateCache(pid: pid_t) {
-        cacheLock.lock(); defer { cacheLock.unlock() }
-        // Deliberately a SHALLOW invalidate — only drop the per-pid AX
-        // window map IF we'll definitely rebuild it (rare). Actually
-        // skip entirely: a destroyed window's stale AXUIElement is
-        // harmless (actions on it return -25204 which we already
-        // tolerate); rebuilding the WHOLE map on every helper-window
-        // destroy is what was causing Terminal's main window's id
-        // mapping (between CGWindowID and AXUIElement) to oscillate.
-        // The cache self-heals via the next elementFor() call on a
-        // not-in-map id (rebuilds the map on miss).
-        _ = pid // intentionally unused — see comment above
-    }
 
     static func invalidateCache(pid: pid_t, windowID: CGWindowID) {
         cacheLock.lock(); defer { cacheLock.unlock() }

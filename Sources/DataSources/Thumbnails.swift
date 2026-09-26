@@ -21,7 +21,8 @@ import QuickLookThumbnailing
 
 enum Thumbnails {
     /// Generate a thumbnail for the file at `path` and return
-    /// `{ dataURL, width, height, type, sourceWidth, sourceHeight }`.
+    /// `{ dataURL, width, height, type }` — width/height are the rendered
+    /// image's pixel dimensions.
     /// Returns nil on missing file or unrenderable type.
     ///
     /// - `path`: absolute or `~/…` filesystem path.

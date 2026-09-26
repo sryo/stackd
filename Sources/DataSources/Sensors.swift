@@ -324,10 +324,10 @@ enum Host {
         let v = pinfo.operatingSystemVersion
         let version = "\(v.majorVersion).\(v.minorVersion).\(v.patchVersion)"
 
-        // preferredLanguages reflects the user's chosen UI language (e.g. "en-US",
-        // "es-419"), which is what stacks want for region-aware copy. Locale.current
-        // is the formatting locale — close, but not always what's shown in the
-        // language pref pane. Fall back to identifier if the list is empty.
+        // Underscore-separated identifier, first match wins: $LANG with its
+        // encoding suffix stripped ("en_US.UTF-8" → "en_US"), then the user's
+        // first preferred UI language ("es-419" → "es_419"), then the
+        // formatting locale's identifier.
         let locale = pinfo.environment["LANG"].flatMap { String($0.split(separator: ".").first ?? "") }.flatMap { $0.isEmpty ? nil : $0 }
             ?? Locale.preferredLanguages.first?.replacingOccurrences(of: "-", with: "_")
             ?? Locale.current.identifier
@@ -513,8 +513,8 @@ enum Host {
     /// walk; reference implementation lives in their `IOService` extension.
     ///
     /// Returns one entry per block device:
-    ///   { name, bytesRead, bytesWritten,
-    ///     readsPerSecond?, writesPerSecond? }
+    ///   { name, bytesRead, bytesWritten, opsRead, opsWritten,
+    ///     bytesReadPerSecond?, bytesWrittenPerSecond? }
     /// `name` is the BSD identifier (e.g. "disk0", "disk1s2") from the
     /// `BSD Name` property — the same string users see in `diskutil list`.
     /// Cumulative byte counts are always present; the per-second rates are

@@ -25,8 +25,8 @@ sd.nlp = {
   //   //      kMDItemFSSize }, ...]
   // Override `attributes` to fetch a different mdkit attribute set.
   // Predicate syntax: https://developer.apple.com/library/archive/documentation/Cocoa/Conceptual/Predicates/AdditionalChapters/Introduction.html
-  // Dates are epoch-seconds Numbers; bad predicates will crash the daemon
-  // (NSException isn't catchable from Swift) — test your predicate string.
+  // Dates are epoch-seconds Numbers. A predicate that fails to parse is
+  // logged daemon-side and resolves to [] — same as no matches.
   // Live variant — keeps an NSMetadataQuery alive and pushes the FULL
   // current result-set each time the Spotlight index notifies a change.
   // Same shape as find()'s return: an array of attribute dicts. First emit

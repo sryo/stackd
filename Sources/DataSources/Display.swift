@@ -110,19 +110,6 @@ enum Display {
         }
         return nil
     }
-
-    /// Pure-helper variant: given a CG point + an explicit displays list
-    /// (each entry `[id: Int, frame: { x, y, w, h }]`), return the first
-    /// containing display. Lets tests cover the lookup without NSScreen.
-    static func forPoint(_ p: CGPoint, in displays: [[String: Any]]) -> [String: Any]? {
-        for d in displays {
-            guard let f = d["frame"] as? [String: Int],
-                  let x = f["x"], let y = f["y"], let w = f["w"], let h = f["h"] else { continue }
-            let frame = CGRect(x: x, y: y, width: w, height: h)
-            if frame.contains(p) { return d }
-        }
-        return nil
-    }
 }
 
 /// Resolves DisplayServices private SPI at runtime. Returns nil getters/setters

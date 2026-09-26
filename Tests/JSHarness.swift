@@ -13,7 +13,7 @@ import JavaScriptCore
 /// Strategy:
 ///   1. Provide a minimal `window` shim so api.js's top-level assignments
 ///      (`window.__sd_push = …`) don't throw.
-///   2. Strip the single `export` keyword (line 177) since JSContext doesn't
+///   2. Strip the single `export` keyword (`export const sd`) since JSContext doesn't
 ///      grok ES modules — top-level `function` declarations then become
 ///      globals callable from Swift via `evaluateScript`.
 ///   3. Stub the native bridge (`window.webkit.messageHandlers.sd.postMessage`)

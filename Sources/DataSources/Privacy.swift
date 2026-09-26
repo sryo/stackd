@@ -155,46 +155,6 @@ enum Privacy {
         let err = AudioObjectGetPropertyData(deviceId, &addr, 0, nil, &size, &value)
         return err == noErr && value != 0
     }
-
-    // MARK: - Pure helpers (testable)
-
-    /// Diff two snapshots. True when the set of active recorders differs
-    /// between `old` and `new`. Used by the observer to skip pushing a
-    /// channel update when nothing's actually changed — saves the WebKit
-    /// roundtrip on the steady-state (nothing recording) common case.
-    ///
-    /// "Differs" means: any of the three category arrays has a different
-    /// count, OR (same count, different membership). Comparison is by the
-    /// `id` field within each entry — order is not significant (CoreAudio
-    /// + AVCaptureDevice both enumerate in implementation-defined order
-    /// that can shift mid-session when devices reconnect).
-    ///
-    /// Pure helper, no IO. Pulled out for direct test coverage of the
-    /// dedupe logic — the live snapshot/observer path is impure and not
-    /// unit-testable; the diff logic is the actual bug surface for
-    /// "channel fires too often" / "channel doesn't fire when it should".
-    static func hasChanged(old: [String: Any], new: [String: Any]) -> Bool {
-        for category in ["screen", "camera", "microphone"] {
-            let oldList = (old[category] as? [[String: Any]]) ?? []
-            let newList = (new[category] as? [[String: Any]]) ?? []
-            if oldList.count != newList.count { return true }
-            let oldIds = Set(oldList.compactMap { idString($0["id"]) })
-            let newIds = Set(newList.compactMap { idString($0["id"]) })
-            if oldIds != newIds { return true }
-        }
-        return false
-    }
-
-    /// Coerce the heterogeneous `id` field (camera = String uniqueID,
-    /// microphone = Int AudioDeviceID) into a comparable string. Returns
-    /// nil when the value isn't representable — those entries are dropped
-    /// from the diff set, which is conservative (a malformed entry won't
-    /// suppress a real change).
-    private static func idString(_ raw: Any?) -> String? {
-        if let s = raw as? String { return "s:" + s }
-        if let i = raw as? Int    { return "i:\(i)" }
-        return nil
-    }
 }
 
 // MARK: - Observer
@@ -202,8 +162,7 @@ enum Privacy {
 /// 2s polled observer. Same cadence as Sensors / Host — the orange/green
 /// dots in Control Center themselves update at roughly this rate, so
 /// matching keeps the UX consistent. startChannel's lastState dedupe
-/// suppresses the steady-state "nothing recording" repeats, and
-/// Privacy.hasChanged drives the same dedupe for the in-use case.
+/// suppresses repeats whenever the snapshot is unchanged.
 ///
 /// No native broadcast hook exists for "anybody started recording" — the
 /// AVCaptureDevice KVO surface only fires when WE open a stream; CoreAudio
