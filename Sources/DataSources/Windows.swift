@@ -1344,7 +1344,11 @@ final class WindowsLifecycleObserver {
         }
         if OverlayEventFollow.enabled {
             let f = OverlayEventFollow.statsSnapshot()
-            WindowDebug.log("overlay-events: main=\(f.onMain) off-main=\(f.offMain) for-targets=\(f.forTargets) moved-off-main=\(f.movedOffMain) drains=\(f.drains) stepped=\(f.steppedOnMain)")
+            WindowDebug.log("overlay-events: main=\(f.onMain) off-main=\(f.offMain) for-targets=\(f.forTargets) moved-off-main=\(f.movedOffMain) stepped=\(f.steppedOnMain)")
+        }
+        if WindowDebug.enabled {
+            let i = WindowServerIntake.statsSnapshot()
+            WindowDebug.log("intake: offered=\(i.offered) merged=\(i.merged) drains=\(i.drains) max-batch=\(i.maxBatch)")
         }
 
         // Housekeeping piggybacked on the poll tick: lastAxFire only needs
@@ -1882,9 +1886,9 @@ enum CGSWindowEventDecoder {
 
 // The shared callback. SkyLight invokes us off the main thread; we count
 // the fire (the "does this code actually fire on this macOS?" sensor the
-// poll tick logs), decode, then hop to main before touching
-// AppDelegate.shared / host so bang dispatch stays on the runloop it was
-// built on.
+// poll tick logs), decode, then post to WindowServerIntake, whose one drain
+// per burst dispatches on main before touching AppDelegate.shared / host
+// so bang dispatch stays on the runloop it was built on.
 /// The per-window interest list for the overlay-events path: every
 /// AX-tracked window plus every overlay target (a target AX can't observe
 /// still needs its frame events), as one sorted, duplicate-free list.
@@ -1913,7 +1917,7 @@ private let windowEventsCallback: SkyLightWindowEvents.CGSConnectionCallback = {
     case .spaceWindowDestroyed, .titleChanged, .ignored, .malformed:
         return
     default:
-        WindowEvents.route(event)
+        WindowServerIntake.post(.window(event))
     }
 }
 
@@ -2037,55 +2041,58 @@ enum WindowEvents {
 
     // MARK: - Routing
 
-    fileprivate static func route(_ event: CGSDecodedWindowEvent) {
-        DispatchQueue.main.async {
-            guard let host = AppDelegate.shared?.host else { return }
-            switch event {
-            case .reordered(let wid):
-                // Overlay z-order repair: if an overlay panel is pinned to
-                // this window, the raise may have put the target ABOVE the
-                // panel without moving it — the frame-diff short-circuit in
-                // OverlayHandle.tick would then never reorder, leaving the
-                // border invisible behind its own target. Event-driven
-                // primary for the repin; tick's cadence is the backstop.
-                Overlay.notifyWindowReordered(wid: CGWindowID(wid))
-                host.bang(name: "sd.window.reordered", detail: ["id": Int(wid)])
-            case .destroyed(let wid):
-                // Targeted invalidation only. The previous invalidateAll()
-                // nuked every pid's AX map on EVERY 804 — and 804 fires for
-                // every window destroyed system-wide (tooltips, menus,
-                // popovers), so the cache was being rebuilt near-constantly,
-                // recreating the wid↔AXUIElement oscillation bug the
-                // per-window invalidate in AppDelegate.onDestroy was built
-                // to avoid. The pid can't be recovered from CGWindowList
-                // (the window is already gone) — ask the AX observer's
-                // per-window registry; when unknown, skip: a stale cached
-                // AXUIElement is tolerated (-25204 on action) and the AX
-                // destroy path does its own targeted invalidate.
-                if let pid = WindowsAXObserver.shared.pidFor(wid: CGWindowID(wid)) {
-                    WindowsByID.invalidateCache(pid: pid, windowID: CGWindowID(wid))
-                }
-                WindowsAXObserver.shared.noteDestroyReported(wid: CGWindowID(wid))
-                Overlay.noteTargetDestroyed(wid: CGWindowID(wid))
-                scheduleFrameInterestRefresh()
-                host.bang(name: "sd.window.destroyed", detail: ["id": Int(wid)])
-            case .moved, .resized, .titleChanged:
-                // 806/807 are consumed in the callback (OverlayEventFollow);
-                // 1322 is not registered (needs the interest list).
-                break
-            case .spaceWindowCreated(let wid, _):
-                handleSpaceWindowCreated(wid: wid, host: host)
-            case .spaceWindowDestroyed:
-                // Destroy rides 804; a space-move fires 1325 on the NEW
-                // space, which re-pushes sd.spaces.all. Counted only.
-                break
-            case .frontmostByMouse:
-                host.bang(name: "sd.window.focusedByMouse", detail: [:])
-            case .animationBegan:
-                WindowAnimationObserver.shared.animationBegan()
-            case .ignored, .malformed:
-                break
+    /// One drained window-server event (merged per kind + wid by
+    /// WindowServerIntake). Main thread.
+    static func dispatch(_ event: CGSDecodedWindowEvent) {
+        guard let host = AppDelegate.shared?.host else { return }
+        switch event {
+        case .reordered(let wid):
+            // Overlay z-order repair: if an overlay panel is pinned to
+            // this window, the raise may have put the target ABOVE the
+            // panel without moving it — the frame-diff short-circuit in
+            // OverlayHandle.tick would then never reorder, leaving the
+            // border invisible behind its own target. Event-driven
+            // primary for the repin; tick's cadence is the backstop.
+            Overlay.notifyWindowReordered(wid: CGWindowID(wid))
+            host.bang(name: "sd.window.reordered", detail: ["id": Int(wid)])
+        case .destroyed(let wid):
+            // Targeted invalidation only. The previous invalidateAll()
+            // nuked every pid's AX map on EVERY 804 — and 804 fires for
+            // every window destroyed system-wide (tooltips, menus,
+            // popovers), so the cache was being rebuilt near-constantly,
+            // recreating the wid↔AXUIElement oscillation bug the
+            // per-window invalidate in AppDelegate.onDestroy was built
+            // to avoid. The pid can't be recovered from CGWindowList
+            // (the window is already gone) — ask the AX observer's
+            // per-window registry; when unknown, skip: a stale cached
+            // AXUIElement is tolerated (-25204 on action) and the AX
+            // destroy path does its own targeted invalidate.
+            if let pid = WindowsAXObserver.shared.pidFor(wid: CGWindowID(wid)) {
+                WindowsByID.invalidateCache(pid: pid, windowID: CGWindowID(wid))
             }
+            WindowsAXObserver.shared.noteDestroyReported(wid: CGWindowID(wid))
+            Overlay.noteTargetDestroyed(wid: CGWindowID(wid))
+            scheduleFrameInterestRefresh()
+            host.bang(name: "sd.window.destroyed", detail: ["id": Int(wid)])
+        case .moved(let wid), .resized(let wid):
+            // Only overlay targets get here: OverlayEventFollow drops
+            // the rest in the callback.
+            Overlay.followFrameEvent(wid: CGWindowID(wid))
+        case .titleChanged:
+            // Not registered; AX titleChanged covers titles.
+            break
+        case .spaceWindowCreated(let wid, _):
+            handleSpaceWindowCreated(wid: wid, host: host)
+        case .spaceWindowDestroyed:
+            // Destroy rides 804; a space-move fires 1325 on the NEW
+            // space, which re-pushes sd.spaces.all. Counted only.
+            break
+        case .frontmostByMouse:
+            host.bang(name: "sd.window.focusedByMouse", detail: [:])
+        case .animationBegan:
+            WindowAnimationObserver.shared.animationBegan()
+        case .ignored, .malformed:
+            break
         }
     }
 
@@ -2699,13 +2706,13 @@ private let kCGSEventSpaceDidChange:      UInt32 = 1401
 private let kCGSEventMissionControlEnter: UInt32 = 1204
 
 private let spacesCGSCallback: SkyLightSpaces.CGSConnectionCallback = { eventType, _, _, _, _ in
-    DispatchQueue.main.async {
-        SpacesObserver.shared.fire()
-        // 1204 is the only CGS signal for "Mission Control entered" — exit is
-        // an AX notification on the Dock, handled in MissionControl.swift.
-        if eventType == kCGSEventMissionControlEnter {
-            AppDelegate.shared?.host?.bang(name: "sd.missionControl.entered", detail: [:])
-        }
+    // A space switch posts several of these at once; the intake merges them
+    // into one spaces pass per drain.
+    WindowServerIntake.post(.spaces)
+    // 1204 is the only CGS signal for "Mission Control entered" — exit is
+    // an AX notification on the Dock, handled in MissionControl.swift.
+    if eventType == kCGSEventMissionControlEnter {
+        WindowServerIntake.post(.missionControlEntered)
     }
 }
 

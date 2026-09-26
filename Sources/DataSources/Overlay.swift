@@ -888,8 +888,8 @@ enum OverlayFollowRoute {
 /// (`panel.frame`, the tick's lastFrame) is only touched by the main-thread
 /// step each event also queues, which resyncs it; the origin moved off main
 /// is kept in `applied` so that step doesn't send the same move again.
-/// Events are merged per wid and drained in one main-run-loop block per
-/// burst, not one hop per event.
+/// The main-thread step rides WindowServerIntake, which merges events per
+/// wid and drains once per burst.
 enum OverlayEventFollow {
     static func flagEnabled(_ env: [String: String]) -> Bool {
         env["STACKD_OVERLAY_EVENTS"] != "0"
@@ -904,8 +904,6 @@ enum OverlayEventFollow {
     private static var targetWIDs: Set<UInt32> = []
     private static var entries: [ObjectIdentifier: OverlayFollowEntry] = [:]
     private static var applied: [ObjectIdentifier: CGPoint] = [:]
-    private static var pending: Set<UInt32> = []
-    private static var drainScheduled = false
     private static var stats = Stats()
     private static var threadLogged = false
 
@@ -914,7 +912,6 @@ enum OverlayEventFollow {
         var offMain = 0
         var forTargets = 0
         var movedOffMain = 0
-        var drains = 0
         var steppedOnMain = 0
     }
 
@@ -1009,31 +1006,7 @@ enum OverlayEventFollow {
             for (key, origin) in moved where entries[key] != nil { applied[key] = origin }
             lock.unlock()
         }
-        enqueue(wid)
-    }
-
-    /// Merge `wid` into the pending set and make sure one drain is queued
-    /// on the main run loop (common modes, so it also runs during tracking).
-    private static func enqueue(_ wid: UInt32) {
-        lock.lock()
-        pending.insert(wid)
-        let schedule = !drainScheduled
-        drainScheduled = true
-        lock.unlock()
-        guard schedule else { return }
-        let main = CFRunLoopGetMain()
-        CFRunLoopPerformBlock(main, CFRunLoopMode.commonModes.rawValue) { drain() }
-        CFRunLoopWakeUp(main)
-    }
-
-    private static func drain() {
-        lock.lock()
-        let wids = pending
-        pending.removeAll()
-        drainScheduled = false
-        stats.drains += 1
-        lock.unlock()
-        for wid in wids.sorted() { Overlay.followFrameEvent(wid: CGWindowID(wid)) }
+        WindowServerIntake.post(.window(event))
     }
 
     fileprivate static func countStep() {
