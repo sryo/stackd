@@ -27,10 +27,31 @@ private enum SkyLightOverlay {
     typealias GetWindowBoundsFn   = @convention(c) (Int32, UInt32, UnsafeMutablePointer<CGRect>) -> Int32
     typealias WindowIsOrderedInFn = @convention(c) (Int32, UInt32, UnsafeMutablePointer<DarwinBoolean>) -> Int32
     typealias GetWindowLevelFn    = @convention(c) (Int32, UInt32, UnsafeMutablePointer<Int32>) -> Int32
+    typealias NewConnectionFn     = @convention(c) (Int32, UnsafeMutablePointer<Int32>) -> Int32
+    typealias WindowQueryFn       = @convention(c) (Int32, CFArray, Int32) -> Unmanaged<CFTypeRef>?
+    typealias QueryCopyWindowsFn  = @convention(c) (CFTypeRef) -> Unmanaged<CFTypeRef>?
+    typealias IteratorAdvanceFn   = @convention(c) (CFTypeRef) -> Bool
+    typealias IteratorAttributesFn = @convention(c) (CFTypeRef) -> UInt32
 
     static let getWindowBounds:   GetWindowBoundsFn?   = SkyLight.sym("SLSGetWindowBounds")
     static let windowIsOrderedIn: WindowIsOrderedInFn? = SkyLight.sym("SLSWindowIsOrderedIn")
     static let getWindowLevel:    GetWindowLevelFn?    = SkyLight.sym("SLSGetWindowLevel")
+    static let newConnection:     NewConnectionFn?     = SkyLight.sym("SLSNewConnection")
+    static let windowQuery:       WindowQueryFn?       = SkyLight.sym("SLSWindowQueryWindows")
+    static let queryCopyWindows:  QueryCopyWindowsFn?  = SkyLight.sym("SLSWindowQueryResultCopyWindows")
+    static let iteratorAdvance:   IteratorAdvanceFn?   = SkyLight.sym("SLSWindowIteratorAdvance")
+    static let iteratorAttributes: IteratorAttributesFn? = SkyLight.sym("SLSWindowIteratorGetAttributes")
+}
+
+/// Per-window attributes from an SLSWindowQueryWindows iterator.
+enum OverlayWindowQuery {
+    /// Set exactly while the window is ordered in: cleared by minimize,
+    /// app hide and orderOut, the same states SLSWindowIsOrderedIn reports.
+    static let orderedInAttribute: UInt32 = 0x2
+
+    static func isOrderedIn(attributes: UInt32) -> Bool {
+        attributes & orderedInAttribute != 0
+    }
 }
 
 // MARK: - OverlayHandle
@@ -74,7 +95,7 @@ final class OverlayHandle: NSObject, WKNavigationDelegate {
     // Time of the last SLSTransactionOrderWindow. Drives the low-frequency
     // safety reorder in tick() — see OverlayRepinPolicy.
     private var lastReorderAt: Double = -.infinity
-    // The target's window level, which the panel shares.
+    // The target's window level, which the panel's level is derived from.
     private var targetLevel = OverlayTargetLevel()
     // Tick driving: a vsync subscription while armed, a slow backstop timer
     // otherwise. Only live between start() and stop().
@@ -102,6 +123,7 @@ final class OverlayHandle: NSObject, WKNavigationDelegate {
     // reading the target's live bounds, which trail the write by the app's
     // AX round-trip and the compositor.
     private var commandedFrame: CGRect?
+    private var trace = OverlayTrace()
 
     init(id: Int, targetWID: CGWindowID, panel: NSPanel, webView: WKWebView,
          outset: CGFloat = 0) {
@@ -149,6 +171,7 @@ final class OverlayHandle: NSObject, WKNavigationDelegate {
     /// unchanged while the z-order is stale.
     func forceRepin() {
         if released { return }
+        trace.note("repin")
         repinRequested = true
         arm()
     }
@@ -230,6 +253,7 @@ final class OverlayHandle: NSObject, WKNavigationDelegate {
     /// place the panel there now, ahead of the window server's report.
     func followCommanded(_ frame: CGRect) {
         if released || !started { return }
+        trace.note("commanded")
         commandedFrame = frame
         step()
         arm()
@@ -257,6 +281,8 @@ final class OverlayHandle: NSObject, WKNavigationDelegate {
 
     private func observe() -> Bool {
         if released { return false }
+        let traceStart = CFAbsoluteTimeGetCurrent()
+        defer { trace.tickEnded(start: traceStart) }
         // Screenshot session in progress: ScreenshotHider ordered the panel
         // out; the re-show branch below would undo that one frame later.
         // Stay dormant — the hider's restore + repinAllAfterScreenshot
@@ -280,10 +306,7 @@ final class OverlayHandle: NSObject, WKNavigationDelegate {
         if !panel.isVisible {
             syncAppKitFrame()
             panel.orderFrontRegardless()
-            // The panel shares its target's level, so an order-front that
-            // reaches the window server after this tick's reorder would
-            // leave it over windows that cover the target. Commit it now.
-            CATransaction.flush()
+            trace.note("reshow")
             // The target may have returned at its exact old frame (un-
             // minimize restores geometry), so the frame diff alone would
             // skip the SLS reorder and leave the panel below it.
@@ -324,10 +347,9 @@ final class OverlayHandle: NSObject, WKNavigationDelegate {
         if released { return false }
         let now = CFAbsoluteTimeGetCurrent()
 
-        // Level first: the reorder below is relative to the target, which
-        // only lands directly above it when both share a level. A repin
-        // re-reads it; a retarget reads the new target's.
-        applyTargetLevel(refresh: repinRequested)
+        // A repin re-reads the target's level; a retarget reads the new
+        // target's.
+        applyPanelLevel(refresh: repinRequested)
 
         // A requested repin invalidates the frame cache so BOTH the
         // setFrame and the reorder below re-run this tick.
@@ -342,7 +364,9 @@ final class OverlayHandle: NSObject, WKNavigationDelegate {
         let fitted = OverlayGeometry.panelFrame(target: targetFrame, outset: outset).size
         let size = headroom.panelSize(content: fitted,
                                       current: lastFrame == .zero ? nil : lastFrame.size,
-                                      resizing: resizing, now: now,
+                                      resizing: OverlayTickPlan.holdsHeadroom(liveResize: resizing,
+                                                                               commanded: commandedFrame != nil),
+                                      now: now,
                                       limit: { OverlayHandle.roomToDesktopEdge(from: CGPoint(
                                           x: targetFrame.minX - self.outset,
                                           y: targetFrame.minY - self.outset)) })
@@ -369,16 +393,20 @@ final class OverlayHandle: NSObject, WKNavigationDelegate {
                 // untouched: a pure target move leaves it above).
                 appKitStale = true
                 alreadyMoved = true
+                trace.note("event-moved")
             } else if moveAndOrderAboveTarget(cgsOrigin: panelFrame.origin) {
+                trace.note("move+order")
                 // Straight to the window server, move + z-order in one
                 // transaction: no AppKit round-trip, and no frame where the
                 // panel has moved but sits below its target.
                 appKitStale = true
                 reordered = true
             } else {
+                trace.note("setFrameOrigin")
                 panel.setFrameOrigin(origin)
             }
         case .reshape(let frame):
+            trace.note("reshape")
             panel.setFrame(frame, display: true)
             appKitStale = false
         }
@@ -396,6 +424,7 @@ final class OverlayHandle: NSObject, WKNavigationDelegate {
         } else if !alreadyMoved, OverlayRepinPolicy.shouldReorder(frameChanged: frameChanged,
                                                    sinceReorder: now - lastReorderAt) {
             reorderAboveTarget()
+            trace.note("reorder")
             lastReorderAt = now
         }
 
@@ -469,18 +498,18 @@ final class OverlayHandle: NSObject, WKNavigationDelegate {
         appKitStale = false
     }
 
-    /// Put the panel at its target's window level. Only writes on change.
-    /// AppKit sends a level write to the window server at the next
-    /// CATransaction commit, and that write puts the panel at the front of
-    /// the level; flushing here lands it before this tick's reorder, which
-    /// the dirty frame forces, instead of after it.
-    private func applyTargetLevel(refresh: Bool) {
-        let raw = targetLevel.resolve(target: targetWID, refresh: refresh,
-                                      read: { Overlay.level(of: $0) })
+    /// Put the panel at the level OverlayTargetLevel.panelLevel picks for
+    /// its target. Only writes on change, which for a normal-level target is
+    /// never after attach. The write reaches the window server at AppKit's
+    /// next commit; nothing here waits for it, since the panel is above the
+    /// target's level wherever it lands inside its own.
+    private func applyPanelLevel(refresh: Bool) {
+        let target = targetLevel.resolve(target: targetWID, refresh: refresh,
+                                         read: { Overlay.level(of: $0) })
+        let raw = OverlayTargetLevel.panelLevel(above: target)
         if panel.level.rawValue != raw {
+            trace.note("level \(panel.level.rawValue)->\(raw)")
             panel.level = NSWindow.Level(rawValue: raw)
-            CATransaction.flush()
-            lastFrame = .zero
         }
     }
 
@@ -692,6 +721,17 @@ enum OverlayTickPlan {
         return abs(a.x - cgsOrigin.x) < 0.5 && abs(a.y - cgsOrigin.y) < 0.5
     }
 
+    /// Whether the panel keeps OverlayHeadroom's spare room instead of being
+    /// fitted to the target: during a live resize, and while the motion
+    /// engine animates the target. A fitted panel is an AppKit resize on
+    /// every frame of the animation, each one a window-server update the
+    /// server can hold for about half a second while the target's app
+    /// commits its own animated frames; with room the panel only moves until
+    /// the target settles.
+    static func holdsHeadroom(liveResize: Bool, commanded: Bool) -> Bool {
+        liveResize || commanded
+    }
+
     /// The payload is in panel coordinates, so it only changes on resize or
     /// outset change — never on a pure move.
     static func payloadToPush(_ js: String, lastPushed: String?) -> String? {
@@ -771,20 +811,66 @@ enum OverlayRepinPolicy {
     }
 }
 
+// MARK: - Stall trace
+
+/// STACKD_WIN_DEBUG only: the overlay's last window-server writes, logged
+/// when one observation holds the main thread long enough to drop frames,
+/// so a stall names what the panel did just before it. Offsets are ms
+/// relative to the start of the blocked observation.
+struct OverlayTrace {
+    static let stallThreshold = 0.05
+    private var ops: [(t: Double, op: String)] = []
+
+    mutating func note(_ op: @autoclosure () -> String) {
+        guard WindowDebug.enabled else { return }
+        ops.append((CFAbsoluteTimeGetCurrent(), op()))
+        if ops.count > 12 { ops.removeFirst(ops.count - 12) }
+    }
+
+    mutating func tickEnded(start: Double) {
+        guard WindowDebug.enabled else { return }
+        guard let line = Self.report(start: start, end: CFAbsoluteTimeGetCurrent(), ops: ops) else { return }
+        WindowDebug.log(line)
+    }
+
+    static func report(start: Double, end: Double, ops: [(t: Double, op: String)]) -> String? {
+        guard end - start > stallThreshold else { return nil }
+        let ms = { (s: Double) in Int((s * 1000).rounded()) }
+        let recent = ops.map { "\($0.op)@\(ms($0.t - start))" }.joined(separator: " ")
+        return "overlay: tick blocked \(ms(end - start))ms; before: \(recent)"
+    }
+}
+
 // MARK: - Target level (pure, testable)
 
-/// The window level a window-attached panel sits at: its target's own level,
-/// so the per-tick "one slot above the target" order puts the panel directly
-/// over the target and under everything the window server stacks above it —
-/// windows in front of the target, the Dock, the menu bar, notifications.
+/// The window level a window-attached panel sits at, derived from its
+/// target's level: the band just under the Dock for any target below it,
+/// otherwise one level above the target. The panel is then always above its
+/// target, however the target is raised or lowered inside its own level, and
+/// under the Dock, the menu bar and notifications. The trade: other app
+/// windows in front of the target no longer cover the border.
 ///
-/// The level is one window-server read per target, cached for that wid. A
-/// retarget reads the new target; a repin (`refresh`) re-reads so a target
-/// that changed level in place (an app toggling float-on-top) is picked up.
+/// The panel never shares its target's level. Within one level the window
+/// server keeps whatever order the last raise left, so a shared level puts
+/// the border behind its target whenever a raise (a click, an app bringing
+/// its window forward) reaches the server after the panel's own reorder or
+/// without a reorder event the overlay sees. One level up needs no reorder
+/// to stay in front.
+///
+/// The target's level is one window-server read per target, cached for
+/// that wid. A retarget reads the new target; a repin (`refresh`) re-reads
+/// so a target that changed level in place is picked up.
 /// A read that fails keeps the level already known for the same target, or
 /// falls back to the normal level for a new one and tries again next time.
 struct OverlayTargetLevel {
     static let fallback = NSWindow.Level.normal.rawValue
+    /// The level just under the Dock, above every level app windows
+    /// normally use (normal, floating, modal panels).
+    static let underDock = NSWindow.Level.dock.rawValue - 1
+
+    static func panelLevel(above target: Int) -> Int {
+        max(underDock, target + 1)
+    }
 
     private var wid: CGWindowID = 0
     private var level: Int?
@@ -1316,12 +1402,13 @@ enum Overlay {
         panel.isOpaque = false
         panel.backgroundColor = .clear
         panel.hasShadow = false
-        // An attached panel starts at the normal level and takes its
-        // target's level on the first tick (OverlayTargetLevel); the per-tick
-        // SLSTransactionOrderWindow then places it one slot above the target,
-        // so whatever covers the target (other windows, the Dock, the menu
-        // bar) covers the panel too. A free region floats like a HUD stack.
-        panel.level = attachedToWindow ? .normal : .statusBar
+        // An attached panel sits just under the Dock, above any normal
+        // window it tracks (OverlayTargetLevel.panelLevel; the first tick
+        // raises it for a target at or above that band). A free region
+        // floats like a HUD stack.
+        panel.level = attachedToWindow
+            ? NSWindow.Level(rawValue: OverlayTargetLevel.panelLevel(above: NSWindow.Level.normal.rawValue))
+            : .statusBar
         // Sticky across spaces, usable over full-screen apps, never in the
         // window cycle. Region panels add .stationary (StackWindow's recipe);
         // attached panels use .transient instead, which is mutually
@@ -1431,12 +1518,31 @@ enum Overlay {
         return handle
     }
 
+    /// The window-server connection the reads below go through: a second one,
+    /// owning no windows, falling back to the main connection when SkyLight
+    /// won't open it. Some reads first wait until the server has applied
+    /// every transaction the connection committed; on the main connection
+    /// that includes the panels' own moves and resizes, which the server can
+    /// hold for about half a second while the target's app commits animated
+    /// frames, so a per-tick read there stalls the main thread and the motion
+    /// engine with it. SLSWindowIsOrderedIn and CGWindowListCopyWindowInfo
+    /// always wait on the main connection, whatever connection they are
+    /// given.
+    static let readConnection: Int32 = {
+        // Opened before the main connection exists, a new connection would
+        // become the main one.
+        let main = SkyLight.cid
+        var cid: Int32 = 0
+        if let fn = SkyLightOverlay.newConnection, fn(0, &cid) == 0, cid != 0, cid != main { return cid }
+        return main
+    }()
+
     /// Read the current bounds of a window we don't own. Top-left origin,
     /// screen-points. Returns nil if the wid is unknown or SLS rejects it.
     static func bounds(of wid: CGWindowID) -> CGRect? {
         guard let fn = SkyLightOverlay.getWindowBounds else { return nil }
         var frame = CGRect.zero
-        let err = fn(SkyLight.cid, UInt32(wid), &frame)
+        let err = fn(readConnection, UInt32(wid), &frame)
         return err == 0 ? frame : nil
     }
 
@@ -1444,6 +1550,21 @@ enum Overlay {
     /// suppress the per-tick reposition on minimized / hidden targets
     /// without tearing down the overlay.
     static func isOrderedIn(_ wid: CGWindowID) -> Bool {
+        guard wid != 0 else { return false }
+        if let query = SkyLightOverlay.windowQuery,
+           let copyWindows = SkyLightOverlay.queryCopyWindows,
+           let advance = SkyLightOverlay.iteratorAdvance,
+           let attributes = SkyLightOverlay.iteratorAttributes {
+            // SLSWindowIsOrderedIn always synchronizes the main connection
+            // first (see readConnection); a query synchronizes only the
+            // connection it runs on.
+            var n = Int32(bitPattern: wid)
+            guard let number = CFNumberCreate(nil, .sInt32Type, &n),
+                  let result = query(readConnection, [number] as CFArray, 1)?.takeRetainedValue(),
+                  let windows = copyWindows(result)?.takeRetainedValue(),
+                  advance(windows) else { return false }
+            return OverlayWindowQuery.isOrderedIn(attributes: attributes(windows))
+        }
         guard let fn = SkyLightOverlay.windowIsOrderedIn else { return false }
         var shown: DarwinBoolean = false
         _ = fn(SkyLight.cid, UInt32(wid), &shown)
@@ -1455,7 +1576,7 @@ enum Overlay {
     static func level(of wid: CGWindowID) -> Int? {
         guard wid != 0, let fn = SkyLightOverlay.getWindowLevel else { return nil }
         var level: Int32 = 0
-        return fn(SkyLight.cid, UInt32(wid), &level) == 0 ? Int(level) : nil
+        return fn(readConnection, UInt32(wid), &level) == 0 ? Int(level) : nil
     }
 }
 

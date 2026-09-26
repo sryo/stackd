@@ -71,4 +71,10 @@ func registerOverlayTickPlanTests() {
     test("OverlayTickPlan.needsAppKitSync is false on reshape (setFrame resyncs)") {
         try expect(!OverlayTickPlan.needsAppKitSync(frameOp: .reshape(.zero), appKitStale: true))
     }
+
+    test("OverlayTickPlan.holdsHeadroom while the motion engine animates the target") {
+        try expect(OverlayTickPlan.holdsHeadroom(liveResize: false, commanded: true))
+        try expect(OverlayTickPlan.holdsHeadroom(liveResize: true, commanded: false))
+        try expect(!OverlayTickPlan.holdsHeadroom(liveResize: false, commanded: false))
+    }
 }

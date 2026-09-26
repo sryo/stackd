@@ -477,10 +477,28 @@ func registerOverlayTests() {
         try expect(retried, "an unread target must be read again, not served the fallback forever")
     }
 
-    test("Overlay.makeOverlayPanel: a window-attached panel starts at the normal level, below the Dock") {
+    test("OverlayTargetLevel.panelLevel puts a normal window's border in the band under the Dock") {
+        // Never the target's own level: inside a shared level a raise of the
+        // target can land after the panel's reorder and cover the border.
+        let level = OverlayTargetLevel.panelLevel(above: NSWindow.Level.normal.rawValue)
+        try expectEqual(level, NSWindow.Level.dock.rawValue - 1)
+        try expect(level > NSWindow.Level.modalPanel.rawValue,
+                   "above every level an app window normally sits at")
+        try expectEqual(OverlayTargetLevel.panelLevel(above: NSWindow.Level.floating.rawValue), level)
+    }
+
+    test("OverlayTargetLevel.panelLevel stays above a target already at or over that band") {
+        let band = NSWindow.Level.dock.rawValue - 1
+        try expectEqual(OverlayTargetLevel.panelLevel(above: band), band + 1)
+        try expectEqual(OverlayTargetLevel.panelLevel(above: NSWindow.Level.statusBar.rawValue),
+                        NSWindow.Level.statusBar.rawValue + 1)
+    }
+
+    test("Overlay.makeOverlayPanel: a window-attached panel starts above normal windows, below the Dock") {
         let panel = Overlay.makeOverlayPanel(frame: NSRect(x: -9999, y: -9999, width: 1, height: 1),
                                              attachedToWindow: true)
-        try expectEqual(panel.level, .normal)
+        try expectEqual(panel.level.rawValue, OverlayTargetLevel.panelLevel(above: NSWindow.Level.normal.rawValue))
+        try expect(panel.level > .normal)
         try expect(panel.level < .dock)
         panel.close()
     }
@@ -489,6 +507,44 @@ func registerOverlayTests() {
         let panel = Overlay.makeOverlayPanel(frame: NSRect(x: -9999, y: -9999, width: 1, height: 1),
                                              attachedToWindow: false)
         try expectEqual(panel.level, .statusBar)
+        panel.close()
+    }
+
+    test("Overlay reads window state on its own connection, not the one that owns the panels") {
+        // The reads would otherwise first wait for the window server to apply
+        // every panel transaction the main connection committed.
+        try expect(Overlay.readConnection != 0)
+        try expect(Overlay.readConnection != SkyLight.cid)
+    }
+
+    test("OverlayWindowQuery: the visible attribute bit is what SLSWindowIsOrderedIn reports") {
+        // Attributes read for one window across shown / minimized / hidden /
+        // ordered out: 0x3 while ordered in, 0x1 otherwise.
+        try expect(OverlayWindowQuery.isOrderedIn(attributes: 0x3))
+        try expect(!OverlayWindowQuery.isOrderedIn(attributes: 0x1))
+        try expect(!OverlayWindowQuery.isOrderedIn(attributes: 0))
+    }
+
+    test("Overlay.isOrderedIn is false for no window and for one never ordered in") {
+        try expect(!Overlay.isOrderedIn(0))
+        let panel = NSPanel(contentRect: NSRect(x: -9999, y: -9999, width: 12, height: 10),
+                            styleMask: .borderless, backing: .buffered, defer: false)
+        let wid = CGWindowID(panel.windowNumber)
+        try expect(wid != 0, "panel has no window-server window")
+        try expect(!Overlay.isOrderedIn(wid))
+        panel.close()
+    }
+
+    test("Overlay.bounds(of:) reads a live window from the read connection") {
+        let panel = NSPanel(contentRect: NSRect(x: -9999, y: -9999, width: 12, height: 10),
+                            styleMask: .borderless, backing: .buffered, defer: false)
+        panel.alphaValue = 0
+        panel.orderFrontRegardless()
+        CATransaction.flush()
+        let wid = CGWindowID(panel.windowNumber)
+        try expect(wid != 0, "panel has no window-server window")
+        try expectEqual(Overlay.bounds(of: wid)?.size, CGSize(width: 12, height: 10))
+        panel.orderOut(nil)
         panel.close()
     }
 
@@ -511,5 +567,17 @@ func registerOverlayTests() {
         try expectEqual(Overlay.level(of: wid), NSWindow.Level.floating.rawValue)
         panel.orderOut(nil)
         panel.close()
+    }
+
+    // MARK: - OverlayTrace (pure)
+
+    test("OverlayTrace.report is silent for an observation under the stall threshold") {
+        try expect(OverlayTrace.report(start: 10, end: 10.02, ops: [(t: 9.99, op: "reshape")]) == nil)
+    }
+
+    test("OverlayTrace.report names the writes before a blocked observation") {
+        let line = OverlayTrace.report(start: 10, end: 10.49,
+                                       ops: [(t: 9.984, op: "commanded"), (t: 9.985, op: "reshape")])
+        try expectEqual(line, "overlay: tick blocked 490ms; before: commanded@-16 reshape@-15")
     }
 }

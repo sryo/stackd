@@ -45,6 +45,7 @@ enum SkyLight {
         "SLSMainConnectionID",
         "SLSManagedDisplayGetCurrentSpace",
         "SLSMoveWindowsToManagedSpace",
+        "SLSNewConnection",
         "SLSRegisterConnectionNotifyProc",
         "SLSRequestNotificationsForWindows",
         "SLSResetMenuBarSystemOverrideAlphas",
@@ -58,6 +59,10 @@ enum SkyLight {
         "SLSTransactionMoveWindowWithGroup",
         "SLSTransactionOrderWindow",
         "SLSWindowIsOrderedIn",
+        "SLSWindowIteratorAdvance",
+        "SLSWindowIteratorGetAttributes",
+        "SLSWindowQueryResultCopyWindows",
+        "SLSWindowQueryWindows",
         "_SLPSSetFrontProcessWithOptions",
     ]
 
