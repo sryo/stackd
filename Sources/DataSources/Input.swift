@@ -942,49 +942,276 @@ enum EventsSynth {
 
 // Raw per-finger trackpad frames via the private MultitouchSupport.framework.
 // Port of asmagill's hs._asm.undocumented.touchdevice. The framework fires its
-// contact-frame callback at ~80 Hz on a private dispatch queue with every
-// finger's stable identity, normalized + absolute position, velocity,
+// contact-frame callback (~90 Hz while a finger is down) on a private thread
+// with every finger's stable identity, normalized position, velocity,
 // pressure, angle, and ellipsoid axes — strictly BELOW the layer where
 // AppKit recognizes "swipe"/"pinch"/"rotate" gestures.
 //
-// Coalescing strategy: the MT callback's only job is to atomically swap a
-// snapshot dict into `pendingFrame`. A Timer on main runs at 30 Hz, reads
-// the snapshot under the lock, diffs against the last emitted frame, and
-// pushes to JS only on change. This caps WKWebView eval traffic and lets
-// JS-side recognizers (TTTaps, future heatmap stacks) stay responsive
-// without saturating the JS thread.
+// Event-driven delivery: the callback copies each frame into compact
+// TouchFrame structs and offers them to a lock-guarded TouchFrameMailbox.
+// The first offer of a burst schedules exactly one main-thread drain; the
+// drain pushes every pending frame to subscribers. There is no poll: while
+// the main thread is busy, consecutive "changed" frames with the same finger
+// count merge (newest wins) and began/ended edges queue behind them, so a
+// slow main thread costs intermediate positions, never a touch or release.
+// The only timer is the lift watchdog, armed only while a finger is down:
+// when no frame arrives for 120ms it synthesizes a release, so consumers
+// never see a stuck finger after a device drops its final empty frame.
 
 enum TouchDevice {
-    /// Latest coalesced frame snapshot, or nil if no frame has arrived yet
+    /// Latest emitted frame payload, or nil if no frame has arrived yet
     /// (e.g. trackpad untouched since install). Used by Bridge for replay.
     static func snapshot() -> [String: Any]? {
         return TouchDeviceObserver.shared.latestFrame()
     }
 }
 
-// MTPathStage → consumer-friendly state name. asmagill exposes the raw enum
-// label; we collapse to a smaller "began/stationary/moved/ended/cancelled/
-// lifted" vocabulary that matches the Gesture wording (which TTTaps
-// already speaks). MakeTouch=began, Touching=moved, BreakTouch=ended,
-// OutOfRange=lifted, HoverInRange=stationary, StartInRange/LingerInRange
-// are rare transient states — bucket them with the closest neighbor.
-private func touchDeviceStateName(for stage: MTPathStage) -> String {
-    switch stage {
-    case MTPathStageMakeTouch:     return "began"
-    case MTPathStageTouching:      return "moved"
-    case MTPathStageBreakTouch:    return "ended"
-    case MTPathStageOutOfRange:    return "lifted"
-    case MTPathStageHoverInRange:  return "stationary"
-    case MTPathStageStartInRange:  return "began"
-    case MTPathStageLingerInRange: return "stationary"
-    case MTPathStageNotTracking:   return "cancelled"
-    default:                       return "cancelled"
+/// One finger in a MultitouchSupport contact frame. `stage` is the raw
+/// MTPathStage value; floats stay Float to keep the MT-thread copy small.
+struct TouchContact: Equatable {
+    var id: Int32
+    var stage: Int32
+    var x: Float
+    var y: Float
+    var vx: Float
+    var vy: Float
+    var angle: Float
+    var size: Float
+    var pressure: Float
+    var majorAxis: Float
+    var minorAxis: Float
+}
+
+/// One contact frame from one device. `timestamp` is the framework's
+/// seconds-since-boot stamp (the mach uptime clock). `synthetic` marks a
+/// release the lift watchdog made up.
+struct TouchFrame: Equatable {
+    var device: UInt64
+    var timestamp: Double
+    var frame: Int
+    var touches: [TouchContact]
+    var synthetic: Bool = false
+
+    /// MTPathStage → consumer-friendly state name. MakeTouch=began,
+    /// Touching=moved, BreakTouch=ended, OutOfRange=lifted,
+    /// HoverInRange=stationary; the rare StartInRange/LingerInRange
+    /// transients bucket with their closest neighbor.
+    static func stateName(_ stage: Int32) -> String {
+        switch stage {
+        case 3: return "began"        // MakeTouch
+        case 4: return "moved"        // Touching
+        case 5: return "ended"        // BreakTouch
+        case 7: return "lifted"       // OutOfRange
+        case 2: return "stationary"   // HoverInRange
+        case 1: return "began"        // StartInRange
+        case 6: return "stationary"   // LingerInRange
+        default: return "cancelled"   // NotTracking + unknown
+        }
+    }
+
+    /// Stages that start or end a finger. A frame holding one is an edge the
+    /// mailbox never merges away.
+    static func isEdgeStage(_ stage: Int32) -> Bool {
+        stage != 2 && stage != 4 && stage != 6
+    }
+
+    /// The sd.touchdevice payload. `ageMs` is how long ago the hardware
+    /// stamped the frame (null when the clocks disagree), and `emittedAt` is
+    /// the epoch-ms wall clock at emit, so a stack can add its own delivery
+    /// lag: `ageMs + (performance.timeOrigin + performance.now() - emittedAt)`.
+    static func payload(_ f: TouchFrame, uptimeNow: Double, epochMsNow: Double) -> [String: Any] {
+        var touches: [[String: Any]] = []
+        touches.reserveCapacity(f.touches.count)
+        for t in f.touches {
+            touches.append([
+                "identifier": Int(t.id),
+                "state":      stateName(t.stage),
+                "x":          Double(t.x),
+                "y":          Double(t.y),
+                "vx":         Double(t.vx),
+                "vy":         Double(t.vy),
+                "angle":      Double(t.angle),
+                "size":       Double(t.size),
+                "pressure":   Double(t.pressure),
+                "majorAxis":  Double(t.majorAxis),
+                "minorAxis":  Double(t.minorAxis)
+            ])
+        }
+        let age = (uptimeNow - f.timestamp) * 1000
+        var p: [String: Any] = [
+            "timestamp": f.timestamp,
+            "frame":     f.frame,
+            "touches":   touches,
+            "emittedAt": epochMsNow,
+            "ageMs":     (age >= 0 && age < 10_000) ? age as Any : NSNull()
+        ]
+        if f.synthetic { p["synthetic"] = true }
+        return p
+    }
+}
+
+/// Hand-off between the MultitouchSupport callback thread and the main-thread
+/// drain. All state sits behind one lock; `offer` runs on the MT thread,
+/// `take` and `checkWatchdog` on main. Times passed as `now` must share one
+/// monotonic clock (the observer uses ProcessInfo.systemUptime).
+///
+/// Policy per offered frame:
+///   - an empty frame while the device is already idle is dropped;
+///   - a frame is an edge when its finger count differs from the device's
+///     last accepted frame or any finger is in a starting/ending stage;
+///   - a non-edge frame within 0.0005 (normalized units) of the last
+///     accepted frame is dropped as sensor jitter;
+///   - a non-edge frame replaces a pending non-edge frame of the same device
+///     and finger count at the tail of the queue; otherwise it is appended;
+///   - past `capacity`, the oldest non-edge frame is evicted first.
+/// `offer` returns true only for the offer that must schedule a drain; later
+/// offers ride that drain until `take` runs.
+final class TouchFrameMailbox {
+    enum Watchdog: Equatable {
+        case idle
+        case rearm(at: Double)
+        case fired
+    }
+
+    private struct Pending {
+        var frame: TouchFrame
+        var isEdge: Bool
+    }
+
+    private struct DeviceState {
+        var lastAccepted: TouchFrame?
+        var lastOfferAt: Double = 0
+        var touching: Bool { !(lastAccepted?.touches.isEmpty ?? true) }
+    }
+
+    private let lock = NSLock()
+    private let capacity: Int
+    private let liftTimeout: Double
+    private var pending: [Pending] = []
+    private var devices: [UInt64: DeviceState] = [:]
+    private var drainScheduled = false
+
+    init(capacity: Int = 16, liftTimeout: Double = 0.12) {
+        self.capacity = max(2, capacity)
+        self.liftTimeout = liftTimeout
+    }
+
+    func offer(_ frame: TouchFrame, now: Double) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        var dev = devices[frame.device] ?? DeviceState()
+        dev.lastOfferAt = now
+        defer { devices[frame.device] = dev }
+
+        let prevCount = dev.lastAccepted?.touches.count ?? 0
+        if frame.touches.isEmpty && prevCount == 0 { return false }
+        let isEdge = frame.touches.count != prevCount
+            || frame.touches.contains { TouchFrame.isEdgeStage($0.stage) }
+        if !isEdge, let last = dev.lastAccepted,
+           !TouchFrameMailbox.differsMaterially(frame, last) {
+            return false
+        }
+        dev.lastAccepted = frame
+        enqueue(Pending(frame: frame, isEdge: isEdge))
+        return scheduleDrainIfNeeded()
+    }
+
+    func take() -> [TouchFrame] {
+        lock.lock()
+        defer { lock.unlock() }
+        let out = pending.map(\.frame)
+        pending.removeAll(keepingCapacity: true)
+        drainScheduled = false
+        return out
+    }
+
+    /// Main-thread watchdog step. `.fired` means a synthetic release was
+    /// queued for a device that went quiet mid-touch; the caller drains now.
+    /// `.rearm(at:)` is the earliest time a quiet device could need one.
+    func checkWatchdog(now: Double) -> Watchdog {
+        lock.lock()
+        defer { lock.unlock() }
+        var fired = false
+        var nextDeadline: Double?
+        for (id, var dev) in devices where dev.touching {
+            let deadline = dev.lastOfferAt + liftTimeout
+            if now >= deadline, let last = dev.lastAccepted {
+                let release = TouchFrame(device: id,
+                                         timestamp: last.timestamp + (now - dev.lastOfferAt),
+                                         frame: last.frame,
+                                         touches: [],
+                                         synthetic: true)
+                dev.lastAccepted = release
+                devices[id] = dev
+                enqueue(Pending(frame: release, isEdge: true))
+                fired = true
+            } else {
+                nextDeadline = min(nextDeadline ?? deadline, deadline)
+            }
+        }
+        if fired { return .fired }
+        if let d = nextDeadline { return .rearm(at: d) }
+        return .idle
+    }
+
+    /// Forget a device (unplugged or unregistered) without emitting anything.
+    func forget(device: UInt64) {
+        lock.lock()
+        defer { lock.unlock() }
+        devices.removeValue(forKey: device)
+        pending.removeAll { $0.frame.device == device }
+    }
+
+    func reset() {
+        lock.lock()
+        defer { lock.unlock() }
+        pending.removeAll()
+        devices.removeAll()
+        drainScheduled = false
+    }
+
+    private func enqueue(_ p: Pending) {
+        if !p.isEdge, let i = pending.indices.last,
+           !pending[i].isEdge,
+           pending[i].frame.device == p.frame.device,
+           pending[i].frame.touches.count == p.frame.touches.count {
+            pending[i] = p
+            return
+        }
+        if pending.count >= capacity {
+            if let i = pending.firstIndex(where: { !$0.isEdge }) {
+                pending.remove(at: i)
+            } else {
+                pending.removeFirst()
+            }
+        }
+        pending.append(p)
+    }
+
+    private func scheduleDrainIfNeeded() -> Bool {
+        guard !drainScheduled, !pending.isEmpty else { return false }
+        drainScheduled = true
+        return true
+    }
+
+    /// Same finger identities and states, and every finger within 0.0005 of
+    /// its previous normalized position — trackpad coordinates jitter in the
+    /// 5th decimal even when a finger rests.
+    static func differsMaterially(_ a: TouchFrame, _ b: TouchFrame) -> Bool {
+        if a.touches.count != b.touches.count { return true }
+        for i in 0..<a.touches.count {
+            let ta = a.touches[i], tb = b.touches[i]
+            if ta.id != tb.id || ta.stage != tb.stage { return true }
+            if abs(ta.x - tb.x) > 0.0005 || abs(ta.y - tb.y) > 0.0005 { return true }
+        }
+        return false
     }
 }
 
 // Top-level C-convention callback — MultitouchSupport.framework can't call
 // a Swift closure, and the refcon is the only safe way to reach the
-// singleton without globals.
+// singleton without globals. Runs on the framework's thread: copy into
+// compact structs and hand off, nothing else.
 private func touchDeviceFrameCallback(_ device: UnsafeMutableRawPointer?,
                                       _ touches: UnsafeMutablePointer<MTTouch>?,
                                       _ numTouches: Int,
@@ -993,68 +1220,59 @@ private func touchDeviceFrameCallback(_ device: UnsafeMutableRawPointer?,
                                       _ refcon: UnsafeMutableRawPointer?) {
     guard let refcon = refcon else { return }
     let observer = Unmanaged<TouchDeviceObserver>.fromOpaque(refcon).takeUnretainedValue()
-    var touchList: [[String: Any]] = []
+    var contacts: [TouchContact] = []
     if let touches = touches, numTouches > 0 {
-        touchList.reserveCapacity(numTouches)
+        contacts.reserveCapacity(numTouches)
         for i in 0..<numTouches {
             let t = touches[i]
-            touchList.append([
-                "identifier": Int(t.fingerID),
-                "state":      touchDeviceStateName(for: t.stage),
-                "x":          Double(t.normalizedVector.position.x),
-                "y":          Double(t.normalizedVector.position.y),
-                "vx":         Double(t.normalizedVector.velocity.x),
-                "vy":         Double(t.normalizedVector.velocity.y),
-                "angle":      Double(t.angle),
-                "size":       Double(t.zTotal),
-                "pressure":   Double(t.zPressure),
-                "majorAxis":  Double(t.majorAxis),
-                "minorAxis":  Double(t.minorAxis)
-            ])
+            contacts.append(TouchContact(
+                id: t.fingerID,
+                stage: Int32(bitPattern: t.stage.rawValue),
+                x: t.normalizedVector.position.x,
+                y: t.normalizedVector.position.y,
+                vx: t.normalizedVector.velocity.x,
+                vy: t.normalizedVector.velocity.y,
+                angle: t.angle,
+                size: t.zTotal,
+                pressure: t.zPressure,
+                majorAxis: t.majorAxis,
+                minorAxis: t.minorAxis))
         }
     }
-    let snapshot: [String: Any] = [
-        "timestamp": timestamp,
-        "frame":     frame,
-        "touches":   touchList
-    ]
-    observer.acceptFrame(snapshot)
+    observer.accept(TouchFrame(device: 0, timestamp: timestamp, frame: frame, touches: contacts))
 }
 
 final class TouchDeviceObserver: RefCountedObserver {
     static let shared = TouchDeviceObserver()
     private override init() { super.init() }
 
-    private let lock = NSLock()
-    private var pendingFrame: [String: Any]?
-    private var lastEmittedFrame: [String: Any]?
+    private let mailbox = TouchFrameMailbox()
+
+    // Main-thread only.
+    private var lastEmitted: TouchFrame?
+    private var watchdog: DispatchSourceTimer?
+    private var watchdogDeadline: Double?
 
     private var device: UnsafeMutableRawPointer?
-    private var coalescerTimer: Timer?
-    /// Active coalescer interval in seconds. Defaults to 1/30s (30 Hz);
-    /// `setCoalesceInterval` can drop it for stacks that don't need
-    /// frame-rate gestures. Held under `lock` because the install path
-    /// and any setInterval call can race.
-    private var coalesceInterval: TimeInterval = 1.0 / 30.0
 
     // Keeps the singleton retained through Unmanaged.passRetained so the
     // refcon pointer the C callback receives is always valid — the install
-    // path balances this with a passUnretained-style release on teardown.
+    // path balances this with a release on teardown.
     private var refconRetainer: Unmanaged<TouchDeviceObserver>?
 
-    /// Called from the C callback on a private MT queue. Swaps the frame
-    /// snapshot into pendingFrame under the lock; the main-thread timer
-    /// drains it.
-    func acceptFrame(_ snapshot: [String: Any]) {
-        lock.lock()
-        pendingFrame = snapshot
-        lock.unlock()
+    private static func uptime() -> Double { ProcessInfo.processInfo.systemUptime }
+
+    /// Called from the C callback on the MT thread.
+    func accept(_ frame: TouchFrame) {
+        if mailbox.offer(frame, now: TouchDeviceObserver.uptime()) {
+            DispatchQueue.main.async { [weak self] in self?.drain() }
+        }
     }
 
     func latestFrame() -> [String: Any]? {
-        lock.lock()
-        defer { lock.unlock() }
-        return lastEmittedFrame ?? pendingFrame
+        guard let f = lastEmitted else { return nil }
+        return TouchFrame.payload(f, uptimeNow: TouchDeviceObserver.uptime(),
+                                  epochMsNow: Date().timeIntervalSince1970 * 1000)
     }
 
     override func install() -> Token? {
@@ -1083,89 +1301,48 @@ final class TouchDeviceObserver: RefCountedObserver {
             return nil
         }
 
-        // Default 30 Hz coalescer; can be retuned via setCoalesceInterval
-        // (wired from Bridge's channel.setInterval). Reads pendingFrame under
-        // the lock, diffs against lastEmittedFrame, fires subscribers only
-        // when the snapshot actually changes. Empty-touches frames still
-        // count as a change when the previous frame had touches — that's
-        // the "all fingers lifted" edge JS-side state machines need.
-        startCoalescer()
+        let timer = DispatchSource.makeTimerSource(queue: .main)
+        timer.setEventHandler { [weak self] in
+            self?.watchdogDeadline = nil
+            self?.runWatchdog()
+        }
+        timer.schedule(deadline: .distantFuture)
+        timer.resume()
+        watchdog = timer
 
         return Token { [weak self] in self?.teardown() }
     }
 
-    /// Recreate the coalescer timer at a new interval. Safe to call before
-    /// or after install(); only does anything when the observer is active.
-    /// Multiple subscribers calling this is last-writer-wins for now —
-    /// per-subscriber min-reduction is a planned follow-up.
-    func setCoalesceInterval(ms: Int) {
-        let clamped = max(8, min(1000, ms))   // clamp 8ms (~120Hz) to 1s
-        lock.lock()
-        coalesceInterval = TimeInterval(clamped) / 1000.0
-        let hadTimer = coalescerTimer != nil
-        lock.unlock()
-        if hadTimer { startCoalescer() }
-    }
-
-    /// (Re)create the coalescer timer at the current `coalesceInterval`.
-    /// Called from install() and setCoalesceInterval(). Cancels the prior
-    /// timer first so a rapid sequence of setInterval calls doesn't pile
-    /// up timers.
-    private func startCoalescer() {
-        lock.lock()
-        coalescerTimer?.invalidate()
-        let interval = coalesceInterval
-        lock.unlock()
-        let timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
-            self?.coalesce()
+    private func drain() {
+        let frames = mailbox.take()
+        for f in frames {
+            lastEmitted = f
+            fire()
         }
-        RunLoop.main.add(timer, forMode: .common)
-        lock.lock()
-        coalescerTimer = timer
-        lock.unlock()
+        runWatchdog()
     }
 
-    private func coalesce() {
-        lock.lock()
-        let pending = pendingFrame
-        lock.unlock()
-        guard let pending = pending else { return }
-
-        // Cheap structural diff: same touches count + same per-finger
-        // (identifier, x, y, state) is "no meaningful change". JSON
-        // serialization-and-compare would be more robust but ~3-4x more
-        // CPU at 30 Hz with 5 fingers — this is the hot path.
-        if !frameDiffersMaterially(pending, lastEmittedFrame) { return }
-
-        lock.lock()
-        lastEmittedFrame = pending
-        lock.unlock()
-        fire()
-    }
-
-    private func frameDiffersMaterially(_ a: [String: Any], _ b: [String: Any]?) -> Bool {
-        guard let b = b else { return true }
-        let ta = a["touches"] as? [[String: Any]] ?? []
-        let tb = b["touches"] as? [[String: Any]] ?? []
-        if ta.count != tb.count { return true }
-        for i in 0..<ta.count {
-            let ai = ta[i], bi = tb[i]
-            if (ai["identifier"] as? Int) != (bi["identifier"] as? Int) { return true }
-            if (ai["state"] as? String) != (bi["state"] as? String) { return true }
-            // Use a small epsilon: trackpad coordinates jitter in the 5th
-            // decimal even when the finger is "stationary".
-            let ax = (ai["x"] as? Double) ?? 0
-            let bx = (bi["x"] as? Double) ?? 0
-            let ay = (ai["y"] as? Double) ?? 0
-            let by = (bi["y"] as? Double) ?? 0
-            if abs(ax - bx) > 0.0005 || abs(ay - by) > 0.0005 { return true }
+    /// Re-arm lazily: an armed deadline earlier than the new one is left
+    /// alone and re-evaluated when it fires, so a streaming touch reschedules
+    /// the timer about once per lift timeout rather than once per frame.
+    private func runWatchdog() {
+        switch mailbox.checkWatchdog(now: TouchDeviceObserver.uptime()) {
+        case .fired:
+            drain()
+        case .rearm(let at):
+            if let armed = watchdogDeadline, armed <= at { return }
+            watchdogDeadline = at
+            let delay = max(0, at - TouchDeviceObserver.uptime())
+            watchdog?.schedule(deadline: .now() + delay)
+        case .idle:
+            break
         }
-        return false
     }
 
     private func teardown() {
-        if let t = coalescerTimer { t.invalidate() }
-        coalescerTimer = nil
+        watchdog?.cancel()
+        watchdog = nil
+        watchdogDeadline = nil
 
         // Teardown order from asmagill's userdata_gc (internal.m:1128-1134):
         //   Unregister callback → check IsRunning → Stop → Release.
@@ -1183,10 +1360,8 @@ final class TouchDeviceObserver: RefCountedObserver {
             refconRetainer = nil
         }
 
-        lock.lock()
-        pendingFrame = nil
-        lastEmittedFrame = nil
-        lock.unlock()
+        mailbox.reset()
+        lastEmitted = nil
     }
 }
 

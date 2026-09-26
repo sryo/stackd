@@ -113,15 +113,23 @@ sd.host = {
   //   sd.sensors.subscribe(s => updateTempUI(s), { interval: 5 });
 sd.sensors = channel("sensors");
   // Raw per-finger trackpad frames via MultitouchSupport (private framework).
-  // ~30 Hz coalesced from the underlying ~80 Hz callback. Frames arrive
-  // BELOW the layer where AppKit recognizes swipe/pinch/rotate — use this
-  // (not sd.gesture) when you want raw fingers with stable identity.
-  //   sd.touchdevice → { timestamp, frame, touches: [
-  //     { identifier, state, x, y, vx, vy, angle, size, pressure,
-  //       majorAxis, minorAxis }, ...] }
+  // Event-driven: frames are pushed as the device reports them (~90 Hz while
+  // a finger is down). When the page falls behind, intermediate positions
+  // merge (newest wins) but touch-began / release frames are never dropped.
+  // Frames arrive BELOW the layer where AppKit recognizes swipe/pinch/rotate
+  // — use this (not sd.gesture) when you want raw fingers with stable identity.
+  //   sd.touchdevice → { timestamp, frame, emittedAt, ageMs, synthetic?,
+  //     touches: [{ identifier, state, x, y, vx, vy, angle, size, pressure,
+  //                 majorAxis, minorAxis }, ...] }
   // state values: "began" | "stationary" | "moved" | "ended" | "cancelled" | "lifted".
   // x/y are 0..1 trackpad-normalized (origin bottom-left). Empty touches[]
   // = all fingers lifted (the "release" edge consumers' state machines need).
+  // If the device goes quiet for 120ms mid-touch the daemon sends that
+  // release itself, marked synthetic: true.
+  // Latency: ageMs is hardware stamp → daemon emit (null if unknown);
+  // emittedAt is epoch ms at emit, so total event age on arrival is
+  //   e.ageMs + (performance.timeOrigin + performance.now() - e.emittedAt).
+  // subscribe(fn, { interval }) is accepted but ignored on this channel.
   // Consumers: TTTaps multi-finger recognizer, trackpad heatmap, custom
   // pinch-curve overlay. Cost: zero CPU when no stack subscribes.
 sd.touchdevice = channel("touchdevice");
