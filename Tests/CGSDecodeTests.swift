@@ -4,7 +4,7 @@ import Foundation
 // callback. Offsets per OmniWM's CGSEventObserver (verified against a live
 // Tahoe daemon there): 806/807/1322/804/808 carry uint32 wid at offset 0;
 // 1325/1326 carry uint64 spaceID at offset 0 + uint32 wid at offset 8;
-// 1508 has no payload we read.
+// 1508 carries the new frontmost pid (int32) at offset 0.
 func registerCGSDecodeTests() {
     func decode(_ eventType: UInt32, _ bytes: [UInt8]) -> CGSDecodedWindowEvent {
         bytes.withUnsafeBytes { buf in
@@ -35,9 +35,16 @@ func registerCGSDecodeTests() {
         try expectEqual(decode(1326, payload), .spaceWindowDestroyed(wid: 555, spaceID: 31))
     }
 
-    test("1508 decodes with or without payload") {
-        try expectEqual(decode(1508, []), .frontmostByMouse)
-        try expectEqual(decode(1508, u32(1)), .frontmostByMouse)
+    test("1508 decodes the frontmost pid from the first 4 bytes") {
+        try expectEqual(decode(1508, u32(4321)), .frontmostByMouse(pid: 4321))
+        try expectEqual(decode(1508, u32(4321) + u32(99)), .frontmostByMouse(pid: 4321))
+    }
+
+    test("1508 without a usable pid still decodes, with no pid") {
+        try expectEqual(decode(1508, []), .frontmostByMouse(pid: nil))
+        try expectEqual(decode(1508, [0x01, 0x02]), .frontmostByMouse(pid: nil))
+        try expectEqual(decode(1508, u32(0)), .frontmostByMouse(pid: nil))
+        try expectEqual(decode(1508, u32(UInt32(bitPattern: -1))), .frontmostByMouse(pid: nil))
     }
 
     test("1327 decodes as animationBegan whatever the payload (a counter, not a wid)") {

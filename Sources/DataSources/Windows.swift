@@ -1591,6 +1591,25 @@ enum WindowLifecycleFanout {
 
 // MARK: - FrontmostWindowObserver: event-driven focus/title changes
 
+/// Dedupe between the two app-activation triggers, CGS 1508 and
+/// NSWorkspace's didActivateApplication: an activation runs only for a pid
+/// other than the last one activated, so the second report of one switch
+/// is a no-op.
+struct FrontmostActivation {
+    private(set) var lastPid: pid_t?
+
+    mutating func shouldActivate(pid: pid_t) -> Bool {
+        if pid == lastPid { return false }
+        lastPid = pid
+        return true
+    }
+
+    /// Seed with the app that is frontmost now (nil forgets).
+    mutating func reset(to pid: pid_t?) {
+        lastPid = pid
+    }
+}
+
 /// Singleton that maintains an AXAppObserver bound to whichever app is
 /// currently frontmost. Event-driven, not polled — within-app focused-window
 /// / title changes fire the moment AX reports them, with no polling lag.
@@ -1610,6 +1629,7 @@ final class FrontmostWindowObserver: RefCountedObserver {
     private override init() { super.init() }
 
     private var currentTokens: [Token] = []
+    private var activation = FrontmostActivation()
 
     /// Per-event-type callbacks. Multi-subscriber: every Bridge that calls
     /// startWorkspace appends its own handler; we fire ALL of them on each
@@ -1658,42 +1678,57 @@ final class FrontmostWindowObserver: RefCountedObserver {
                  guard let self = self,
                        let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
                  else { return }
-                 self.installFor(pid: app.processIdentifier)
-                 // Activation itself counts as a focus change — fire so consumers
-                 // pick up the new frontmost-app window without waiting for the
-                 // first within-app AX notification.
-                 self.fireAppActivated()
-                 // Focus changes with the app switch — pump the focused-window
-                 // channel too so stacks that only listen to focusedChanged
-                 // don't miss the cross-app transition.
-                 self.fireFocusedChanged()
-                 self.fire()
-                 // didActivateApplication can land BEFORE the activated app's
-                 // kAXFocusedWindowAttribute settles, so the fire above may
-                 // read nil (Bridge pushes "null" → consumers hide) or the
-                 // OLD window (dedupe suppresses the push entirely). Neither
-                 // produces a later AX notification — the app's focused
-                 // window never changes *within* the app, it just becomes
-                 // readable — so the event is silently lost without these
-                 // bounded settle re-fires. Bridge's lastState dedupe makes
-                 // an already-settled re-fire a no-op push-wise.
-                 self.scheduleFocusSettleRefires()
+                 self.activate(pid: app.processIdentifier)
              })
         ])
         // Install for current frontmost immediately so subscribers don't have
         // to wait for the next app switch.
-        if let app = NSWorkspace.shared.frontmostApplication {
-            installFor(pid: app.processIdentifier)
-        }
+        let front = NSWorkspace.shared.frontmostApplication?.processIdentifier
+        if let pid = front { installFor(pid: pid) }
+        activation.reset(to: front)
         return Token { [weak self] in
             ncToken.cancel()
             guard let self = self else { return }
+            self.activation.reset(to: nil)
             // Cancel the pool subscriptions so the AXObserverPool tears down
             // its per-pid AXAppObserver when this was the last subscriber —
             // matching the Token contract instead of waiting on deinit.
             for t in self.currentTokens { t.cancel() }
             self.currentTokens.removeAll()
         }
+    }
+
+    /// CGS 1508 named `pid` as the new frontmost app. It lands a few ms
+    /// before didActivateApplication for the same switch; whichever comes
+    /// first runs the activation. Main thread.
+    func windowServerActivated(pid: pid_t) {
+        guard isActive else { return }
+        activate(pid: pid)
+    }
+
+    /// The app switch, once per new frontmost pid (FrontmostActivation).
+    private func activate(pid: pid_t) {
+        guard activation.shouldActivate(pid: pid) else { return }
+        installFor(pid: pid)
+        // Activation itself counts as a focus change — fire so consumers
+        // pick up the new frontmost-app window without waiting for the
+        // first within-app AX notification.
+        fireAppActivated()
+        // Focus changes with the app switch — pump the focused-window
+        // channel too so stacks that only listen to focusedChanged
+        // don't miss the cross-app transition.
+        fireFocusedChanged()
+        fire()
+        // Activation can land BEFORE the activated app's
+        // kAXFocusedWindowAttribute settles, so the fire above may
+        // read nil (Bridge pushes "null" → consumers hide) or the
+        // OLD window (dedupe suppresses the push entirely). Neither
+        // produces a later AX notification — the app's focused
+        // window never changes *within* the app, it just becomes
+        // readable — so the event is silently lost without these
+        // bounded settle re-fires. Bridge's lastState dedupe makes
+        // an already-settled re-fire a no-op push-wise.
+        scheduleFocusSettleRefires()
     }
 
     /// Bounded re-checks after an app activation, NOT a poll: two one-shot
@@ -1828,7 +1863,9 @@ private enum SkyLightWindowEvents {
 //   1327 — window animation began (payload is a counter, not a wid; the
 //                                  genie into the Dock posts it ~25ms in,
 //                                  long before AX reports the minimize)
-//   1508 — frontmost app changed  (surfaced as sd.window.focusedByMouse)
+//   1508 — frontmost app changed  (int32 pid at offset 0; surfaced as
+//                                  sd.window.focusedByMouse and run as a
+//                                  focus trigger ahead of NSWorkspace)
 private let kSDWindowClosed:         UInt32 = 804
 private let kSDWindowMoved:          UInt32 = 806
 private let kSDWindowResized:        UInt32 = 807
@@ -1850,7 +1887,8 @@ enum CGSDecodedWindowEvent: Equatable {
     case spaceWindowCreated(wid: UInt32, spaceID: UInt64)
     case spaceWindowDestroyed(wid: UInt32, spaceID: UInt64)
     case animationBegan
-    case frontmostByMouse
+    /// nil when the payload carries no usable pid.
+    case frontmostByMouse(pid: pid_t?)
     case ignored
     case malformed
 }
@@ -1878,7 +1916,10 @@ enum CGSWindowEventDecoder {
             guard let s = space(at: 0), let w = wid(at: 8) else { return .malformed }
             return .spaceWindowDestroyed(wid: w, spaceID: s)
         case kSDWindowAnimationBegan: return .animationBegan
-        case kSDWindowFocusedByMouse: return .frontmostByMouse
+        case kSDWindowFocusedByMouse:
+            guard let data = data, length >= 4 else { return .frontmostByMouse(pid: nil) }
+            let pid = data.loadUnaligned(fromByteOffset: 0, as: Int32.self)
+            return .frontmostByMouse(pid: pid > 0 ? pid : nil)
         default:                      return .ignored
         }
     }
@@ -2087,8 +2128,11 @@ enum WindowEvents {
             // Destroy rides 804; a space-move fires 1325 on the NEW
             // space, which re-pushes sd.spaces.all. Counted only.
             break
-        case .frontmostByMouse:
+        case .frontmostByMouse(let pid):
             host.bang(name: "sd.window.focusedByMouse", detail: [:])
+            if let pid = pid {
+                FrontmostWindowObserver.shared.windowServerActivated(pid: pid)
+            }
         case .animationBegan:
             WindowAnimationObserver.shared.animationBegan()
         case .ignored, .malformed:
