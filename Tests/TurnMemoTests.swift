@@ -32,4 +32,20 @@ func registerTurnMemoTests() {
         try expect(again == nil)
         try expectEqual(calls, 1)
     }
+
+    test("TurnMemo serves a seeded value for its turn without computing") {
+        var memo = TurnMemo<Int>()
+        var calls = 0
+        memo.seed(turn: 3, value: 7)
+        let v = memo.value(turn: 3) { calls += 1; return 99 }
+        try expectEqual(v, 7)
+        try expectEqual(calls, 0)
+    }
+
+    test("TurnMemo recomputes after a seeded turn ends") {
+        var memo = TurnMemo<Int>()
+        memo.seed(turn: 3, value: 7)
+        let v = memo.value(turn: 4) { 8 }
+        try expectEqual(v, 8)
+    }
 }

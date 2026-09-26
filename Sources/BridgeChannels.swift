@@ -449,8 +449,7 @@ extension Bridge {
             self.push(channel: "appActivated", json: json)
         }
         let pushFocusedChanged: () -> Void = { [weak self] in
-            guard let self = self else { return }
-            let json = WorkspaceFanout.focusedJSON()
+            guard let self = self, let json = WorkspaceFanout.focusedJSON() else { return }
             if json == self.lastState["focusedChanged"] { return }
             self.lastState["focusedChanged"] = json
             self.push(channel: "focusedChanged", json: json)
@@ -483,8 +482,7 @@ extension Bridge {
                 }
             }
             if includeWindows {
-                let json = WorkspaceFanout.focusedJSON()
-                if json != self.lastState["focusedWindow"] {
+                if let json = WorkspaceFanout.focusedJSON(), json != self.lastState["focusedWindow"] {
                     self.lastState["focusedWindow"] = json
                     self.push(channel: "focusedWindow", json: json)
                 }
@@ -557,6 +555,11 @@ struct TurnMemo<Value> {
         cached = (turn, v)
         return v
     }
+
+    /// Use `value` for `turn` instead of computing it.
+    mutating func seed(turn: UInt64, value: Value) {
+        cached = (turn, value)
+    }
 }
 
 /// Workspace state shared by every stack's workspace pushes. One focus
@@ -601,14 +604,26 @@ enum WorkspaceFanout {
         frontAppMemo.value(turn: currentTurn()) { App.frontmostApp().map(Bridge.jsonify) }
     }
 
-    static func focused() -> [String: Any]? { focusedEntry().dict }
-    static func focusedJSON() -> String { focusedEntry().json }
+    /// nil while a confirmed focused-window read is pending (see
+    /// FocusedReadSchedule): its delivery pushes the focused channels, so
+    /// callers skip instead of blocking main on an AX read.
+    static func focused() -> [String: Any]? { focusedEntry()?.dict }
+    static func focusedJSON() -> String? { focusedEntry()?.json }
 
-    private static func focusedEntry() -> (dict: [String: Any]?, json: String) {
-        focusedMemo.value(turn: currentTurn()) {
+    private static func focusedEntry() -> (dict: [String: Any]?, json: String)? {
+        if FrontmostWindowObserver.shared.awaitingFocusedRead { return nil }
+        return focusedMemo.value(turn: currentTurn()) {
             let w = Windows.focused()
             return (w, w.map(Bridge.jsonify) ?? "null")
         }
+    }
+
+    /// A confirmed read resolved: open a fresh turn holding `dict`, so the
+    /// fan-out the caller fires next serves it without re-reading AX.
+    static func deliverFocused(_ dict: [String: Any]?) {
+        turn &+= 1
+        turnOpen = false
+        focusedMemo.seed(turn: currentTurn(), value: (dict, dict.map(Bridge.jsonify) ?? "null"))
     }
 
     static func allWindows() -> (snapshot: [[String: Any]], json: String) {

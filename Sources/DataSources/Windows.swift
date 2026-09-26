@@ -114,12 +114,19 @@ enum WindowServerProperty {
 // MARK: - Windows: CGWindowList + focused-window AX
 
 enum Windows {
-    // Focused window for the frontmost app, via Accessibility.
-    static func focused() -> [String: Any]? {
-        guard let app = NSWorkspace.shared.frontmostApplication else { return nil }
-        let pid = app.processIdentifier
+    /// The AX half of a focused-window read: everything that talks to the
+    /// app. Safe off main.
+    struct FocusedWindowRead {
+        let title: String
+        let origin: CGPoint
+        let size: CGSize
+        let id: CGWindowID?
+    }
+
+    /// `pid`'s focused window, read over AX with a 0.1s cap so an
+    /// unresponsive app can't hang the caller. Any thread.
+    static func readFocusedWindow(pid: pid_t) -> FocusedWindowRead? {
         let appEl = AXUIElementCreateApplication(pid)
-        // Cap blocking calls — an unresponsive app shouldn't hang the daemon.
         AXUIElementSetMessagingTimeout(appEl, 0.1)
 
         var focusedRef: AnyObject?
@@ -130,7 +137,6 @@ enum Windows {
 
         var titleRef: AnyObject?
         _ = AXUIElementCopyAttributeValue(win, kAXTitleAttribute as CFString, &titleRef)
-        let title = (titleRef as? String) ?? ""
 
         var posRef: AnyObject?
         var sizeRef: AnyObject?
@@ -144,21 +150,26 @@ enum Windows {
         // Recover CGWindowID via the private SPI so per-window-id consumers
         // (sd.windows.byId, tiler-style stacks) can target this exact window.
         var winId: CGWindowID = 0
-        var idVal: Int? = nil
+        var id: CGWindowID? = nil
         if let getWindow = AXShim.getWindow, getWindow(win, &winId) == .success {
-            idVal = Int(winId)
+            id = winId
         }
+        return FocusedWindowRead(title: (titleRef as? String) ?? "", origin: pt, size: sz, id: id)
+    }
 
+    /// The sd.windows.focused payload for a read of `app`'s focused window.
+    /// Main thread (display lookup walks NSScreen).
+    static func focusedPayload(_ read: FocusedWindowRead, app: NSRunningApplication) -> [String: Any] {
+        let pt = read.origin
         var out: [String: Any] = [
             "app": app.localizedName ?? "",
-            "pid": Int(pid),
-            "title": title,
-            "frame": ["x": Int(pt.x), "y": Int(pt.y), "w": Int(sz.width), "h": Int(sz.height)]
+            "pid": Int(app.processIdentifier),
+            "title": read.title,
+            "frame": ["x": Int(pt.x), "y": Int(pt.y), "w": Int(read.size.width), "h": Int(read.size.height)]
         ]
-        if let id = idVal { out["id"] = id }
+        if let id = read.id { out["id"] = Int(id) }
         // Bundle identifier — stable across launches (pid recycles), so
-        // stacks routing by app should key on this. Free off the same
-        // NSRunningApplication we already grabbed for pid.
+        // stacks routing by app should key on this.
         if let bid = app.bundleIdentifier { out["bundleId"] = bid }
         // Enrich with the containing display so consumers don't reimplement
         // the forPoint loop. Probe at the window's top-left in CG coords —
@@ -170,12 +181,17 @@ enum Windows {
         // Multi-space windows (sticky-on-all-spaces / fullscreen-with-aux)
         // still get a sensible space here; consumers that need the full set
         // call sd.spaces.forWindow(id).
-        if let id = idVal {
-            if let first = Spaces.windowSpaces(windowID: UInt32(id)).first {
-                out["space"] = Int(first)
-            }
+        if let id = read.id, let first = Spaces.windowSpaces(windowID: UInt32(id)).first {
+            out["space"] = Int(first)
         }
         return out
+    }
+
+    // Focused window for the frontmost app, via Accessibility. Main thread.
+    static func focused() -> [String: Any]? {
+        guard let app = NSWorkspace.shared.frontmostApplication,
+              let read = readFocusedWindow(pid: app.processIdentifier) else { return nil }
+        return focusedPayload(read, app: app)
     }
 
     // Actions below all operate on the AX focused window of the frontmost app.
@@ -1718,6 +1734,94 @@ struct FrontmostActivation {
     }
 }
 
+/// When the frontmost app's focused window is read off main. Triggers (an
+/// activation, an AX focused/main-window notification) request a read for
+/// a pid; the newest requested pid is the target.
+///
+/// - One read in flight per pid. Requests that land while it runs coalesce
+///   into one re-read, since the running read may predate the change.
+/// - A read for a pid that is no longer the target is discarded.
+/// - A read that finds no window gets ONE retry after `nilRetryDelay`: an
+///   activation can land before the app's kAXFocusedWindowAttribute is
+///   readable, and the app posts no AX notification when it becomes
+///   readable (its focused window never changed within the app), so
+///   without the retry the switch is lost. The retry's result is delivered
+///   whatever it finds.
+///
+/// While `awaiting`, main-thread readers defer to the pending delivery
+/// instead of reading AX themselves. Main-thread state.
+struct FocusedReadSchedule {
+    enum Next: Equatable {
+        /// Push the result.
+        case deliver
+        /// A newer request arrived during the read; the read is restarted.
+        case readAgain
+        /// No window yet; call `retryDue` after `after`, with `token`.
+        case retry(after: TimeInterval, token: UInt64)
+        /// The pid is no longer the target; drop the result.
+        case discard
+    }
+
+    static let nilRetryDelay: TimeInterval = 0.1
+
+    private(set) var target: pid_t?
+    private var inFlight: Set<pid_t> = []
+    private var dirty: Set<pid_t> = []
+    private var retried = false
+    private var retryToken: UInt64 = 0
+    private var retryScheduled = false
+
+    var awaiting: Bool {
+        guard let t = target else { return false }
+        return inFlight.contains(t) || retryScheduled
+    }
+
+    /// A trigger wants `pid`'s focused window. True: start a read now.
+    mutating func request(pid: pid_t) -> Bool {
+        target = pid
+        retried = false
+        retryScheduled = false
+        retryToken &+= 1
+        if inFlight.contains(pid) {
+            dirty.insert(pid)
+            return false
+        }
+        inFlight.insert(pid)
+        return true
+    }
+
+    /// `pid`'s read finished; `found` is whether it named a window.
+    mutating func resolved(pid: pid_t, found: Bool) -> Next {
+        guard inFlight.remove(pid) != nil else { return .discard }
+        let wasDirty = dirty.remove(pid) != nil
+        guard pid == target else { return .discard }
+        if wasDirty {
+            inFlight.insert(pid)
+            return .readAgain
+        }
+        if !found && !retried {
+            retried = true
+            retryScheduled = true
+            retryToken &+= 1
+            return .retry(after: Self.nilRetryDelay, token: retryToken)
+        }
+        return .deliver
+    }
+
+    /// The retry delay elapsed. True: start the retry read now.
+    mutating func retryDue(pid: pid_t, token: UInt64) -> Bool {
+        guard retryScheduled, token == retryToken, pid == target else { return false }
+        retryScheduled = false
+        if inFlight.contains(pid) { return false }
+        inFlight.insert(pid)
+        return true
+    }
+
+    mutating func reset() {
+        self = FocusedReadSchedule()
+    }
+}
+
 /// Singleton that maintains an AXAppObserver bound to whichever app is
 /// currently frontmost. Event-driven, not polled — within-app focused-window
 /// / title changes fire the moment AX reports them, with no polling lag.
@@ -1738,6 +1842,7 @@ final class FrontmostWindowObserver: RefCountedObserver {
 
     private var currentTokens: [Token] = []
     private var activation = FrontmostActivation()
+    private var reads = FocusedReadSchedule()
 
     /// Per-event-type callbacks. Multi-subscriber: every Bridge that calls
     /// startWorkspace appends its own handler; we fire ALL of them on each
@@ -1798,6 +1903,7 @@ final class FrontmostWindowObserver: RefCountedObserver {
             ncToken.cancel()
             guard let self = self else { return }
             self.activation.reset(to: nil)
+            self.reads.reset()
             // Cancel the pool subscriptions so the AXObserverPool tears down
             // its per-pid AXAppObserver when this was the last subscriber —
             // matching the Token contract instead of waiting on deinit.
@@ -1818,40 +1924,49 @@ final class FrontmostWindowObserver: RefCountedObserver {
     private func activate(pid: pid_t) {
         guard activation.shouldActivate(pid: pid) else { return }
         installFor(pid: pid)
-        // Activation itself counts as a focus change — fire so consumers
-        // pick up the new frontmost-app window without waiting for the
-        // first within-app AX notification.
         fireAppActivated()
-        // Focus changes with the app switch — pump the focused-window
-        // channel too so stacks that only listen to focusedChanged
-        // don't miss the cross-app transition.
-        fireFocusedChanged()
-        fire()
-        // Activation can land BEFORE the activated app's
-        // kAXFocusedWindowAttribute settles, so the fire above may
-        // read nil (Bridge pushes "null" → consumers hide) or the
-        // OLD window (dedupe suppresses the push entirely). Neither
-        // produces a later AX notification — the app's focused
-        // window never changes *within* the app, it just becomes
-        // readable — so the event is silently lost without these
-        // bounded settle re-fires. Bridge's lastState dedupe makes
-        // an already-settled re-fire a no-op push-wise.
-        scheduleFocusSettleRefires()
+        // The focused-window side of the switch (focusedChanged and the
+        // union channel) waits for the confirmed read of this pid: a
+        // main-thread read here would block on the app, and at CGS 1508
+        // time NSWorkspace still names the previous app as frontmost.
+        requestFocusedRead(pid: pid)
     }
 
-    /// Bounded re-checks after an app activation, NOT a poll: two one-shot
-    /// re-fires while the activated app's AX tree settles. Stale-by-then
-    /// re-fires are harmless — they re-read current state and Bridge's
-    /// per-channel JSON dedupe drops no-op pushes. No generation counter
-    /// needed: a newer activation between schedule and fire just means the
-    /// re-fire reads the newer (correct) state.
-    private func scheduleFocusSettleRefires() {
-        for delay in [0.12, 0.40] {
+    /// True while a confirmed read for the frontmost app is in flight or
+    /// waiting on its retry; its delivery fires focusedChanged and the
+    /// union channel, so main-thread readers skip rather than read AX.
+    var awaitingFocusedRead: Bool { reads.awaiting }
+
+    private func requestFocusedRead(pid: pid_t) {
+        guard reads.request(pid: pid) else { return }
+        startFocusedRead(pid: pid)
+    }
+
+    private func startFocusedRead(pid: pid_t) {
+        AXAppQueues.queue(for: pid).async { [weak self] in
+            let read = Windows.readFocusedWindow(pid: pid)
+            DispatchQueue.main.async { self?.focusedReadResolved(pid: pid, read: read) }
+        }
+    }
+
+    private func focusedReadResolved(pid: pid_t, read: Windows.FocusedWindowRead?) {
+        switch reads.resolved(pid: pid, found: read != nil) {
+        case .discard:
+            return
+        case .readAgain:
+            startFocusedRead(pid: pid)
+        case .retry(let delay, let token):
             DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
-                guard let self = self else { return }
-                self.fireFocusedChanged()
-                self.fire()
+                guard let self = self, self.reads.retryDue(pid: pid, token: token) else { return }
+                self.startFocusedRead(pid: pid)
             }
+        case .deliver:
+            let payload = read.flatMap { r in
+                NSRunningApplication(processIdentifier: pid).map { Windows.focusedPayload(r, app: $0) }
+            }
+            WorkspaceFanout.deliverFocused(payload)
+            fireFocusedChanged()
+            fire()
         }
     }
 
@@ -1862,20 +1977,21 @@ final class FrontmostWindowObserver: RefCountedObserver {
         for t in currentTokens { t.cancel() }
         currentTokens.removeAll()
 
-        // Route each AX notification to its dedicated callback before firing
-        // the union nudge. kAXMainWindowChangedNotification is treated as a
-        // focus change (the main window IS the focus target for most apps).
+        // Route each AX notification to its dedicated callback. Focus and
+        // main-window changes (the main window IS the focus target for most
+        // apps) go through the confirmed off-main read, whose delivery fires
+        // focusedChanged and the union nudge; title changes fire both now.
         let handler: (String) -> Void = { [weak self] notif in
             guard let self = self else { return }
             switch notif {
             case kAXFocusedWindowChangedNotification, kAXMainWindowChangedNotification:
-                self.fireFocusedChanged()
+                self.requestFocusedRead(pid: pid)
             case kAXTitleChangedNotification:
                 self.fireTitleChanged()
+                self.fire()
             default:
-                break
+                self.fire()
             }
-            self.fire()
         }
         for notif in [
             kAXFocusedWindowChangedNotification,

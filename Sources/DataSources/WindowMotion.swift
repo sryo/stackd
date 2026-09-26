@@ -613,6 +613,21 @@ struct AXEnhancedUIProbeCache {
     }
 }
 
+/// One serial queue per app for AX work that must stay off main: motion
+/// writes, the confirmed focused-window read, the focus raise. A slow or
+/// hung app backs up only its own queue, and two AX conversations with one
+/// app never run concurrently. Main thread only.
+enum AXAppQueues {
+    private static var queues: [pid_t: DispatchQueue] = [:]
+
+    static func queue(for pid: pid_t) -> DispatchQueue {
+        if let q = queues[pid] { return q }
+        let q = DispatchQueue(label: "stackd.ax.\(pid)", qos: .userInteractive)
+        queues[pid] = q
+        return q
+    }
+}
+
 /// One app's AX writer: a serial queue the writes run on, and the mailbox
 /// (main-thread state) that feeds it. A slow or hung app only backs up its
 /// own queue; the display-link tick and every other app keep moving.
@@ -630,7 +645,7 @@ final class AppFrameWriter {
 
     init(pid: pid_t) {
         self.pid = pid
-        queue = DispatchQueue(label: "stackd.axwrite.\(pid)", qos: .userInteractive)
+        queue = AXAppQueues.queue(for: pid)
         appElement = AXUIElementCreateApplication(pid)
         AXUIElementSetMessagingTimeout(appElement, 0.1)
     }
