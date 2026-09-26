@@ -2559,11 +2559,17 @@ private let missionControlAXCallback: AXObserverCallback = { _, _, notification,
 //
 /// Leading+trailing throttle keyed per (window, moved|resized). The
 /// leading event .emits immediately and arms an 80ms gate; events
-/// inside the gate .hold (caller replaces its held payload — LAST one
-/// wins); the trailing tick .emitHelds and re-arms, or .closes when
-/// the burst went quiet. Pure so the schedule is testable — the
-/// caller (WindowsAXObserver.fireFrameBang) owns payloads and timers.
-struct FrameBangCoalescer {
+/// inside the gate .hold, and the coalescer keeps their `Source` (LAST
+/// one wins); the trailing tick hands the held source back via
+/// .emitHeld and re-arms, or .closes when the burst went quiet.
+///
+/// The source is what the caller reads the payload FROM (the window's
+/// AXUIElement in production), not the payload itself: a held event is
+/// never read, so a drag's in-window callbacks cost no AX round trips —
+/// only the edges that actually dispatch do. Pure so the schedule is
+/// testable — the caller (WindowsAXObserver.fireFrameBang) owns reads
+/// and timers.
+struct FrameBangCoalescer<Source> {
     enum Kind: String {
         case moved, resized
         var bangName: String { "sd.window.\(rawValue)" }
@@ -2573,33 +2579,36 @@ struct FrameBangCoalescer {
         let kind: Kind
     }
     enum EventAction: Equatable { case emit, hold }
-    enum TickAction: Equatable { case emitHeld, close }
+    enum TickAction {
+        case emitHeld(Source)
+        case close
+    }
 
-    static let quietWindow: Double = 0.08
+    static var quietWindow: Double { 0.08 }
 
     private struct Gate {
         var until: Double
-        var hasHeld: Bool
+        var held: Source?
     }
     private var gates: [Key: Gate] = [:]
 
-    mutating func onEvent(_ key: Key, now: Double) -> EventAction {
+    mutating func onEvent(_ key: Key, now: Double, source: Source) -> EventAction {
         if var gate = gates[key], now < gate.until {
-            gate.hasHeld = true
+            gate.held = source
             gates[key] = gate
             return .hold
         }
-        gates[key] = Gate(until: now + Self.quietWindow, hasHeld: false)
+        gates[key] = Gate(until: now + Self.quietWindow, held: nil)
         return .emit
     }
 
     mutating func onTick(_ key: Key, now: Double) -> TickAction {
         guard var gate = gates[key] else { return .close }
-        if gate.hasHeld {
-            gate.hasHeld = false
+        if let held = gate.held {
+            gate.held = nil
             gate.until = now + Self.quietWindow
             gates[key] = gate
-            return .emitHeld
+            return .emitHeld(held)
         }
         // A tick that fires before the gate's deadline is stale — a
         // fresh leading edge re-armed the gate and scheduled its own
@@ -2612,6 +2621,8 @@ struct FrameBangCoalescer {
         gates = gates.filter { $0.key.windowID != windowID }
     }
 }
+
+extension FrameBangCoalescer.TickAction: Equatable where Source: Equatable {}
 
 // Per-app `AXObserver` (one per pid) listens for
 // `kAXWindowCreatedNotification` on the application AXUIElement. On every
@@ -3184,13 +3195,13 @@ final class WindowsAXObserver {
     ///
     /// Coalescing (hs.window.filter precedent — HS coalesces these too):
     /// the first event in a burst dispatches immediately so drag brackets
-    /// wake promptly; events inside the 80ms quiet window replace a held
-    /// payload that the trailing tick delivers. A user drag emits at
-    /// ~12Hz/stack instead of every AX callback.
-    private var frameBangCoalescer = FrameBangCoalescer()
-    private var heldFrameBangs: [FrameBangCoalescer.Key: [String: Any]] = [:]
+    /// wake promptly; events inside the 80ms quiet window only replace the
+    /// held AXUIElement, and the frame is read once the trailing tick
+    /// dispatches. A user drag emits (and reads AX) at ~12Hz instead of
+    /// on every AX callback.
+    private var frameBangCoalescer = FrameBangCoalescer<AXUIElement>()
 
-    private func fireFrameBang(_ kind: FrameBangCoalescer.Kind, wid: CGWindowID, window: AXUIElement) {
+    private func fireFrameBang(_ kind: FrameBangCoalescer<AXUIElement>.Kind, wid: CGWindowID, window: AXUIElement) {
         lastAxFire[wid] = Date().timeIntervalSince1970
         // Checked before the frame read: during an animation every tick
         // echoes back here, and the two synchronous AX reads would be
@@ -3199,47 +3210,46 @@ final class WindowsAXObserver {
             WindowDebug.log("ax: \(kind.rawValue) swallowed (animating) wid=\(wid)")
             return
         }
+        let key = FrameBangCoalescer<AXUIElement>.Key(windowID: wid, kind: kind)
+        switch frameBangCoalescer.onEvent(key, now: CFAbsoluteTimeGetCurrent(), source: window) {
+        case .emit:
+            dispatchFrameBang(key, window: window)
+            scheduleFrameBangTick(key)
+        case .hold:
+            break
+        }
+    }
+
+    /// Reads the frame and classifies it against the ledger at dispatch
+    /// time, so the echo check always sees the frame the bang carries.
+    private func dispatchFrameBang(_ key: FrameBangCoalescer<AXUIElement>.Key, window: AXUIElement) {
         let frame = axWindowFrame(window) ?? .zero
         let isSelf = FrameLedger.shared.isSelf(
-            windowID: wid, observed: frame, now: CFAbsoluteTimeGetCurrent()
+            windowID: key.windowID, observed: frame, now: CFAbsoluteTimeGetCurrent()
         )
-        WindowDebug.log("ax: window \(kind.rawValue) wid=\(wid) self=\(isSelf)")
-        let detail: [String: Any] = [
-            "id": Int(wid),
+        WindowDebug.log("ax: window \(key.kind.rawValue) wid=\(key.windowID) self=\(isSelf)")
+        AppDelegate.shared?.host?.bang(name: key.kind.bangName, detail: [
+            "id": Int(key.windowID),
             "self": isSelf,
             "frame": [
                 "x": Int(frame.origin.x), "y": Int(frame.origin.y),
                 "w": Int(frame.size.width), "h": Int(frame.size.height)
             ]
-        ]
-        let key = FrameBangCoalescer.Key(windowID: wid, kind: kind)
-        switch frameBangCoalescer.onEvent(key, now: CFAbsoluteTimeGetCurrent()) {
-        case .emit:
-            AppDelegate.shared?.host?.bang(name: kind.bangName, detail: detail)
-            scheduleFrameBangTick(key)
-        case .hold:
-            heldFrameBangs[key] = detail
-        }
+        ])
     }
 
-    /// Gate + held payload drop as one operation — the two live apart
-    /// (pure struct vs caller-owned dict) but must always purge together
-    /// or a dead window's held bang leaks.
     private func dropFrameBangState(wid: CGWindowID) {
         frameBangCoalescer.purge(windowID: wid)
-        heldFrameBangs = heldFrameBangs.filter { $0.key.windowID != wid }
     }
 
-    private func scheduleFrameBangTick(_ key: FrameBangCoalescer.Key) {
+    private func scheduleFrameBangTick(_ key: FrameBangCoalescer<AXUIElement>.Key) {
         // +5ms past the quiet window so the tick lands on the far side of
         // the gate despite main-queue timer jitter.
-        DispatchQueue.main.asyncAfter(deadline: .now() + FrameBangCoalescer.quietWindow + 0.005) { [weak self] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + FrameBangCoalescer<AXUIElement>.quietWindow + 0.005) { [weak self] in
             guard let self = self else { return }
             switch self.frameBangCoalescer.onTick(key, now: CFAbsoluteTimeGetCurrent()) {
-            case .emitHeld:
-                if let detail = self.heldFrameBangs.removeValue(forKey: key) {
-                    AppDelegate.shared?.host?.bang(name: key.kind.bangName, detail: detail)
-                }
+            case .emitHeld(let window):
+                self.dispatchFrameBang(key, window: window)
                 self.scheduleFrameBangTick(key)
             case .close:
                 break
