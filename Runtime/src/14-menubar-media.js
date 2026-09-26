@@ -1,3 +1,11 @@
+sd.desktop = {
+    // Reference-counted desktop-icon hiding, through the "Show Items: On
+    // Desktop" setting. Icons return once every hideIcons() has a matching
+    // showIcons(), or when the stack unloads.
+    hideIcons() { return request({ type: "desktop.hideIcons" }); },
+    showIcons() { return request({ type: "desktop.showIcons" }); },
+};
+
 sd.menubar = {
     // Reference-counted system menu-bar visibility.
     // Multiple stacks can suppress; the bar reappears only once every

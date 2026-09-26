@@ -175,6 +175,7 @@ Available inside `{{ }}` templates and `import { sd } from "sd://runtime/api.js"
 | `sd.windows.setFrame / minimize / fullscreen / raise / focus / close / cornerRadius / snapshot / batch` | per-window actions (by AX or CGWindowID) |
 | `sd.spaces.all` / `sd.spaces.windowSpaces(id)` / `sd.spaces.minimizedWindows(spaceID)` | Spaces info via SkyLight SPI |
 | `sd.overlay.attach(windowId, draw)` | CG-context overlay pinned to another app's window (JankyBorders pattern) |
+| `sd.desktop.hideIcons / showIcons` | hide/show desktop icons (the "Show Items: On Desktop" setting, restored afterwards) |
 | `sd.menubar.suppress / restore` | make the system menu bar transparent / restore it (it still takes clicks where no stack covers it) |
 | `sd.menubar.addItem(spec)` | add an NSStatusItem |
 | `sd.menu.popup(items)` | native NSMenu at the cursor |

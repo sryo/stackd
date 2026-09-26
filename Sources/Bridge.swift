@@ -77,6 +77,9 @@ final class Bridge: NSObject, WKScriptMessageHandler {
     // Widened from private to internal so BridgeMenubar.swift's
     // menubar.suppress / .restore closures can push/pop tokens.
     var menubarSuppressions: [Token] = []
+    // Outstanding sd.desktop.hideIcons() holds (LIFO), popped by showIcons()
+    // and drained by scope at unload, same shape as menubarSuppressions.
+    var desktopIconHolds: [Token] = []
     // NSStatusItem handles owned by this stack, keyed by mint id. Scope adopts
     // a drain entry at start(); unload removes every item from NSStatusBar.
     // Widened from fileprivate to internal so BridgeMenubar.swift's
@@ -490,6 +493,11 @@ final class Bridge: NSObject, WKScriptMessageHandler {
             for t in self.menubarSuppressions { t.cancel() }
             self.menubarSuppressions.removeAll()
         })
+        scope.adopt(Token { [weak self] in
+            guard let self = self else { return }
+            for t in self.desktopIconHolds { t.cancel() }
+            self.desktopIconHolds.removeAll()
+        })
         // Same shape for NSStatusItems: stack unload removes every item this
         // stack added (no orphan icons sitting in the menu bar forever).
         scope.adopt(Token { [weak self] in
@@ -836,6 +844,7 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         + Bridge.httpServerPrimitives()
         + Bridge.storagePrimitives()
         + Bridge.menubarPrimitives()
+        + Bridge.desktopPrimitives()
         + Bridge.axPrimitives()
         + Bridge.eventsPrimitives()
         + Bridge.windowsPrimitives()

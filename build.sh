@@ -40,6 +40,7 @@ SWIFT_SOURCES=(
   Sources/BridgeHotkey.swift
   Sources/BridgeJSON.swift
   Sources/BridgeMenubar.swift
+  Sources/BridgeDesktop.swift
   Sources/BridgeNLP.swift
   Sources/BridgeOverlay.swift
   Sources/BridgeProc.swift
@@ -68,6 +69,7 @@ SWIFT_SOURCES=(
   Sources/DataSources/Broadcasts.swift
   Sources/DataSources/URLHandler.swift
   Sources/DataSources/Menubar.swift
+  Sources/DataSources/Desktop.swift
 
 
   Sources/DataSources/Network.swift

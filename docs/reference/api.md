@@ -51,6 +51,7 @@ The complete author-facing JavaScript API. Everything is on the global `sd`. Sou
 | `sd.media` | Now-playing channel + transport commands | Channel + RPC | `media` |
 | `sd.menu` | Native NSMenu popup at cursor | RPC | `menu` |
 | `sd.menubar` | Menu-bar suppress/restore, AX item enum/channels, NSStatusItem | Channels + RPC | `menubar` / `menubar.item` |
+| `sd.desktop` | Desktop-icon hide/show | RPC | `desktop` |
 | `sd.mouse` | Cursor position channel + warp | Channel + RPC | `mouse` |
 | `sd.net` | Wi-Fi/LAN/path/throughput channels | Global channels | `net` |
 | `sd.nlp` | NaturalLanguage: lang ID, tokens, lemmas, similarity | RPC | `nlp` |
@@ -235,6 +236,9 @@ Handle-based; handles are opaque ints owned by this stack — release them.
 
 ### `sd.menu` — popup menu · `menu`
 - `popup(items) → Promise<pickedId|null>` — items `[{id,title,checked?,enabled?,separator?,submenu?}]` at cursor.
+
+### `sd.desktop` — desktop icons · `desktop`
+- `hideIcons()` / `showIcons() → Promise<bool>` — ref-counted desktop-icon visibility via the "Show Items: On Desktop" setting; applies without relaunching Finder. The user's prior setting is restored when the last hold releases, on stack unload, on daemon exit, and on the next launch after a crash.
 
 ### `sd.menubar` — menu bar · `menubar` (+ `menubar.item` for `addItem`)
 - `sd.menubar.observe` *(channel, poll-tunable, 2s)* — `[{owner,title,x,width,hidden}]` of visible status items.

@@ -56,6 +56,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ note: Notification) {
         // Never inherit a "menu bar hidden" state from a crashed previous daemon.
         MenuBarVisibility.forceRestoreOnLaunch()
+        // The desktop-icon preference persists, so a crash can leave it set.
+        DesktopIcons.shared.recoverOnLaunch()
 
         let root = stackdRoot()
         let runtime = runtimePath()
@@ -241,6 +243,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ note: Notification) {
         // Safety: never leave the user's menu bar hidden if we exit while suppressing.
         MenuBarVisibility.resetForReload()
+        DesktopIcons.shared.releaseAll()
         watcher?.stop()
         ipc?.stop()
         IntakeTrace.dump()
