@@ -58,6 +58,28 @@ func registerCGSDecodeTests() {
         try expectEqual(decode(1325, u64(31)), .malformed, "1325 needs 12 bytes")
     }
 
+    test("probe codes decode their leading payload words") {
+        for code: UInt32 in [802, 803, 809, 811, 1400, 1411, 1412, 1413] {
+            try expectEqual(decode(code, u32(4242) + u32(7)), .probe(code: code, words: [4242, 7]))
+        }
+    }
+
+    test("probe decode caps the words and drops a trailing partial word") {
+        let six: [UInt8] = (1...6).flatMap { u32(UInt32($0)) } + [0xff]
+        try expectEqual(decode(1411, six), .probe(code: 1411, words: [1, 2, 3, 4]))
+        try expectEqual(decode(1412, [0x01, 0x02]), .probe(code: 1412, words: []))
+        try expectEqual(decode(1413, []), .probe(code: 1413, words: []))
+    }
+
+    test("probe events never reach the intake") {
+        try expectEqual(IntakeEvent.window(.probe(code: 1411, words: [1])).key, nil)
+    }
+
+    test("probe log line names the code and prints words in hex") {
+        try expectEqual(CGSProbe.describe(code: 1411, words: [0x1a2b, 0], length: 8),
+                        "1411 windowDragDidStart len=8 words=[0x00001a2b 0x00000000]")
+    }
+
     test("unknown event types are ignored") {
         try expectEqual(decode(999, u32(1)), .ignored)
     }

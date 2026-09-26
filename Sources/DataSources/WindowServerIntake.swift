@@ -128,7 +128,7 @@ enum IntakeEvent {
                 return IntakeKey(kind: .spaceWindowCreated, id: wid)
             case .animationBegan:              return IntakeKey(kind: .animationBegan, id: 0)
             case .frontmostByMouse:            return IntakeKey(kind: .frontmost, id: 0)
-            case .titleChanged, .spaceWindowDestroyed, .ignored, .malformed:
+            case .titleChanged, .spaceWindowDestroyed, .probe, .ignored, .malformed:
                 return nil
             }
         }

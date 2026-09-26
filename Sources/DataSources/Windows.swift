@@ -2310,6 +2310,19 @@ private enum SkyLightWindowEvents {
 //   1508 — frontmost app changed  (int32 pid at offset 0; surfaced as
 //                                  sd.window.focusedByMouse and run as a
 //                                  focus trigger ahead of NSWorkspace)
+//
+// Probe-only codes, named per CGSInternal's CGSNotificationType list. They
+// are counted and, under STACKD_CGS_DEBUG, logged with their payload's
+// leading words; nothing consumes them until a live run shows whether and
+// how they fire on this macOS:
+//   802  — window ordered in
+//   803  — window ordered out
+//   809  — window geometry did change
+//   811  — window did create
+//   1400 — workspace will change
+//   1411 — window drag did start
+//   1412 — window drag did end
+//   1413 — window drag will end
 private let kSDWindowClosed:         UInt32 = 804
 private let kSDWindowMoved:          UInt32 = 806
 private let kSDWindowResized:        UInt32 = 807
@@ -2319,6 +2332,18 @@ private let kSDSpaceWindowCreated:   UInt32 = 1325
 private let kSDSpaceWindowDestroyed: UInt32 = 1326
 private let kSDWindowAnimationBegan: UInt32 = 1327
 private let kSDWindowFocusedByMouse: UInt32 = 1508
+
+/// Probe-only codes and their CGSInternal names.
+let kSDProbeEventNames: [UInt32: String] = [
+    802: "windowOrderedIn",
+    803: "windowOrderedOut",
+    809: "windowGeometryDidChange",
+    811: "windowDidCreate",
+    1400: "workspaceWillChange",
+    1411: "windowDragDidStart",
+    1412: "windowDragDidEnd",
+    1413: "windowDragWillEnd",
+]
 
 /// Decoded CGS window event. Pure decode so the offset arithmetic is
 /// headless-testable — payload offsets per OmniWM's CGSEventObserver.
@@ -2333,11 +2358,16 @@ enum CGSDecodedWindowEvent: Equatable {
     case animationBegan
     /// nil when the payload carries no usable pid.
     case frontmostByMouse(pid: pid_t?)
+    /// A probe-only code: its leading payload words (little-endian uint32,
+    /// at most `probeWordLimit`), since the layout is not known yet.
+    case probe(code: UInt32, words: [UInt32])
     case ignored
     case malformed
 }
 
 enum CGSWindowEventDecoder {
+    static let probeWordLimit = 4
+
     static func decode(eventType: UInt32, data: UnsafeRawPointer?, length: Int) -> CGSDecodedWindowEvent {
         func wid(at offset: Int) -> UInt32? {
             guard let data = data, length >= offset + 4 else { return nil }
@@ -2364,6 +2394,9 @@ enum CGSWindowEventDecoder {
             guard let data = data, length >= 4 else { return .frontmostByMouse(pid: nil) }
             let pid = data.loadUnaligned(fromByteOffset: 0, as: Int32.self)
             return .frontmostByMouse(pid: pid > 0 ? pid : nil)
+        case let code where kSDProbeEventNames[code] != nil:
+            let count = data == nil ? 0 : min(max(length, 0) / 4, probeWordLimit)
+            return .probe(code: code, words: (0..<count).compactMap { wid(at: $0 * 4) })
         default:                      return .ignored
         }
     }
@@ -2399,10 +2432,27 @@ private let windowEventsCallback: SkyLightWindowEvents.CGSConnectionCallback = {
     case .moved, .resized:
         OverlayEventFollow.handle(event)
         return
+    case .probe(let code, let words):
+        if CGSProbe.logging {
+            log("cgs probe: \(CGSProbe.describe(code: code, words: words, length: dataLen))")
+        }
+        return
     case .spaceWindowDestroyed, .titleChanged, .ignored, .malformed:
         return
     default:
         WindowServerIntake.post(.window(event))
+    }
+}
+
+/// Log formatting for the probe-only codes (STACKD_CGS_DEBUG).
+enum CGSProbe {
+    static let logging = ProcessInfo.processInfo.environment["STACKD_CGS_DEBUG"] != nil
+
+    /// `1411 windowDragDidStart len=8 words=[0x00001a2b 0x00000000]`
+    static func describe(code: UInt32, words: [UInt32], length: Int) -> String {
+        let name = kSDProbeEventNames[code] ?? "unknown"
+        let hex = words.map { String(format: "0x%08x", $0) }.joined(separator: " ")
+        return "\(code) \(name) len=\(length) words=[\(hex)]"
     }
 }
 
@@ -2434,6 +2484,11 @@ enum WindowEvents {
         for evt in [kSDWindowClosed, kSDWindowReordered,
                     kSDSpaceWindowCreated, kSDSpaceWindowDestroyed,
                     kSDWindowAnimationBegan, kSDWindowFocusedByMouse] {
+            _ = reg(cid, windowEventsCallback, evt, nil)
+        }
+        // Probe-only codes: a notify proc per code, no interest list — the
+        // list set for 806/807/808 is untouched.
+        for evt in kSDProbeEventNames.keys.sorted() {
             _ = reg(cid, windowEventsCallback, evt, nil)
         }
         if OverlayEventFollow.enabled {
@@ -2579,7 +2634,7 @@ enum WindowEvents {
             }
         case .animationBegan:
             WindowAnimationObserver.shared.animationBegan()
-        case .ignored, .malformed:
+        case .probe, .ignored, .malformed:
             break
         }
     }
