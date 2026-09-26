@@ -110,6 +110,11 @@ func registerOverlayTickArmTests() {
         try expect(OverlayTickArm.visibilityHold > OverlayTickArm.idle)
     }
 
+    test("OverlayArmEvents: animating holds past the animation window so the overlay can return") {
+        let hold = OverlayArmEvents.hold(forBang: "sd.window.animating") ?? 0
+        try expect(hold > WindowAnimationWatch.holdDuration)
+    }
+
     test("OverlayArmEvents: unrelated bangs don't arm") {
         try expect(OverlayArmEvents.hold(forBang: "sd.window.created") == nil)
         try expect(OverlayArmEvents.hold(forBang: "sd.window.titleChanged") == nil)

@@ -201,9 +201,12 @@ final class OverlayHandle: NSObject, WKNavigationDelegate {
         // Stay dormant — the hider's restore + repinAllAfterScreenshot
         // handle z-order on session exit.
         if ScreenshotHider.shared.active { return false }
-        // Target gone or hidden (closed / minimized / cmd-H'd): hide the
-        // panel rather than leave a ghost border at the last frame.
+        // Target gone, hidden (closed / minimized / cmd-H'd) or mid system
+        // animation: hide the panel rather than leave a ghost border at the
+        // last frame. During the genie SkyLight still reports the window
+        // ordered in at its unwarped frame.
         guard Overlay.isOrderedIn(targetWID),
+              !WindowEvents.isAnimating(windowID: targetWID),
               let frame = Overlay.bounds(of: targetWID) else {
             if panel.isVisible {
                 panel.orderOut(nil)
@@ -720,6 +723,11 @@ enum OverlayArmEvents {
             return OverlayTickArm.idle
         case "sd.window.minimized", "sd.window.deminimized", "sd.window.destroyed":
             return OverlayTickArm.visibilityHold
+        case "sd.window.animating":
+            // Outlasts isAnimating so the tick is still running when a
+            // window that didn't minimize (deminimize, false positive)
+            // becomes eligible to show again.
+            return WindowAnimationWatch.holdDuration + OverlayTickArm.idle
         default:
             return nil
         }
