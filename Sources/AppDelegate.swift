@@ -199,6 +199,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // bang. See Windows.swift CGS section for event IDs and payload
         // decoding.
         WindowEvents.install()
+        IntakeTrace.installDumpTriggers()
         // The previous WindowEvents.startTahoeSynthPoll() (a 100ms CG diff
         // loop that synthesized moved/resized/minimized/deminimized bangs
         // because CGS events 806/807/815/816 went silent on Tahoe) is
@@ -233,5 +234,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         MenuBarVisibility.resetForReload()
         watcher?.stop()
         ipc?.stop()
+        IntakeTrace.dump()
     }
 }

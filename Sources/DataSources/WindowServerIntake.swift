@@ -149,6 +149,11 @@ enum WindowServerIntake {
     private static var stats = Stats()
     // Main thread.
     private static var spaces = SpacesCoalescer()
+    private static let tracer = IntakeTracer(enabled: IntakeTrace.enabled,
+                                             capacity: IntakeTrace.capacity)
+
+    /// The trace so far (STACKD_TRACE=1). Main thread.
+    static var traceRing: TraceRing<IntakeTraceRecord> { tracer.ring }
 
     struct Stats {
         var offered = 0
@@ -165,9 +170,10 @@ enum WindowServerIntake {
     /// Queue `event` for the next drain. Any thread.
     static func post(_ event: IntakeEvent) {
         guard let key = event.key else { return }
+        let now = tracer.stamp()
         lock.lock()
         let before = queue.pendingCount
-        let schedule = queue.offer(key, event, now: nil)
+        let schedule = queue.offer(key, event, now: now)
         stats.offered += 1
         if queue.pendingCount == before { stats.merged += 1 }
         lock.unlock()
@@ -189,9 +195,27 @@ enum WindowServerIntake {
         stats.drains += 1
         stats.maxBatch = max(stats.maxBatch, batch.count)
         lock.unlock()
+        let drainStart = tracer.stamp()
+        var spacesEnqueued: UInt64?
+        var spacesMerged = 0
         spaces.begin()
-        for item in batch { handle(item.payload) }
-        if spaces.end() { SpacesObserver.shared.fire() }
+        for item in batch {
+            if item.key.kind == .spaces {
+                spacesEnqueued = item.firstEnqueued
+                spacesMerged = item.count
+            }
+            tracer.measure(item.key.kind, enqueued: item.firstEnqueued, merged: item.count) {
+                handle(item.payload)
+            }
+        }
+        // The pass's queue wait runs from the first queued spaces event, or
+        // from the drain start when only a handler asked for it.
+        if spaces.end() {
+            tracer.measure(.spaces, enqueued: spacesEnqueued ?? drainStart,
+                           merged: max(spacesMerged, 1)) {
+                SpacesObserver.shared.fire()
+            }
+        }
     }
 
     private static func handle(_ event: IntakeEvent) {
