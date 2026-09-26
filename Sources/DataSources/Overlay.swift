@@ -316,17 +316,24 @@ final class OverlayHandle: NSObject, WKNavigationDelegate {
         let unfitted = size != fitted
 
         let frameOp = OverlayTickPlan.frameOp(next: appKitFrame, last: lastFrame)
+        let eventMoved = OverlayEventFollow.takeApplied(self)
         var reordered = false
+        var alreadyMoved = false
         switch frameOp {
         case .none:
             if OverlayTickPlan.needsAppKitSync(frameOp: frameOp, appKitStale: appKitStale) {
                 syncAppKitFrame()
             }
         case .move(let origin):
-            // Straight to the window server, move + z-order in one
-            // transaction: no AppKit round-trip, and no frame where the
-            // panel has moved but sits below its target.
-            if moveAndOrderAboveTarget(cgsOrigin: panelFrame.origin) {
+            if OverlayTickPlan.serverAlreadyAt(panelFrame.origin, applied: eventMoved) {
+                // The event path already moved the panel there (z-order
+                // untouched: a pure target move leaves it above).
+                appKitStale = true
+                alreadyMoved = true
+            } else if moveAndOrderAboveTarget(cgsOrigin: panelFrame.origin) {
+                // Straight to the window server, move + z-order in one
+                // transaction: no AppKit round-trip, and no frame where the
+                // panel has moved but sits below its target.
                 appKitStale = true
                 reordered = true
             } else {
@@ -347,7 +354,7 @@ final class OverlayHandle: NSObject, WKNavigationDelegate {
         // cadence — see OverlayRepinPolicy for why the cadence exists.
         if reordered {
             lastReorderAt = now
-        } else if OverlayRepinPolicy.shouldReorder(frameChanged: frameChanged,
+        } else if !alreadyMoved, OverlayRepinPolicy.shouldReorder(frameChanged: frameChanged,
                                                    sinceReorder: now - lastReorderAt) {
             reorderAboveTarget()
             lastReorderAt = now
@@ -623,6 +630,14 @@ enum OverlayTickPlan {
         appKitStale && frameOp == .none
     }
 
+    /// True when the window-server event path already moved the panel to
+    /// `cgsOrigin` (`applied`, CGS top-left), so the tick's own move
+    /// transaction would repeat it.
+    static func serverAlreadyAt(_ cgsOrigin: CGPoint, applied: CGPoint?) -> Bool {
+        guard let a = applied else { return false }
+        return abs(a.x - cgsOrigin.x) < 0.5 && abs(a.y - cgsOrigin.y) < 0.5
+    }
+
     /// The payload is in panel coordinates, so it only changes on resize or
     /// outset change — never on a pure move.
     static func payloadToPush(_ js: String, lastPushed: String?) -> String? {
@@ -783,6 +798,10 @@ struct OverlayFollowTargets<Key: Hashable> {
 
     func contains(wid: UInt32) -> Bool { byKey.values.contains(wid) }
 
+    /// The wid `key` currently follows; nil once detached or its target
+    /// was destroyed.
+    func wid(for key: Key) -> UInt32? { byKey[key] }
+
     /// Point `key` at `wid` (attach or retarget).
     mutating func set(_ key: Key, wid: UInt32) -> Bool {
         let before = Set(byKey.values)
@@ -851,10 +870,12 @@ enum OverlayFollowRoute {
 
 // MARK: - Window-server event follow
 
-/// Opt-in (`STACKD_OVERLAY_EVENTS=1`): attached overlays follow their target
-/// on CGS 806 (moved) / 807 (resized) as the window server posts them,
-/// instead of on the next display-link tick. The vsync tick stays armed as
-/// the backstop; this path only gets there first.
+/// Attached overlays follow their target on CGS 806 (moved) / 807
+/// (resized) as the window server posts them, instead of on the next
+/// display-link tick. The vsync tick stays armed as the backstop; this path
+/// only gets there first. `STACKD_OVERLAY_EVENTS=0` turns it off: 806/807
+/// stay unregistered, no interest list is set, and overlays follow on the
+/// tick alone.
 ///
 /// 806/807 only fire for wids on the connection's interest list, which
 /// WindowEvents keeps at every AX-tracked window plus every overlay target
@@ -865,11 +886,13 @@ enum OverlayFollowRoute {
 /// lock-protected `targetWIDs`/`entries`, so an event delivered off main can
 /// move a visible panel at the window server directly. AppKit state
 /// (`panel.frame`, the tick's lastFrame) is only touched by the main-thread
-/// step each event also queues, which resyncs it. Events are merged per wid
-/// and drained in one main-run-loop block per burst, not one hop per event.
+/// step each event also queues, which resyncs it; the origin moved off main
+/// is kept in `applied` so that step doesn't send the same move again.
+/// Events are merged per wid and drained in one main-run-loop block per
+/// burst, not one hop per event.
 enum OverlayEventFollow {
     static func flagEnabled(_ env: [String: String]) -> Bool {
-        env["STACKD_OVERLAY_EVENTS"] == "1"
+        env["STACKD_OVERLAY_EVENTS"] != "0"
     }
 
     static let enabled = flagEnabled(ProcessInfo.processInfo.environment)
@@ -880,6 +903,7 @@ enum OverlayEventFollow {
     private static let lock = NSLock()
     private static var targetWIDs: Set<UInt32> = []
     private static var entries: [ObjectIdentifier: OverlayFollowEntry] = [:]
+    private static var applied: [ObjectIdentifier: CGPoint] = [:]
     private static var pending: Set<UInt32> = []
     private static var drainScheduled = false
     private static var stats = Stats()
@@ -911,20 +935,40 @@ enum OverlayEventFollow {
     /// Detach. Main thread.
     static func untrack(_ handle: OverlayHandle) {
         guard enabled else { return }
-        lock.lock(); entries[ObjectIdentifier(handle)] = nil; lock.unlock()
-        if targets.remove(ObjectIdentifier(handle)) { targetsChanged() }
+        let key = ObjectIdentifier(handle)
+        lock.lock(); entries[key] = nil; applied[key] = nil; lock.unlock()
+        if targets.remove(key) { targetsChanged() }
     }
 
     /// The target window is gone. Main thread.
     static func dropTarget(wid: CGWindowID) {
         guard enabled else { return }
-        if targets.drop(wid: UInt32(wid)) { targetsChanged() }
+        let w = UInt32(wid)
+        lock.lock()
+        for (key, entry) in entries where entry.wid == w {
+            entries[key] = nil
+            applied[key] = nil
+        }
+        lock.unlock()
+        if targets.drop(wid: w) { targetsChanged() }
     }
 
-    /// Record what the tick just applied. Main thread.
+    /// Record what the tick just applied, for an overlay still following
+    /// that wid; a detached or destroyed-target overlay keeps no entry.
+    /// Main thread.
     static func publish(_ handle: OverlayHandle, _ entry: OverlayFollowEntry) {
         guard enabled else { return }
-        lock.lock(); entries[ObjectIdentifier(handle)] = entry; lock.unlock()
+        let key = ObjectIdentifier(handle)
+        let live = targets.wid(for: key) == entry.wid
+        lock.lock(); entries[key] = live ? entry : nil; lock.unlock()
+    }
+
+    /// The CGS origin the event path moved `handle`'s panel to since the
+    /// last call, if any. Main thread.
+    static func takeApplied(_ handle: OverlayHandle) -> CGPoint? {
+        guard enabled else { return nil }
+        lock.lock(); defer { lock.unlock() }
+        return applied.removeValue(forKey: ObjectIdentifier(handle))
     }
 
     private static func targetsChanged() {
@@ -943,7 +987,7 @@ enum OverlayEventFollow {
         threadLogged = true
         let isTarget = targetWIDs.contains(wid)
         if isTarget { stats.forTargets += 1 }
-        let mine = onMain || !isTarget ? [] : entries.values.filter { $0.wid == wid }
+        let mine = onMain || !isTarget ? [] : entries.filter { $0.value.wid == wid }
         lock.unlock()
         if logThread {
             log("overlay-events: first 806/807 delivered \(onMain ? "on main" : "off main (\(Thread.current))")")
@@ -951,14 +995,19 @@ enum OverlayEventFollow {
         guard isTarget else { return }
         if !mine.isEmpty {
             let bounds = Overlay.bounds(of: CGWindowID(wid))
-            var moved = 0
-            for entry in mine {
+            var moved: [ObjectIdentifier: CGPoint] = [:]
+            for (key, entry) in mine {
                 if case .moveNow(let origin) = OverlayFollowRoute.action(for: event, entry: entry, bounds: bounds),
                    Overlay.serverMove(panelWID: entry.panelWID, cgsOrigin: origin) {
-                    moved += 1
+                    moved[key] = origin
                 }
             }
-            lock.lock(); stats.movedOffMain += moved; lock.unlock()
+            lock.lock()
+            stats.movedOffMain += moved.count
+            // Only for overlays still listed: a detach or destroy since the
+            // snapshot above already dropped theirs.
+            for (key, origin) in moved where entries[key] != nil { applied[key] = origin }
+            lock.unlock()
         }
         enqueue(wid)
     }

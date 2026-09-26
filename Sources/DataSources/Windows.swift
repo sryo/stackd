@@ -1765,35 +1765,24 @@ final class FrontmostWindowObserver: RefCountedObserver {
 // Per-connection registration (`SLSRegisterConnectionNotifyProc`, yabai's
 // pattern in `src/yabai.c`).
 //
-// 806/807 (moved/resized) and 1322 (title) are deliberately NOT registered:
-// they only fire with an `SLSRequestNotificationsForWindows` interest list,
-// and subscribing one SILENCES 808 on this build (22 raises → zero 808
-// callbacks while 806/807 flowed) — which kills the overlay border's z-order
-// repair ("outline behind the window"). 808 is
-// load-bearing; window-server-latency moved/resized is not (the AX
-// notifications + the frame-bang coalescer cover that signal).
+// 806/807 (moved/resized) are registered too, which needs an interest
+// list (`SLSRequestNotificationsForWindows`): once a connection sets one,
+// the window server posts 806/807 AND 808 only for the listed windows. The
+// list therefore holds every AX-tracked window plus every overlay target
+// (`WindowFrameInterest`), sorted, re-issued once per burst on create /
+// destroy / attach / retarget / detach. OmniWM runs the same shape
+// (806/807/808 on the main cid, the full sorted managed-window list).
+// A list narrowed to a few windows is what made 808 look silenced by
+// 806/807: raises of unlisted windows post nothing. With the full list,
+// 808 fires for raises again and overlays follow at window-server time
+// (OverlayEventFollow in Overlay.swift). OverlayRepinPolicy's cadence
+// stays the z-order backstop for any window the list misses.
 //
-// A second connection does not escape this (measured on Tahoe, ~20
-// raises + a drag + a resize per variant):
-//   - SLSNewConnection + per-connection registration + interest list on
-//     that connection: zero 806/807 delivered (nothing services the new
-//     connection's event port), and cid1's 808 still went silent.
-//   - Global SLSRegisterNotifyProc + interest list on the main connection
-//     (JankyBorders' pattern): 806/807/811/815/816 flow at frame rate, but
-//     808 drops to ~2 per 20 raises on both the global and per-connection
-//     registrations.
-// So window-server frame events and reliable 808 are mutually exclusive
-// for this process.
+// STACKD_OVERLAY_EVENTS=0 is the kill switch: 806/807 stay unregistered
+// and no interest list is set, so 808 fires for every window and
+// overlays follow on their vsync tick alone.
 //
-// Opt-in exception, STACKD_OVERLAY_EVENTS=1 (OverlayEventFollow in
-// Overlay.swift): 806/807 are registered per-connection and the interest
-// list holds every AX-tracked window plus every overlay target, re-issued
-// on create / destroy / retarget, so overlays follow their target at
-// window-server time. OmniWM runs the same shape (806/807/808 on the main
-// cid, full sorted managed-window list) with 808 still firing for raises,
-// which suggests 808 only fires for listed windows and the earlier lists
-// were too narrow. The 808 fire counter settles it; if 808 still goes
-// quiet, z-order repair falls back to OverlayRepinPolicy's cadence.
+// 1322 (title) is not registered; AX titleChanged covers it.
 //
 // The per-code fire counters (logged from the 10s poll tick) are the
 // standing verification that registered codes keep firing across macOS
@@ -1896,7 +1885,7 @@ enum CGSWindowEventDecoder {
 // poll tick logs), decode, then hop to main before touching
 // AppDelegate.shared / host so bang dispatch stays on the runloop it was
 // built on.
-/// The per-window interest list for the flagged overlay-events path: every
+/// The per-window interest list for the overlay-events path: every
 /// AX-tracked window plus every overlay target (a target AX can't observe
 /// still needs its frame events), as one sorted, duplicate-free list.
 /// With a list set, window-server events like 808 only fire for listed
@@ -1962,7 +1951,7 @@ enum WindowEvents {
             for evt in [kSDWindowMoved, kSDWindowResized] {
                 _ = reg(cid, windowEventsCallback, evt, nil)
             }
-            log("overlay-events: 806/807 registered; interest list = AX-tracked windows + overlay targets")
+            log("overlay-events: 806/807 registered; interest list = AX-tracked windows + overlay targets (STACKD_OVERLAY_EVENTS=0 disables)")
             DispatchQueue.main.async { scheduleFrameInterestRefresh() }
         }
         // STACKD_CGS_DEBUG=1 → log every event in [700, 2000) so we can
@@ -1976,7 +1965,7 @@ enum WindowEvents {
         cgsRegistered = true
     }
 
-    // MARK: - Per-window interest list (STACKD_OVERLAY_EVENTS only)
+    // MARK: - Per-window interest list (off under STACKD_OVERLAY_EVENTS=0)
 
     private static var interestRefreshQueued = false
     private static var lastInterest: [UInt32]?

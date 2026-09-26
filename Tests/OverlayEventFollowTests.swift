@@ -165,11 +165,48 @@ func registerOverlayEventFollowTests() {
         try expectEqual(WindowFrameInterest.list(tracked: [], targets: []), [])
     }
 
-    // MARK: flag
+    // MARK: kill switch
 
-    test("OverlayEventFollow.flagEnabled is on only for exactly \"1\"") {
+    test("OverlayEventFollow.flagEnabled is on by default") {
+        try expect(OverlayEventFollow.flagEnabled([:]))
         try expect(OverlayEventFollow.flagEnabled(["STACKD_OVERLAY_EVENTS": "1"]))
-        try expect(!OverlayEventFollow.flagEnabled([:]))
+    }
+
+    test("OverlayEventFollow.flagEnabled: STACKD_OVERLAY_EVENTS=0 is the kill switch") {
         try expect(!OverlayEventFollow.flagEnabled(["STACKD_OVERLAY_EVENTS": "0"]))
+    }
+
+    // MARK: stale entries
+
+    test("OverlayFollowTargets.wid(for:) is nil once the target was destroyed") {
+        var t = OverlayFollowTargets<Int>()
+        _ = t.set(1, wid: 100)
+        try expectEqual(t.wid(for: 1), 100)
+        _ = t.drop(wid: 100)
+        try expectEqual(t.wid(for: 1), nil)
+    }
+
+    test("OverlayFollowTargets.wid(for:) follows a retarget and forgets a detach") {
+        var t = OverlayFollowTargets<Int>()
+        _ = t.set(1, wid: 100)
+        _ = t.set(1, wid: 200)
+        try expectEqual(t.wid(for: 1), 200)
+        _ = t.remove(1)
+        try expectEqual(t.wid(for: 1), nil)
+    }
+
+    // MARK: off-main move already applied
+
+    test("OverlayTickPlan: a move the event path already applied is skipped") {
+        try expect(OverlayTickPlan.serverAlreadyAt(CGPoint(x: 46, y: 56),
+                                                   applied: CGPoint(x: 46, y: 56)))
+        try expect(OverlayTickPlan.serverAlreadyAt(CGPoint(x: 46.2, y: 55.8),
+                                                   applied: CGPoint(x: 46, y: 56)))
+    }
+
+    test("OverlayTickPlan: a move to anywhere else still runs") {
+        try expect(!OverlayTickPlan.serverAlreadyAt(CGPoint(x: 50, y: 56),
+                                                    applied: CGPoint(x: 46, y: 56)))
+        try expect(!OverlayTickPlan.serverAlreadyAt(CGPoint(x: 46, y: 56), applied: nil))
     }
 }
