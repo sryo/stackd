@@ -35,6 +35,36 @@ enum WindowDebug {
     }
 }
 
+/// Debug-only: logs every main run-loop pass that kept the thread busy past
+/// `threshold` — the stretch between waking and going back to sleep. Every
+/// window event, bridge call and display-link tick runs on main, so a long
+/// pass here delays all of them at once.
+enum MainStallWatch {
+    static let threshold: Double = 0.04
+    private static var observer: CFRunLoopObserver?
+
+    /// The log line for one run-loop pass that stayed busy `busy` seconds,
+    /// or nil when it was short enough to stay quiet.
+    static func report(busy: Double) -> String? {
+        busy > threshold ? "main: busy \(Int((busy * 1000).rounded()))ms" : nil
+    }
+
+    static func install() {
+        guard WindowDebug.enabled, observer == nil else { return }
+        var woke = CFAbsoluteTimeGetCurrent()
+        let obs = CFRunLoopObserverCreateWithHandler(
+            nil, CFRunLoopActivity.afterWaiting.rawValue | CFRunLoopActivity.beforeWaiting.rawValue,
+            true, 0
+        ) { _, activity in
+            let now = CFAbsoluteTimeGetCurrent()
+            if activity == .afterWaiting { woke = now; return }
+            if let line = report(busy: now - woke) { WindowDebug.log(line) }
+        }
+        CFRunLoopAddObserver(CFRunLoopGetMain(), obs, .commonModes)
+        observer = obs
+    }
+}
+
 enum WindowTransaction {
     typealias CreateFn          = @convention(c) (Int32) -> Unmanaged<CFTypeRef>?
     typealias CommitFn          = @convention(c) (CFTypeRef, Int32) -> Int32
@@ -263,7 +293,17 @@ enum Windows {
             [.optionAll, .excludeDesktopElements],
             kCGNullWindowID
         ) else { return [] }
-        return decode(raw as! [[String: Any]], includeOwn: includeOwn, includeNonStandard: includeNonStandard)
+        guard WindowDebug.enabled else {
+            return decode(raw as! [[String: Any]], includeOwn: includeOwn, includeNonStandard: includeNonStandard)
+        }
+        let began = CFAbsoluteTimeGetCurrent()
+        _ = WindowAddressabilityCache.takeLiveProbeCount()
+        let out = decode(raw as! [[String: Any]], includeOwn: includeOwn, includeNonStandard: includeNonStandard)
+        let ms = Int((CFAbsoluteTimeGetCurrent() - began) * 1000)
+        if ms >= 10 {
+            WindowDebug.log("windows.all: \(ms)ms, \(WindowAddressabilityCache.takeLiveProbeCount()) live AX probes")
+        }
+        return out
     }
 
     private static func decode(_ list: [[String: Any]], includeOwn: Bool, includeNonStandard: Bool = false) -> [[String: Any]] {
@@ -338,8 +378,19 @@ enum Windows {
 // each one re-implementing per-pass probing — otherwise a tiler does
 // 2N AX calls per tile pass, costly and racy.
 enum WindowAddressabilityCache {
-    struct Probe { let addressable: Bool; let isStandard: Bool; let isMinimized: Bool; let ts: TimeInterval }
+    struct Probe {
+        let addressable: Bool
+        let isStandard: Bool
+        let isMinimized: Bool
+        let ts: TimeInterval
+        /// Consecutive failed probes of an unaddressable window; scales its
+        /// re-probe gate (failTtl(after:)).
+        var failures: Int = 0
+    }
     private static var cache: [String: Probe] = [:]
+    /// Live (uncached) probes since the last `takeLiveProbeCount()`, for the
+    /// debug timing line in Windows.all().
+    private static var liveProbes = 0
     // First-seen wall-time per (pid, windowID). A window gets a grace
     // window of OPTIMISTIC_GRACE_MS during which probe misses report
     // addressable=true (instead of false). Avoids the boot-burst race
@@ -365,28 +416,49 @@ enum WindowAddressabilityCache {
     // non-standard window), a poisoned real window heals on the first
     // re-probe after the transition settles — worst case nonStandardTtl
     // plus one 10s poll tick on an otherwise idle system.
-    // Failed probes are re-checked aggressively so an app that JUST opened
-    // a window gets re-evaluated within a beat.
-    private static let failTtl: TimeInterval = 0.5
+    // Failed probes are re-checked quickly at first so an app that JUST
+    // opened a window gets re-evaluated within a beat, then less and less
+    // often: a window that keeps failing is one AX does not vend (helper
+    // chrome, offscreen surfaces), and Windows.all() runs on main for every
+    // create/destroy/focus push — re-probing ~100 of them at a flat 0.5s
+    // cost 30–100ms of main per window event. Windows that do become
+    // addressable later are found without the timer: the AX create observer
+    // and CGS 1325 re-finds confirm() them, and a space change calls
+    // retryFailures().
+    static let failTtl: TimeInterval = 0.5
+    static let failTtlCap: TimeInterval = 30.0
     static let nonStandardTtl: TimeInterval = 3.0
+
+    /// Re-probe gate for an unaddressable verdict after `failures`
+    /// consecutive failures: failTtl, doubling per failure, capped.
+    /// Once capped, the gate is stretched by a per-window factor in [1, 2)
+    /// so windows that failed equally often don't all come due in the same
+    /// Windows.all() call.
+    static func failTtl(after failures: Int, windowID: CGWindowID = 0) -> TimeInterval {
+        let doublings = min(max(0, failures - 1), 16)
+        let gate = failTtl * Double(1 << doublings)
+        guard gate >= failTtlCap else { return gate }
+        return failTtlCap * (1 + Double(windowID % 16) / 16)
+    }
 
     /// Whether a cached probe may be returned as-is or must be re-read
     /// live. Pure so the expiry rules above are unit-testable.
-    static func cacheVerdictUsable(_ p: Probe, now: TimeInterval) -> Bool {
+    static func cacheVerdictUsable(_ p: Probe, now: TimeInterval, windowID: CGWindowID = 0) -> Bool {
         if p.addressable {
             return p.isStandard || (now - p.ts) < nonStandardTtl
         }
-        return (now - p.ts) < failTtl
+        return (now - p.ts) < failTtl(after: p.failures, windowID: windowID)
     }
 
     static func probe(pid: pid_t, windowID: CGWindowID,
                       now: TimeInterval = Date().timeIntervalSince1970) -> Probe {
         let key = "\(pid)|\(windowID)"
         lock.lock()
-        if let p = cache[key], cacheVerdictUsable(p, now: now) {
+        if let p = cache[key], cacheVerdictUsable(p, now: now, windowID: windowID) {
             lock.unlock()
             return p
         }
+        liveProbes += 1
         lock.unlock()
         // Probe outside the lock — AX calls hop to main thread internally.
         var el: AXUIElement?
@@ -460,7 +532,8 @@ enum WindowAddressabilityCache {
                 probe = Probe(addressable: true, isStandard: false, isMinimized: false, ts: now)
                 shouldCache = false
             } else {
-                probe = Probe(addressable: false, isStandard: false, isMinimized: false, ts: now)
+                probe = Probe(addressable: false, isStandard: false, isMinimized: false, ts: now,
+                              failures: (existing?.failures ?? 0) + 1)
                 shouldCache = true
             }
         }
@@ -477,6 +550,25 @@ enum WindowAddressabilityCache {
             WindowDebug.log("windows: wid=\(windowID) pid=\(pid) unaddressable after grace (element unresolved)")
         }
         return probe
+    }
+
+    /// Let every unaddressable verdict be re-probed on its next read, keeping
+    /// its failure count: one fresh look (after a space change, when AX may
+    /// now vend a window it did not), then the same backoff if it still fails.
+    static func retryFailures() {
+        lock.lock(); defer { lock.unlock() }
+        for (key, p) in cache where !p.addressable {
+            cache[key] = Probe(addressable: false, isStandard: false, isMinimized: false,
+                               ts: -.infinity, failures: p.failures)
+        }
+    }
+
+    /// Live probes since the previous call.
+    static func takeLiveProbeCount() -> Int {
+        lock.lock(); defer { lock.unlock() }
+        let n = liveProbes
+        liveProbes = 0
+        return n
     }
 
     /// Forget every verdict except established positives, so windows get

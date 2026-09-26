@@ -409,6 +409,86 @@ func registerWindowsTests() {
                         "within failTtl, probe must return cached entry (same ts)")
     }
 
+    test("WindowAddressabilityCache — repeated failures back off the re-probe cadence") {
+        // Layer-0 windows AX never vends (helper chrome, other apps'
+        // offscreen surfaces) fail every probe. Windows.all() runs on main
+        // for every create/destroy/focus push; re-probing each of them every
+        // failTtl cost 30–100ms of main per lifecycle event with ~100 such
+        // windows. Each consecutive failure doubles the gate, up to a cap.
+        typealias P = WindowAddressabilityCache.Probe
+        let base = WindowAddressabilityCache.failTtl
+        let cap = WindowAddressabilityCache.failTtlCap
+        let first = P(addressable: false, isStandard: false, isMinimized: false, ts: 1000.0, failures: 1)
+        try expectEqual(WindowAddressabilityCache.cacheVerdictUsable(first, now: 1000.0 + base - 0.01), true)
+        try expectEqual(WindowAddressabilityCache.cacheVerdictUsable(first, now: 1000.0 + base), false)
+        let third = P(addressable: false, isStandard: false, isMinimized: false, ts: 1000.0, failures: 3)
+        try expectEqual(WindowAddressabilityCache.cacheVerdictUsable(third, now: 1000.0 + 4 * base - 0.01), true)
+        try expectEqual(WindowAddressabilityCache.cacheVerdictUsable(third, now: 1000.0 + 4 * base), false)
+        let many = P(addressable: false, isStandard: false, isMinimized: false, ts: 1000.0, failures: 40)
+        try expectEqual(WindowAddressabilityCache.cacheVerdictUsable(many, now: 1000.0 + cap - 0.01), true)
+        try expectEqual(WindowAddressabilityCache.cacheVerdictUsable(many, now: 1000.0 + cap), false)
+    }
+
+    test("WindowAddressabilityCache — capped failure gates are spread across windows") {
+        // Windows that failed the same number of times would otherwise all
+        // expire together, and the next Windows.all() would re-probe every
+        // one of them at once. The cap is stretched by up to 2x per window id.
+        typealias P = WindowAddressabilityCache.Probe
+        let cap = WindowAddressabilityCache.failTtlCap
+        let many = P(addressable: false, isStandard: false, isMinimized: false, ts: 0, failures: 40)
+        let gates = (0..<16).map { wid -> Double in
+            // First `now` at which the verdict must be re-probed, to 0.1s.
+            var t = 0.0
+            while WindowAddressabilityCache.cacheVerdictUsable(many, now: t, windowID: CGWindowID(wid)) { t += 0.1 }
+            return t
+        }
+        try expect(gates.min()! >= cap - 0.11, "no gate below the cap")
+        try expect(gates.max()! <= 2 * cap + 0.11, "no gate beyond twice the cap")
+        try expect(Set(gates.map { Int($0) }).count >= 8, "gates must differ across window ids: \(gates)")
+        // Uncapped gates are left alone so a new window still re-checks fast.
+        let first = P(addressable: false, isStandard: false, isMinimized: false, ts: 0, failures: 1)
+        try expectEqual(WindowAddressabilityCache.cacheVerdictUsable(first, now: WindowAddressabilityCache.failTtl,
+                                                                      windowID: 7), false)
+    }
+
+    test("WindowAddressabilityCache.probe — consecutive past-grace failures count up") {
+        let pid: pid_t = 7_777_720
+        let wid: CGWindowID = 7_777_720
+        defer { WindowAddressabilityCache.invalidate(pid: pid) }
+        _ = WindowAddressabilityCache.probe(pid: pid, windowID: wid, now: 1000.0)   // grace, uncached
+        let f1 = WindowAddressabilityCache.probe(pid: pid, windowID: wid, now: 1006.0)
+        try expectEqual(f1.failures, 1)
+        let f2 = WindowAddressabilityCache.probe(pid: pid, windowID: wid, now: 1006.0 + WindowAddressabilityCache.failTtl)
+        try expectEqual(f2.failures, 2)
+        // Inside the doubled gate: the cached verdict, not a new probe.
+        let held = WindowAddressabilityCache.probe(pid: pid, windowID: wid,
+                                                   now: f2.ts + 2 * WindowAddressabilityCache.failTtl - 0.01)
+        try expectEqual(held.ts, f2.ts)
+        try expectEqual(held.failures, 2)
+    }
+
+    test("WindowAddressabilityCache.retryFailures — the next probe re-checks, the backoff count stays") {
+        // A space switch can make a window AX would not vend a moment ago
+        // addressable; the next Windows.all() must look again at once
+        // instead of waiting out a long gate.
+        let pid: pid_t = 7_777_721
+        let wid: CGWindowID = 7_777_721
+        defer { WindowAddressabilityCache.invalidate(pid: pid) }
+        _ = WindowAddressabilityCache.probe(pid: pid, windowID: wid, now: 1000.0)
+        _ = WindowAddressabilityCache.probe(pid: pid, windowID: wid, now: 1006.0)
+        let f2 = WindowAddressabilityCache.probe(pid: pid, windowID: wid, now: 1007.0)
+        WindowAddressabilityCache.retryFailures()
+        let again = WindowAddressabilityCache.probe(pid: pid, windowID: wid, now: 1007.1)
+        try expect(again.ts == 1007.1, "retryFailures must force a live re-probe")
+        try expectEqual(again.failures, f2.failures + 1)
+    }
+
+    test("MainStallWatch.report — only passes past the threshold are logged") {
+        try expectEqual(MainStallWatch.report(busy: 0.01), nil)
+        try expectEqual(MainStallWatch.report(busy: MainStallWatch.threshold), nil)
+        try expectEqual(MainStallWatch.report(busy: 0.0834), "main: busy 83ms")
+    }
+
     // MARK: - WindowAddressabilityCache.confirm / setMinimized — AX-fed seeding
     //
     // WindowsAXObserver.installPerWindow calls confirm() with the verdict it

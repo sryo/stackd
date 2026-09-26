@@ -978,6 +978,15 @@ final class WindowMotionEngine {
         let batch = writer.mailbox.take()
         let jobs = batch.map { ($0, writer.elements[$0.write.windowID]) }
         writer.queue.async { [weak self] in
+            // A batch this slow means the app kept its main thread busy
+            // (a minimize genie blocks it for ~0.5s) and every window of it froze.
+            let began = WindowDebug.enabled ? CFAbsoluteTimeGetCurrent() : 0
+            defer {
+                if WindowDebug.enabled {
+                    let ms = Int((CFAbsoluteTimeGetCurrent() - began) * 1000)
+                    if ms >= 30 { WindowDebug.log("motion: pid=\(writer.pid) batch of \(jobs.count) took \(ms)ms") }
+                }
+            }
             let results = writer.withEnhancedUIOff { jobs.map { entry, element -> WriteResult in
                 guard let el = element else { return WriteResult(entry: entry, ok: false, timedOut: false) }
                 if entry.write.isFinal {

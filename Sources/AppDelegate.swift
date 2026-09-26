@@ -171,6 +171,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
             WindowAddressabilityCache.invalidate(pid: app.processIdentifier)
         }
+        // A space switch can bring windows AX would not vend before into
+        // view; let their backed-off failure verdicts be re-probed at once.
+        NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.activeSpaceDidChangeNotification,
+            object: NSWorkspace.shared, queue: .main
+        ) { _ in
+            WindowAddressabilityCache.retryFailures()
+        }
         WindowsLifecycleObserver.shared.onTitleChange = { [weak host] info, oldTitle in
             log("window title changed: \(info.app) — '\(oldTitle)' → '\(info.title)'")
             var d = WindowsLifecycleObserver.detail(info)
@@ -200,6 +208,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // decoding.
         WindowEvents.install()
         IntakeTrace.installDumpTriggers()
+        MainStallWatch.install()
         // The previous WindowEvents.startTahoeSynthPoll() (a 100ms CG diff
         // loop that synthesized moved/resized/minimized/deminimized bangs
         // because CGS events 806/807/815/816 went silent on Tahoe) is
