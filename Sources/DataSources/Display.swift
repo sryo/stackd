@@ -576,6 +576,11 @@ enum Appearance {
         interfaceStyle == "Dark"
     }
 
+    static func isDark(appearance: NSAppearance) -> Bool {
+        let match = appearance.bestMatch(from: [.aqua, .darkAqua, .vibrantLight, .vibrantDark])
+        return match == .darkAqua || match == .vibrantDark
+    }
+
     static func current() -> [String: Any] {
         // Not NSApp.effectiveAppearance: in an accessory app it captures the
         // theme at launch and never tracks the scheduled light/dark
@@ -593,6 +598,9 @@ enum Appearance {
             "dark":         isDark,
             "accent":       ["r": r, "g": g, "b": b],
             "accentHex":    String(format: "#%02x%02x%02x", r, g, b),
+            // Wallpaper-driven, independent of `dark`: what color the
+            // system draws menubar text in right now.
+            "menubarDark":  MenubarAppearance.button.map { Appearance.isDark(appearance: $0.effectiveAppearance) } ?? isDark,
             "reduceMotion": NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
         ]
     }
@@ -620,8 +628,10 @@ enum ReduceMotion {
     }
 }
 
-/// Light/dark + accent + reduce-motion. Push on:
+/// Light/dark + accent + reduce-motion + menubar appearance. Push on:
 ///   - AppleInterfaceThemeChangedNotification (distributed) — dark/light flip
+///   - KVO on the menubar probe's effectiveAppearance — wallpaper under the
+///     menubar went bright/dark (wallpaper change, dynamic wallpaper, space)
 ///   - NSWorkspace.accessibilityDisplayOptionsDidChangeNotification — reduce motion
 ///   - 2s poll — accent color (no notification exists for NSColor.controlAccentColor)
 final class AppearanceObserver: RefCountedObserver {
@@ -643,9 +653,14 @@ final class AppearanceObserver: RefCountedObserver {
         }
         RunLoop.main.add(timer, forMode: .common)
 
+        let kvo = MenubarAppearance.button?.observe(\.effectiveAppearance) { [weak self] _, _ in
+            self?.fire()
+        }
+
         return Token {
             ncToken.cancel()
             timer.invalidate()
+            kvo?.invalidate()
         }
     }
 }

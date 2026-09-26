@@ -90,7 +90,7 @@ The complete author-facing JavaScript API. Everything is on the global `sd`. Sou
 - `sd.app.activated` *(channel)* — same shape; fires specifically on app-activation events.
 
 ### `sd.appearance` — appearance channel · `appearance`
-- `sd.appearance` *(channel)* — `{ dark, accentHex, … }`. Updates on light/dark / accent change.
+- `sd.appearance` *(channel)* — `{ dark, menubarDark, accentHex, … }`. Updates on light/dark / accent change. `menubarDark` is the system menubar's own appearance: `true` over a dark wallpaper, `false` over a bright one, independent of `dark`.
 
 ### `sd.applescript` — script runner · `applescript`
 - `run(source, opts?) → Promise<{ ok, result, error? }>` — AppleScript, or JXA via `opts.language:"javascript"`; `opts.timeout` default 10s. `result` preserves return type.

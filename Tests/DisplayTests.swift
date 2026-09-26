@@ -151,6 +151,22 @@ func registerDisplayTests() {
         }
     }
 
+    test("Appearance.isDark(appearance:) reads the menubar's vibrant variants") {
+        // The menubar reports VibrantLight / VibrantDark from the wallpaper
+        // luminance under it, independent of the system light/dark setting.
+        let dark  = NSAppearance(named: .vibrantDark)!
+        let light = NSAppearance(named: .vibrantLight)!
+        try expect(Appearance.isDark(appearance: dark), "vibrantDark should be dark")
+        try expect(!Appearance.isDark(appearance: light), "vibrantLight should be light")
+        try expect(Appearance.isDark(appearance: NSAppearance(named: .darkAqua)!), "darkAqua should be dark")
+        try expect(!Appearance.isDark(appearance: NSAppearance(named: .aqua)!), "aqua should be light")
+    }
+
+    test("Appearance.current() exposes menubarDark as Bool") {
+        let dict = Appearance.current()
+        try expect(dict["menubarDark"] is Bool, "menubarDark should be Bool, got \(String(describing: dict["menubarDark"]))")
+    }
+
     test("Appearance.isDark maps the AppleInterfaceStyle default") {
         // macOS writes exactly "Dark" while dark mode is active (manually
         // chosen or scheduled auto-switch) and deletes the key for light —

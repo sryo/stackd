@@ -183,6 +183,24 @@ enum Menubar {
     }
 }
 
+// MARK: - Menubar appearance (sd.appearance.menubarDark)
+
+/// The appearance macOS gives menubar content: VibrantDark over a dark
+/// wallpaper, VibrantLight over a bright one, regardless of the system
+/// light/dark setting. AppKit exposes it only through a status item's
+/// button, so this holds one zero-width item for the daemon's lifetime —
+/// invisible, takes no menubar space. Main thread.
+enum MenubarAppearance {
+    private static var item: NSStatusItem?
+
+    static var button: NSStatusBarButton? {
+        if item == nil {
+            item = NSStatusBar.system.statusItem(withLength: 0)
+        }
+        return item?.button
+    }
+}
+
 // MARK: - System menu-bar visibility (sd.menubar.suppress / restore)
 
 private enum SkyLightMenuBar {
