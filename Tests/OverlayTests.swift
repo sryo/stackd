@@ -389,6 +389,36 @@ func registerOverlayTests() {
         panel.close()
     }
 
+    test("Overlay.makeOverlayPanel hides both panel kinds from the screencapture window picker") {
+        // The Cmd-Shift-4/5 window picker would otherwise offer the
+        // always-on-top overlay instead of the window beneath it.
+        for attached in [true, false] {
+            let panel = Overlay.makeOverlayPanel(frame: NSRect(x: -9999, y: -9999, width: 1, height: 1),
+                                                 attachedToWindow: attached)
+            let wid = CGWindowID(panel.windowNumber)
+            try expect(wid != 0, "panel has no window-server window")
+            try expectEqual(WindowServerProperty.bool(WindowServerProperty.ignoreForScreencaptureSelection,
+                                                      of: wid), true)
+            panel.close()
+        }
+    }
+
+    test("a plain panel is not hidden from the screencapture window picker") {
+        let panel = NSPanel(contentRect: NSRect(x: -9999, y: -9999, width: 1, height: 1),
+                            styleMask: .borderless, backing: .buffered, defer: false)
+        let wid = CGWindowID(panel.windowNumber)
+        try expect(WindowServerProperty.bool(WindowServerProperty.ignoreForScreencaptureSelection,
+                                             of: wid) != true)
+        panel.close()
+    }
+
+    test("WindowServerProperty.setBool refuses kCGNullWindowID") {
+        try expectEqual(WindowServerProperty.setBool(WindowServerProperty.ignoreForScreencaptureSelection,
+                                                     true, on: 0), false)
+        try expectEqual(WindowServerProperty.bool(WindowServerProperty.ignoreForScreencaptureSelection,
+                                                  of: 0), nil)
+    }
+
     test("Overlay.makeOverlayPanel: a free region panel stays stationary like a HUD stack") {
         let panel = Overlay.makeOverlayPanel(frame: NSRect(x: -9999, y: -9999, width: 1, height: 1),
                                              attachedToWindow: false)

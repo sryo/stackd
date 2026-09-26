@@ -1219,6 +1219,11 @@ enum Overlay {
         // and a stack reload (display change) blocks it for seconds while
         // every stack rebuilds — the old outline would sit frozen on screen.
         panel.animationBehavior = .none
+        // Keeps the Cmd-Shift-4/5 window picker from offering the overlay
+        // in place of the window beneath it. defer: false above means the
+        // window-server window already exists.
+        WindowServerProperty.setBool(WindowServerProperty.ignoreForScreencaptureSelection,
+                                     true, on: CGWindowID(max(panel.windowNumber, 0)))
         return panel
     }
 

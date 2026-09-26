@@ -50,6 +50,41 @@ enum WindowTransaction {
     static let moveWithGroup:  MoveWithGroupFn?  = SkyLight.sym("SLSTransactionMoveWindowWithGroup")
 }
 
+/// Named window-server properties on windows this connection owns.
+/// SLSSetWindowProperty stores a CF value under a string key on the
+/// window-server window; SLSCopyWindowProperty reads it back (+1 retained).
+enum WindowServerProperty {
+    typealias SetFn  = @convention(c) (Int32, UInt32, CFString, CFTypeRef) -> Int32
+    typealias CopyFn = @convention(c) (Int32, UInt32, CFString, UnsafeMutablePointer<Unmanaged<CFTypeRef>?>) -> Int32
+
+    static let set:  SetFn?  = SkyLight.sym("SLSSetWindowProperty")
+    static let copy: CopyFn? = SkyLight.sym("SLSCopyWindowProperty")
+
+    /// True keeps the window out of the screencapture window picker
+    /// (Cmd-Shift-4 then Space, Cmd-Shift-5 window mode). Full-screen and
+    /// region captures and screen recording still include it.
+    static let ignoreForScreencaptureSelection = "IgnoreForScreencaptureWindowSelection"
+
+    /// False when the SPI is missing, `wid` is 0, or the server refuses.
+    @discardableResult
+    static func setBool(_ key: String, _ value: Bool, on wid: CGWindowID) -> Bool {
+        guard let set = set, wid != 0, SkyLight.cid != 0 else { return false }
+        let cf: CFBoolean = value ? kCFBooleanTrue : kCFBooleanFalse
+        return set(SkyLight.cid, wid, key as CFString, cf) == 0
+    }
+
+    /// Nil when the SPI is missing, the property is unset, or it isn't a
+    /// boolean.
+    static func bool(_ key: String, of wid: CGWindowID) -> Bool? {
+        guard let copy = copy, wid != 0, SkyLight.cid != 0 else { return nil }
+        var out: Unmanaged<CFTypeRef>?
+        guard copy(SkyLight.cid, wid, key as CFString, &out) == 0,
+              let value = out?.takeRetainedValue(),
+              CFGetTypeID(value) == CFBooleanGetTypeID() else { return nil }
+        return CFBooleanGetValue((value as! CFBoolean))
+    }
+}
+
 // Everything window-related, by source-of-truth:
 //
 //   Windows                  — CGWindowList enumeration (.all), AX-focused
