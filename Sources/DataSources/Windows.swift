@@ -618,6 +618,96 @@ enum WindowOwnerLookup {
     }
 }
 
+/// Which focus path WindowsByID.focus takes, and when its AX raise runs.
+enum WindowFocusRoute: Equatable {
+    /// NSRunningApplication activation + synchronous AX on main.
+    case activateApp
+    /// SkyLight fronting + key-window event; AXRaise on the app's AX queue
+    /// after `raiseAfter` seconds.
+    case skyLight(raiseAfter: TimeInterval)
+
+    /// Time for another app's activation to land before raising, so the
+    /// raise doesn't contend with the app's own activation handling.
+    static let crossAppRaiseDelay: TimeInterval = 0.1
+
+    static func decide(skyLightAvailable: Bool, targetPid: pid_t, frontmostPid: pid_t?) -> WindowFocusRoute {
+        guard skyLightAvailable else { return .activateApp }
+        return .skyLight(raiseAfter: targetPid == frontmostPid ? 0 : crossAppRaiseDelay)
+    }
+}
+
+/// The synthetic event records that make a window key in its app: a
+/// left-button press then release addressed to the window, with the
+/// key-window flag set and the location far outside any content. Both are
+/// required: a press with no release leaves some apps (Ghostty) holding a
+/// button down and stalling their event loop.
+///
+/// Layout (0xf8 bytes, all other bytes zero):
+///   0x04       declared record length (0xf8)
+///   0x08       event type: 0x01 press, 0x02 release
+///   0x20..0x2f location, filled with 0xff
+///   0x3a       0x10, the make-key-window flag
+///   0x3c..0x3f target window id, little-endian
+enum KeyWindowEventRecord {
+    static let length = 0xF8
+
+    static func pressAndRelease(windowID: CGWindowID) -> [[UInt8]] {
+        [record(windowID: windowID, type: 0x01), record(windowID: windowID, type: 0x02)]
+    }
+
+    private static func record(windowID: CGWindowID, type: UInt8) -> [UInt8] {
+        var b = [UInt8](repeating: 0, count: length)
+        b[0x04] = UInt8(length)
+        b[0x08] = type
+        for i in 0x20..<0x30 { b[i] = 0xFF }
+        b[0x3A] = 0x10
+        for i in 0..<4 { b[0x3C + i] = UInt8(truncatingIfNeeded: windowID >> (8 * UInt32(i))) }
+        return b
+    }
+}
+
+/// SkyLight process-fronting SPI for WindowsByID.focus.
+enum SkyLightFocus {
+    // _SLPSSetFrontProcessWithOptions(psn, wid, mode)
+    typealias SetFrontFn = @convention(c) (UnsafeMutablePointer<ProcessSerialNumber>, UInt32, UInt32) -> Int32
+    // SLPSPostEventRecordTo(psn, bytes)
+    typealias PostEventRecordFn = @convention(c) (UnsafeMutablePointer<ProcessSerialNumber>, UnsafeMutablePointer<UInt8>) -> Int32
+    // GetProcessForPID(pid, psn), deprecated HIServices; resolved at runtime.
+    typealias ProcessForPIDFn = @convention(c) (pid_t, UnsafeMutablePointer<ProcessSerialNumber>) -> Int32
+
+    static let setFront: SetFrontFn? = SkyLight.sym("_SLPSSetFrontProcessWithOptions")
+    static let postEventRecord: PostEventRecordFn? = SkyLight.sym("SLPSPostEventRecordTo")
+    static let processForPID: ProcessForPIDFn? = {
+        guard let s = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "GetProcessForPID") else { return nil }
+        return unsafeBitCast(s, to: ProcessForPIDFn.self)
+    }()
+
+    /// The mode flag marking the fronting as user-initiated.
+    static let userGenerated: UInt32 = 0x200
+
+    static var available: Bool {
+        setFront != nil && postEventRecord != nil && processForPID != nil
+    }
+
+    /// Front `pid` with `windowID` and make that window key. False when the
+    /// process can't be addressed or the window server refuses; the caller
+    /// falls back to app activation.
+    static func front(pid: pid_t, windowID: CGWindowID) -> Bool {
+        guard let setFront = setFront, let post = postEventRecord, let psnFor = processForPID else {
+            return false
+        }
+        var psn = ProcessSerialNumber()
+        guard psnFor(pid, &psn) == 0, setFront(&psn, windowID, userGenerated) == 0 else { return false }
+        for var record in KeyWindowEventRecord.pressAndRelease(windowID: windowID) {
+            let status = record.withUnsafeMutableBufferPointer { post(&psn, $0.baseAddress!) }
+            if status != 0 {
+                WindowDebug.log("focus: key-window event record for wid=\(windowID) refused (\(status))")
+            }
+        }
+        return true
+    }
+}
+
 enum WindowsByID {
     // Batch sink. When sd.windows.batch is active, setFrame on a specific id
     // queues the FULL frame here instead of writing AX; commit applies every
@@ -1021,11 +1111,49 @@ enum WindowsByID {
         return AXUIElementPerformAction(el, kAXRaiseAction as CFString) == .success
     }
 
-    // Focus = activate owning app + raise the window. Without the app
-    // activation the window comes forward but the app keeps prior key state.
+    /// Focus = front the owning app with this window key, then raise it.
+    ///
+    /// SkyLight path (yabai's shape): _SLPSSetFrontProcessWithOptions with
+    /// the window id and kCPSUserGenerated fronts the app at window-server
+    /// level without waiting on the app's own activation; a synthetic
+    /// press+release event record makes the window key; AXRaise + AXMain
+    /// run on the app's AX queue, not main. A window of the app that is
+    /// already frontmost raises at once (fronting its own app is a no-op
+    /// there and the raise is what moves key focus); another app's window
+    /// raises once its activation has settled.
+    ///
+    /// Fallback when the SPI is missing or refuses: NSRunningApplication
+    /// activation plus synchronous AXRaise / AXMain / AXFocused on main.
+    ///
+    /// Divergence from hs.window:focus (becomeMain + SetFrontProcess with
+    /// front-window-only, all synchronous): the raise lands asynchronously,
+    /// so `true` means the window was fronted and made key, and a caller
+    /// reading z-order right after may see the raise still pending.
     @discardableResult
     static func focus(windowID: CGWindowID) -> Bool {
         guard let pid = ownerPID(windowID: windowID) else { return false }
+        let frontmost = NSWorkspace.shared.frontmostApplication?.processIdentifier
+        let route = WindowFocusRoute.decide(skyLightAvailable: SkyLightFocus.available,
+                                            targetPid: pid, frontmostPid: frontmost)
+        if case .skyLight(let raiseAfter) = route,
+           let el = elementFor(windowID: windowID, pid: pid),
+           SkyLightFocus.front(pid: pid, windowID: windowID) {
+            let raise = {
+                AXUIElementPerformAction(el, kAXRaiseAction as CFString)
+                AXUIElementSetAttributeValue(el, kAXMainAttribute as CFString, true as CFTypeRef)
+            }
+            let queue = AXAppQueues.queue(for: pid)
+            if raiseAfter > 0 {
+                queue.asyncAfter(deadline: .now() + raiseAfter, execute: raise)
+            } else {
+                queue.async(execute: raise)
+            }
+            return true
+        }
+        return focusByActivation(windowID: windowID, pid: pid)
+    }
+
+    private static func focusByActivation(windowID: CGWindowID, pid: pid_t) -> Bool {
         if let app = NSRunningApplication(processIdentifier: pid) {
             app.activate(options: [.activateIgnoringOtherApps])
         }

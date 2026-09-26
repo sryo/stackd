@@ -348,6 +348,7 @@ Operates on the stack's own NSPanel; no separate permission.
 - `setFrame(frame)` or `setFrame(id, frame, opts?) → Promise`. `opts:{duration?, easing?("easeOutCubic"|"linear"|"spring"), respectReduceMotion?(true)}` animates the id form on the daemon's display-link clock and resolves at settle. With the system Reduce Motion setting on, animations become an instant write unless `respectReduceMotion: false`.
 - `setFrameProbed(id, frame) → Promise<{ok, actual{x,y,w,h}|null}>`.
 - `minimize([id,] value?)` · `fullscreen([id,] value?)` · `raise([id])` · `focus(id)` · `close(id)` `→ Promise`.
+- `focus(id)` fronts the window's app with that window key and raises it. The raise lands asynchronously (at once for a window of the frontmost app, ~100 ms later for another app's), so `true` means fronted and key; z-order read immediately after may not show the raise yet.
 - `frame(id) → Promise<{x,y,w,h}>` · `cornerHints(id) → Promise<{toolbarPresent,role,subrole}>`.
 - `buttonFrames(id) → Promise<{close,zoom,minimize}|null>` (traffic-light rects).
 - `info(id) → Promise<{frame,title,role,subrole,isMinimized,isFullscreen,isMain,isStandard,hasToolbar,cornerHints}|null>`.
