@@ -171,6 +171,28 @@ func registerTouchFrameMailboxTests() {
         try expect(skewed["ageMs"] is NSNull, "a frame from the future has no age")
     }
 
+    test("TouchFrame.payload: names the source device") {
+        let f = frame(1, [contact(1, touching)], device: 0x1_0000_0abc)
+        try expectEqual(TouchFrame.payload(f, uptimeNow: 1.0, epochMsNow: 0)["device"] as? UInt64, 0x1_0000_0abc)
+    }
+
+    test("TouchFrameMailbox: devices merge and time out independently") {
+        let mb = TouchFrameMailbox()
+        _ = mb.offer(frame(1, [contact(1, makeTouch)], device: 1), now: 1.0)
+        _ = mb.offer(frame(1, [contact(1, makeTouch)], device: 2), now: 1.0)
+        _ = mb.offer(frame(2, [contact(1, touching, x: 0.6)], device: 1), now: 1.01)
+        _ = mb.offer(frame(2, [contact(1, touching, x: 0.6)], device: 2), now: 1.01)
+        _ = mb.offer(frame(3, [contact(1, touching, x: 0.7)], device: 2), now: 1.02)
+        let out = mb.take()
+        try expectEqual(out.map { "\($0.device):\($0.frame)" }, ["1:1", "2:1", "1:2", "2:3"])
+        _ = mb.offer(frame(4, [contact(1, touching, x: 0.8)], device: 2), now: 1.1)
+        _ = mb.take()
+        try expectEqual(mb.checkWatchdog(now: 1.13), .fired)
+        let released = mb.take()
+        try expectEqual(released.map(\.device), [1])
+        try expectEqual(mb.checkWatchdog(now: 1.15), .rearm(at: 1.1 + 0.12))
+    }
+
     test("TouchFrame.payload: marks synthesized releases") {
         var f = frame(1, [], t: 1.0)
         f.synthetic = true

@@ -79,6 +79,13 @@ typedef void (*MTFrameCallbackFunction)(MTDeviceRef device,
 extern MTDeviceRef MTDeviceCreateDefault(void);
 extern void        MTDeviceRelease(MTDeviceRef device);
 
+// Every multitouch device (built-in and external trackpads, Magic Mouse).
+// The array owns its devices: keep it alive while they are registered and
+// don't MTDeviceRelease its elements.
+extern CFArrayRef   MTDeviceCreateList(void) CF_RETURNS_RETAINED;
+// The AppleMultitouchDevice IOService behind a device (not retained).
+extern io_service_t MTDeviceGetService(MTDeviceRef device);
+
 extern OSStatus    MTDeviceStart(MTDeviceRef device, int32_t runMode);
 extern OSStatus    MTDeviceStop(MTDeviceRef device);
 extern Boolean     MTDeviceIsRunning(MTDeviceRef device);

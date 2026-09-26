@@ -4,6 +4,7 @@ import Carbon
 import Carbon.HIToolbox
 import CoreGraphics
 import Foundation
+import IOKit
 
 // MARK: ============================================================
 // MARK: Input — keyboard layout (TIS)
@@ -1041,6 +1042,7 @@ struct TouchFrame: Equatable {
         var p: [String: Any] = [
             "timestamp": f.timestamp,
             "frame":     f.frame,
+            "device":    f.device,
             "touches":   touches,
             "emittedAt": epochMsNow,
             "ageMs":     (age >= 0 && age < 10_000) ? age as Any : NSNull()
@@ -1208,18 +1210,91 @@ final class TouchFrameMailbox {
     }
 }
 
+/// Refcon for one MultitouchSupport registration. The pointer value itself
+/// carries (generation, slot) and is never dereferenced, so a callback the
+/// framework delivers after its device was unregistered decodes to a stale
+/// generation and is dropped instead of touching freed memory.
+enum TouchDeviceRefcon {
+    static func encode(generation: UInt, slot: Int) -> UnsafeMutableRawPointer? {
+        guard generation != 0, generation <= (UInt.max >> 8), (0..<256).contains(slot) else { return nil }
+        return UnsafeMutableRawPointer(bitPattern: (generation << 8) | UInt(slot))
+    }
+
+    static func decode(_ refcon: UnsafeMutableRawPointer?) -> (generation: UInt, slot: Int)? {
+        guard let refcon = refcon else { return nil }
+        let v = UInt(bitPattern: refcon)
+        return (v >> 8, Int(v & 0xFF))
+    }
+}
+
+/// When to (re-)register multitouch devices. Sleep tears registrations
+/// down; wake, unlock and IOKit hot-plug re-register after a settle delay
+/// (devices re-enumerate for a moment after each); a registration that
+/// finds no device or fails retries on a backoff, and any fresh signal
+/// restarts an exhausted backoff.
+struct TouchDeviceLifecycle {
+    enum Event: Equatable {
+        case sleep
+        case wake
+        case unlock
+        case topologyChanged
+        case registered(count: Int)
+        case registerFailed
+    }
+
+    enum Action: Equatable {
+        case cancelPending
+        case teardown
+        case register(after: Double)
+    }
+
+    let settleDelay: Double
+    let retryDelays: [Double]
+    private(set) var asleep = false
+    private var failures = 0
+
+    init(settleDelay: Double = 1.0, retryDelays: [Double] = [1, 2, 4, 8, 16]) {
+        self.settleDelay = settleDelay
+        self.retryDelays = retryDelays
+    }
+
+    mutating func handle(_ event: Event) -> [Action] {
+        switch event {
+        case .sleep:
+            asleep = true
+            failures = 0
+            return [.cancelPending, .teardown]
+        case .wake, .unlock:
+            asleep = false
+            failures = 0
+            return [.register(after: settleDelay)]
+        case .topologyChanged:
+            if asleep { return [] }
+            failures = 0
+            return [.register(after: settleDelay)]
+        case .registered(let count) where count > 0:
+            failures = 0
+            return []
+        case .registered, .registerFailed:
+            if asleep || failures >= retryDelays.count { return [] }
+            let delay = retryDelays[failures]
+            failures += 1
+            return [.register(after: delay)]
+        }
+    }
+}
+
 // Top-level C-convention callback — MultitouchSupport.framework can't call
-// a Swift closure, and the refcon is the only safe way to reach the
-// singleton without globals. Runs on the framework's thread: copy into
-// compact structs and hand off, nothing else.
+// a Swift closure. Runs on the framework's thread: resolve the refcon to a
+// device identity, copy into compact structs and hand off, nothing else.
 private func touchDeviceFrameCallback(_ device: UnsafeMutableRawPointer?,
                                       _ touches: UnsafeMutablePointer<MTTouch>?,
                                       _ numTouches: Int,
                                       _ timestamp: Double,
                                       _ frame: Int,
                                       _ refcon: UnsafeMutableRawPointer?) {
-    guard let refcon = refcon else { return }
-    let observer = Unmanaged<TouchDeviceObserver>.fromOpaque(refcon).takeUnretainedValue()
+    let observer = TouchDeviceObserver.shared
+    guard let deviceId = observer.deviceId(for: refcon) else { return }
     var contacts: [TouchContact] = []
     if let touches = touches, numTouches > 0 {
         contacts.reserveCapacity(numTouches)
@@ -1239,7 +1314,14 @@ private func touchDeviceFrameCallback(_ device: UnsafeMutableRawPointer?,
                 minorAxis: t.minorAxis))
         }
     }
-    observer.accept(TouchFrame(device: 0, timestamp: timestamp, frame: frame, touches: contacts))
+    observer.accept(TouchFrame(device: deviceId, timestamp: timestamp, frame: frame, touches: contacts))
+}
+
+// IOKit matching callback for AppleMultitouchDevice arrival/removal. The
+// iterator must be drained to re-arm the notification.
+private func touchDeviceTopologyCallback(_ refcon: UnsafeMutableRawPointer?, _ iterator: io_iterator_t) {
+    TouchDeviceObserver.drain(iterator)
+    TouchDeviceObserver.shared.handleLifecycle(.topologyChanged)
 }
 
 final class TouchDeviceObserver: RefCountedObserver {
@@ -1248,19 +1330,34 @@ final class TouchDeviceObserver: RefCountedObserver {
 
     private let mailbox = TouchFrameMailbox()
 
+    // Registration table read by the MT callback thread.
+    private let registrationLock = NSLock()
+    private var generation: UInt = 0
+    private var slotIds: [UInt64] = []
+
     // Main-thread only.
     private var lastEmitted: TouchFrame?
     private var watchdog: DispatchSourceTimer?
     private var watchdogDeadline: Double?
-
-    private var device: UnsafeMutableRawPointer?
-
-    // Keeps the singleton retained through Unmanaged.passRetained so the
-    // refcon pointer the C callback receives is always valid — the install
-    // path balances this with a release on teardown.
-    private var refconRetainer: Unmanaged<TouchDeviceObserver>?
+    private var lifecycle = TouchDeviceLifecycle()
+    private var pendingRegister: DispatchWorkItem?
+    private var deviceList: CFArray?
+    private var registeredDevices: [MTDeviceRef] = []
+    private var notificationTokens: [(NotificationCenter, NSObjectProtocol)] = []
+    private var notifyPort: IONotificationPortRef?
+    private var topologyIterators: [io_iterator_t] = []
 
     private static func uptime() -> Double { ProcessInfo.processInfo.systemUptime }
+
+    /// Called from the C callback on the MT thread. nil for a refcon from a
+    /// superseded registration.
+    func deviceId(for refcon: UnsafeMutableRawPointer?) -> UInt64? {
+        guard let (gen, slot) = TouchDeviceRefcon.decode(refcon) else { return nil }
+        registrationLock.lock()
+        defer { registrationLock.unlock() }
+        guard gen == generation, slot < slotIds.count else { return nil }
+        return slotIds[slot]
+    }
 
     /// Called from the C callback on the MT thread.
     func accept(_ frame: TouchFrame) {
@@ -1275,32 +1372,27 @@ final class TouchDeviceObserver: RefCountedObserver {
                                   epochMsNow: Date().timeIntervalSince1970 * 1000)
     }
 
+    func handleLifecycle(_ event: TouchDeviceLifecycle.Event) {
+        for action in lifecycle.handle(event) {
+            switch action {
+            case .cancelPending:
+                pendingRegister?.cancel()
+                pendingRegister = nil
+            case .teardown:
+                unregisterDevices()
+            case .register(let delay):
+                pendingRegister?.cancel()
+                let work = DispatchWorkItem { [weak self] in
+                    self?.pendingRegister = nil
+                    self?.registerDevices()
+                }
+                pendingRegister = work
+                DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+            }
+        }
+    }
+
     override func install() -> Token? {
-        guard let dev = MTDeviceCreateDefault() else { return nil }
-        self.device = dev
-
-        let retained = Unmanaged.passRetained(self)
-        self.refconRetainer = retained
-        let refcon = retained.toOpaque()
-
-        guard MTRegisterContactFrameCallbackWithRefcon(dev, touchDeviceFrameCallback, refcon) else {
-            retained.release()
-            self.refconRetainer = nil
-            MTDeviceRelease(dev)
-            self.device = nil
-            return nil
-        }
-
-        let startStatus = MTDeviceStart(dev, 0)
-        if startStatus != 0 {
-            _ = MTUnregisterContactFrameCallback(dev, touchDeviceFrameCallback)
-            retained.release()
-            self.refconRetainer = nil
-            MTDeviceRelease(dev)
-            self.device = nil
-            return nil
-        }
-
         let timer = DispatchSource.makeTimerSource(queue: .main)
         timer.setEventHandler { [weak self] in
             self?.watchdogDeadline = nil
@@ -1310,8 +1402,153 @@ final class TouchDeviceObserver: RefCountedObserver {
         timer.resume()
         watchdog = timer
 
+        startLifecycleSignals()
+        registerDevices()
         return Token { [weak self] in self?.teardown() }
     }
+
+    // MARK: Device registration
+
+    private func registerDevices() {
+        unregisterDevices()
+        guard let list = MTDeviceCreateList() else {
+            handleLifecycle(.registerFailed)
+            return
+        }
+        let count = min(CFArrayGetCount(list), 256)
+        var devices: [MTDeviceRef?] = []
+        var ids: [UInt64] = []
+        for i in 0..<count {
+            let dev = CFArrayGetValueAtIndex(list, i).map { UnsafeMutableRawPointer(mutating: $0) }
+            devices.append(dev)
+            ids.append(dev.map(TouchDeviceObserver.identity(of:)) ?? 0)
+        }
+
+        // Publish the slot table before registering so the first frame of
+        // each device resolves.
+        registrationLock.lock()
+        generation = generation &+ 1
+        if generation == 0 || generation > (UInt.max >> 8) { generation = 1 }
+        let gen = generation
+        slotIds = ids
+        registrationLock.unlock()
+
+        var registered: [MTDeviceRef] = []
+        for (slot, dev) in devices.enumerated() {
+            guard let dev = dev,
+                  let refcon = TouchDeviceRefcon.encode(generation: gen, slot: slot),
+                  MTRegisterContactFrameCallbackWithRefcon(dev, touchDeviceFrameCallback, refcon)
+            else { continue }
+            if MTDeviceStart(dev, 0) != 0 {
+                _ = MTUnregisterContactFrameCallback(dev, touchDeviceFrameCallback)
+                continue
+            }
+            registered.append(dev)
+        }
+        registeredDevices = registered
+        deviceList = list
+        log("touchdevice: registered \(registered.count)/\(count) multitouch device(s)")
+        handleLifecycle(.registered(count: registered.count))
+    }
+
+    /// Teardown order from asmagill's userdata_gc (internal.m:1128-1134):
+    /// unregister callback → check IsRunning → stop → release. Reordering
+    /// crashes on the next-frame delivery the framework queues internally
+    /// between stop and release. A device mid-touch gets its release from
+    /// the lift watchdog once its frames stop.
+    private func unregisterDevices() {
+        for dev in registeredDevices {
+            _ = MTUnregisterContactFrameCallback(dev, touchDeviceFrameCallback)
+            if MTDeviceIsRunning(dev) { _ = MTDeviceStop(dev) }
+        }
+        registeredDevices = []
+        registrationLock.lock()
+        generation = generation &+ 1
+        slotIds = []
+        registrationLock.unlock()
+        deviceList = nil
+    }
+
+    /// Stable identity for a device: the registry ID of the IOHIDEventService
+    /// above its AppleMultitouchDevice — the same value IOHIDEventGetSenderID
+    /// reports on that device's scroll and gesture CGEvents — falling back to
+    /// the multitouch service's own registry ID.
+    static func identity(of device: MTDeviceRef) -> UInt64 {
+        let service = MTDeviceGetService(device)
+        guard service != IO_OBJECT_NULL else { return 0 }
+        if let sender = hidEventServiceId(above: service) { return sender }
+        var id: UInt64 = 0
+        return IORegistryEntryGetRegistryEntryID(service, &id) == KERN_SUCCESS ? id : 0
+    }
+
+    private static func hidEventServiceId(above service: io_service_t) -> UInt64? {
+        var current = service
+        var owned = false
+        defer { if owned { IOObjectRelease(current) } }
+        for _ in 0..<16 {
+            var parent: io_registry_entry_t = 0
+            let kr = IORegistryEntryGetParentEntry(current, kIOServicePlane, &parent)
+            guard kr == KERN_SUCCESS, parent != 0 else { return nil }
+            if owned { IOObjectRelease(current) }
+            current = parent
+            owned = true
+            if IOObjectConformsTo(current, "IOHIDEventService") != 0 {
+                var id: UInt64 = 0
+                guard IORegistryEntryGetRegistryEntryID(current, &id) == KERN_SUCCESS, id != 0 else { return nil }
+                return id
+            }
+        }
+        return nil
+    }
+
+    // MARK: Lifecycle signals
+
+    private func startLifecycleSignals() {
+        let ws = NSWorkspace.shared.notificationCenter
+        notificationTokens.append((ws, ws.addObserver(
+            forName: NSWorkspace.willSleepNotification, object: nil, queue: .main
+        ) { [weak self] _ in self?.handleLifecycle(.sleep) }))
+        notificationTokens.append((ws, ws.addObserver(
+            forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
+        ) { [weak self] _ in self?.handleLifecycle(.wake) }))
+        let dnc = DistributedNotificationCenter.default()
+        notificationTokens.append((dnc, dnc.addObserver(
+            forName: NSNotification.Name("com.apple.screenIsUnlocked"), object: nil, queue: .main
+        ) { [weak self] _ in self?.handleLifecycle(.unlock) }))
+
+        guard let port = IONotificationPortCreate(kIOMainPortDefault) else { return }
+        notifyPort = port
+        CFRunLoopAddSource(CFRunLoopGetMain(),
+                           IONotificationPortGetRunLoopSource(port).takeUnretainedValue(),
+                           .commonModes)
+        for type in [kIOFirstMatchNotification, kIOTerminatedNotification] {
+            var iterator: io_iterator_t = 0
+            let kr = IOServiceAddMatchingNotification(
+                port, type, IOServiceMatching("AppleMultitouchDevice"),
+                touchDeviceTopologyCallback, nil, &iterator)
+            guard kr == KERN_SUCCESS else { continue }
+            // Arms the notification; existing devices are not a change.
+            TouchDeviceObserver.drain(iterator)
+            topologyIterators.append(iterator)
+        }
+    }
+
+    static func drain(_ iterator: io_iterator_t) {
+        while case let service = IOIteratorNext(iterator), service != 0 {
+            IOObjectRelease(service)
+        }
+    }
+
+    private func stopLifecycleSignals() {
+        for (center, token) in notificationTokens { center.removeObserver(token) }
+        notificationTokens = []
+        for it in topologyIterators { IOObjectRelease(it) }
+        topologyIterators = []
+        if let port = notifyPort { IONotificationPortDestroy(port) }
+        notifyPort = nil
+    }
+
+    // MARK: Drain + watchdog
 
     private func drain() {
         let frames = mailbox.take()
@@ -1340,26 +1577,15 @@ final class TouchDeviceObserver: RefCountedObserver {
     }
 
     private func teardown() {
+        pendingRegister?.cancel()
+        pendingRegister = nil
+        stopLifecycleSignals()
+        unregisterDevices()
+        lifecycle = TouchDeviceLifecycle()
+
         watchdog?.cancel()
         watchdog = nil
         watchdogDeadline = nil
-
-        // Teardown order from asmagill's userdata_gc (internal.m:1128-1134):
-        //   Unregister callback → check IsRunning → Stop → Release.
-        // Reordering crashes on the next-frame delivery the framework
-        // queues internally between Stop and Release.
-        if let dev = device {
-            _ = MTUnregisterContactFrameCallback(dev, touchDeviceFrameCallback)
-            if MTDeviceIsRunning(dev) { _ = MTDeviceStop(dev) }
-            MTDeviceRelease(dev)
-        }
-        device = nil
-
-        if let retainer = refconRetainer {
-            retainer.release()
-            refconRetainer = nil
-        }
-
         mailbox.reset()
         lastEmitted = nil
     }

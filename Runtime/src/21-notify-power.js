@@ -118,12 +118,16 @@ sd.sensors = channel("sensors");
   // merge (newest wins) but touch-began / release frames are never dropped.
   // Frames arrive BELOW the layer where AppKit recognizes swipe/pinch/rotate
   // — use this (not sd.gesture) when you want raw fingers with stable identity.
-  //   sd.touchdevice → { timestamp, frame, emittedAt, ageMs, synthetic?,
+  //   sd.touchdevice → { timestamp, frame, device, emittedAt, ageMs, synthetic?,
   //     touches: [{ identifier, state, x, y, vx, vy, angle, size, pressure,
   //                 majorAxis, minorAxis }, ...] }
   // state values: "began" | "stationary" | "moved" | "ended" | "cancelled" | "lifted".
   // x/y are 0..1 trackpad-normalized (origin bottom-left). Empty touches[]
   // = all fingers lifted (the "release" edge consumers' state machines need).
+  // Every multitouch device is registered (built-in and external trackpads,
+  // Magic Mouse), re-registered on hot-plug, wake and unlock. `device` is
+  // the device's HID sender id — the same value scrollWheel taps report as
+  // senderId — so frames from two devices can be told apart.
   // If the device goes quiet for 120ms mid-touch the daemon sends that
   // release itself, marked synthetic: true.
   // Latency: ageMs is hardware stamp → daemon emit (null if unknown);
