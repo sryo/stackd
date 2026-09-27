@@ -13,7 +13,7 @@ sd.windows = {
     //   (sticky / fullscreen aux) still surface a usable value here; call
     //   sd.spaces.forWindow(id) for the full set.
     focused: channel("focusedWindow"),
-    // Each entry: { id, app, pid, title, onscreen, addressable,
+    // Each entry: { id, app, pid, bundleId, title, onscreen, addressable,
     //   isStandard, isMinimized, frame: {x,y,w,h},
     //   display: { id, frame } | undefined,
     //   isResizable, canFullscreen }  — the last two once read, standard

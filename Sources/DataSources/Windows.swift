@@ -307,7 +307,14 @@ enum Windows {
     }
 
     private static func decode(_ list: [[String: Any]], includeOwn: Bool, includeNonStandard: Bool = false) -> [[String: Any]] {
-        list.compactMap { info -> [String: Any]? in
+        var bundleIds: [Int: String?] = [:]
+        func bundleId(_ pid: Int) -> String? {
+            if let hit = bundleIds[pid] { return hit }
+            let bid = NSRunningApplication(processIdentifier: pid_t(pid))?.bundleIdentifier
+            bundleIds[pid] = bid
+            return bid
+        }
+        return list.compactMap { info -> [String: Any]? in
             guard let num   = info[kCGWindowNumber as String]    as? Int,
                   let layer = info[kCGWindowLayer  as String]    as? Int,
                   layer == 0,
@@ -357,6 +364,7 @@ enum Windows {
                     "h": Int(bounds["Height"] ?? 0)
                 ]
             ]
+            if let bid = bundleId(pid) { out["bundleId"] = bid }
             if let d = Display.forPoint(CGPoint(x: originX, y: originY)) {
                 out["display"] = d
             }

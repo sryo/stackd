@@ -129,6 +129,19 @@ func registerWindowsTests() {
         }
     }
 
+    test("Windows.all rows carry the owning app's bundleId, like sd.windows.focused") {
+        // Stacks key per-app rules (exclude lists, deny entries) on bundleId;
+        // without it on list rows they fall back to the localized app name.
+        let entries = Windows.all(includeNonStandard: true)
+        try expect(!entries.isEmpty || !rawWindowCandidatesExist, "no rows to check")
+        for entry in entries {
+            guard let pid = entry["pid"] as? Int,
+                  let bid = NSRunningApplication(processIdentifier: pid_t(pid))?.bundleIdentifier
+            else { continue }
+            try expectEqual(entry["bundleId"] as? String, bid, "row \(entry["id"] ?? "?") of \(entry["app"] ?? "?")")
+        }
+    }
+
     test("Windows.all ids are unique (one row per CGWindowID)") {
         // Tilers and switchers dedupe by id; a repeated row would double-count
         // a window.

@@ -352,7 +352,7 @@ Operates on the stack's own NSPanel; no separate permission.
 ### `sd.windows` — all windows · `windows`
 **Channels:**
 - `sd.windows.focused` *(channel)* — `{id,pid,app,bundleId,title,frame,display?,space?}`.
-- `sd.windows.all` *(channel, default `[]`)* — `[{id,app,pid,title,onscreen,addressable,isStandard,isMinimized,isResizable?,canFullscreen?,frame,display?}]`. `isResizable` (size can be set) and `canFullscreen` (enabled fullscreen button) appear on standard windows once read; panels like Calculator or an app's Settings report `isResizable: false`.
+- `sd.windows.all` *(channel, default `[]`)* — `[{id,app,pid,bundleId?,title,onscreen,addressable,isStandard,isMinimized,isResizable?,canFullscreen?,frame,display?}]`. `bundleId` is absent only for processes without one. `isResizable` (size can be set) and `canFullscreen` (enabled fullscreen button) appear on standard windows once read; panels like Calculator or an app's Settings report `isResizable: false`.
 - `sd.windows.changed` *(channel, delta)* — `{added, removed, changed}`.
 - `sd.windows.focusedChanged` *(channel)* · `sd.windows.titleChanged` *(channel)*.
 - Lifecycle bang-channels (require manifest `handles`): `created, destroyed, moved, resized, minimized, deminimized, animating, resizing` — `.subscribe(fn)` with bang payloads.
