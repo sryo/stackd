@@ -347,6 +347,7 @@ Operates on the stack's own NSPanel; no separate permission.
 - `setAlpha(value) → Promise` — fade whole panel 0..1.
 - `setFrame({x, y, w?, h?}) → Promise` — reposition/resize at runtime (top-left origin).
 - `setClickThrough(value) → Promise`.
+- `setInteractiveRects(rects) → Promise` — take clicks only inside `rects` (`[{x,y,w,h}]`, viewport px) and pass them through elsewhere. Re-send after relayout or a frame change; `[]` clears the gate.
 - `configure(spec) → Promise` — `spec:{alpha?, clickThrough?, frame?{x,y,w,h}}` aggregator.
 
 ### `sd.windows` — all windows · `windows`

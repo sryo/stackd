@@ -87,4 +87,28 @@ func registerWindowConfigureTests() {
         let types = spyAndConfigure("null")
         try expectEqual(types.count, 0)
     }
+
+    test("setInteractiveRects posts window.setInteractiveRects with the rects") {
+        let out = JSHarness.evalString("""
+        (function() {
+          let p = null;
+          window.webkit.messageHandlers.sd.postMessage = (m) => { if (m.type === 'window.setInteractiveRects') p = m; };
+          sd.window.setInteractiveRects([{ x: 1, y: 2, w: 30, h: 40 }]);
+          return p ? JSON.stringify(p.rects) : 'null';
+        })()
+        """)
+        try expectEqual(out, #"[{"x":1,"y":2,"w":30,"h":40}]"#)
+    }
+
+    test("setInteractiveRects with no rects clears the gate") {
+        let out = JSHarness.evalString("""
+        (function() {
+          let p = null;
+          window.webkit.messageHandlers.sd.postMessage = (m) => { if (m.type === 'window.setInteractiveRects') p = m; };
+          sd.window.setInteractiveRects();
+          return p ? JSON.stringify(p.rects) : 'null';
+        })()
+        """)
+        try expectEqual(out, "[]")
+    }
 }

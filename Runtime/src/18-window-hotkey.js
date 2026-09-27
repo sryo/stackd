@@ -29,11 +29,14 @@ sd.window = {
     },
     // Dynamically toggle click-through. true = pass clicks through to the
     // layer beneath (desktop, system menubar). false = receive clicks
-    // normally. Used by stacks that need per-region routing — most notably
-    // the menubar "bar" stack, which polls sd.mouse and flips this as the
-    // cursor crosses its item rects so the system menubar stays clickable
-    // outside the bar's items.
+    // normally.
     setClickThrough(value) { return request({ type: "window.setClickThrough", value: !!value }); },
+    // Per-region routing for a click-through panel: the panel takes clicks
+    // only while the cursor is inside one of `rects` ({x,y,w,h} in viewport
+    // px) and passes them through everywhere else. The daemon converts to
+    // screen coords at call time, so call again after relayout or a frame
+    // change. An empty list clears the gate.
+    setInteractiveRects(rects) { return request({ type: "window.setInteractiveRects", rects: rects || [] }); },
     // Aggregator over setAlpha / setClickThrough / setFrame. Lets stacks
     // drive every runtime panel attribute from one place instead of
     // seeding via manifest then immediately overriding. Unspecified fields

@@ -638,7 +638,9 @@ function __sdEnsureInteractiveTracking() {
   }
   window.addEventListener("resize", schedule);
   window.addEventListener("scroll", schedule, true);
-  window.addEventListener("stackd:frame", schedule);
+  // A moved panel keeps the same viewport rects but needs new screen rects,
+  // so the dedupe must not swallow this push.
+  window.addEventListener("stackd:frame", () => { __sdLastRectsPayload = null; schedule(); });
   document.addEventListener("transitionend", schedule, true);
   document.addEventListener("animationend", schedule, true);
   schedule();
