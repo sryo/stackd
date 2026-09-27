@@ -1504,18 +1504,22 @@ enum WindowsByID {
     ///   - `role`:           kAXRoleAttribute (e.g. "AXWindow", "AXScrollArea")
     ///   - `subrole`:        kAXSubroleAttribute (e.g. "AXStandardWindow",
     ///                       "AXSystemDialog") — nil if unset
+    ///   - `radii`:          the window server's own corner radii, four
+    ///                       values in points (0 = square); nil before
+    ///                       macOS 26 or for an unknown id
     ///
-    /// Stacks (windowscape outline, overlay-border) map these to the actual
-    /// corner radii (16 / 0 on macOS 27; Tahoe used 26 for toolbar windows).
-    /// Centralizing the policy in the stack lets each consumer override (a
-    /// stack drawing a debug rect doesn't need to match Apple's exact curve).
+    /// `radii` is the exact shape the window is drawn with, read from the
+    /// window server rather than AX, so a busy app can't time it out. The AX
+    /// keys stay for the standard-window gate and as a fallback when `radii`
+    /// is nil.
     ///
     /// AX timeout capped at 100ms so one unresponsive app can't stall a
     /// per-tick overlay loop. Returns nil keys (or empty dict) when the AX
     /// query fails — the daemon never invents data.
     static func cornerHints(windowID: CGWindowID) -> [String: Any] {
+        let radii: Any = Overlay.cornerRadii(of: windowID) ?? NSNull()
         guard let el = elementFor(windowID: windowID) else {
-            return ["toolbarPresent": false, "role": NSNull(), "subrole": NSNull()]
+            return ["toolbarPresent": false, "role": NSNull(), "subrole": NSNull(), "radii": radii]
         }
         AXUIElementSetMessagingTimeout(el, 0.1)
         let role    = axStringAttribute(el, kAXRoleAttribute)
@@ -1524,7 +1528,8 @@ enum WindowsByID {
         return [
             "toolbarPresent": toolbarPresent,
             "role":           role    as Any? ?? NSNull(),
-            "subrole":        subrole as Any? ?? NSNull()
+            "subrole":        subrole as Any? ?? NSNull(),
+            "radii":          radii
         ]
     }
 

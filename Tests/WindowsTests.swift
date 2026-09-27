@@ -181,6 +181,7 @@ func registerWindowsTests() {
         try expectEqual(hints["toolbarPresent"] as? Bool, false)
         try expect(hints["role"] is NSNull, "role should be NSNull for invalid id")
         try expect(hints["subrole"] is NSNull, "subrole should be NSNull for invalid id")
+        try expect(hints["radii"] is NSNull, "radii should be NSNull for invalid id")
     }
 
     // MARK: - WindowsByID.settleProbe — return-shape contract

@@ -61,6 +61,7 @@ enum SkyLight {
         "SLSWindowIsOrderedIn",
         "SLSWindowIteratorAdvance",
         "SLSWindowIteratorGetAttributes",
+        "SLSWindowIteratorGetCornerRadii",
         "SLSWindowQueryResultCopyWindows",
         "SLSWindowQueryWindows",
         "_SLPSSetFrontProcessWithOptions",

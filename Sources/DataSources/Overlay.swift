@@ -32,6 +32,7 @@ private enum SkyLightOverlay {
     typealias QueryCopyWindowsFn  = @convention(c) (CFTypeRef) -> Unmanaged<CFTypeRef>?
     typealias IteratorAdvanceFn   = @convention(c) (CFTypeRef) -> Bool
     typealias IteratorAttributesFn = @convention(c) (CFTypeRef) -> UInt32
+    typealias IteratorCornerRadiiFn = @convention(c) (CFTypeRef) -> Unmanaged<CFArray>?
 
     static let getWindowBounds:   GetWindowBoundsFn?   = SkyLight.sym("SLSGetWindowBounds")
     static let windowIsOrderedIn: WindowIsOrderedInFn? = SkyLight.sym("SLSWindowIsOrderedIn")
@@ -41,6 +42,8 @@ private enum SkyLightOverlay {
     static let queryCopyWindows:  QueryCopyWindowsFn?  = SkyLight.sym("SLSWindowQueryResultCopyWindows")
     static let iteratorAdvance:   IteratorAdvanceFn?   = SkyLight.sym("SLSWindowIteratorAdvance")
     static let iteratorAttributes: IteratorAttributesFn? = SkyLight.sym("SLSWindowIteratorGetAttributes")
+    // macOS 26 and later.
+    static let iteratorCornerRadii: IteratorCornerRadiiFn? = SkyLight.sym("SLSWindowIteratorGetCornerRadii")
 }
 
 /// Per-window attributes from an SLSWindowQueryWindows iterator.
@@ -1578,6 +1581,25 @@ enum Overlay {
         guard wid != 0, let fn = SkyLightOverlay.getWindowLevel else { return nil }
         var level: Int32 = 0
         return fn(readConnection, UInt32(wid), &level) == 0 ? Int(level) : nil
+    }
+
+    /// The corner radii the window server rounds a window we don't own with,
+    /// in points: four values, 0 for square corners. nil when the wid is
+    /// unknown or the OS predates the call (macOS 26).
+    static func cornerRadii(of wid: CGWindowID) -> [Double]? {
+        guard wid != 0,
+              let query = SkyLightOverlay.windowQuery,
+              let copyWindows = SkyLightOverlay.queryCopyWindows,
+              let advance = SkyLightOverlay.iteratorAdvance,
+              let radii = SkyLightOverlay.iteratorCornerRadii else { return nil }
+        var n = Int32(bitPattern: wid)
+        guard let number = CFNumberCreate(nil, .sInt32Type, &n),
+              let result = query(readConnection, [number] as CFArray, 1)?.takeRetainedValue(),
+              let windows = copyWindows(result)?.takeRetainedValue(),
+              advance(windows),
+              let values = radii(windows)?.takeRetainedValue() as? [NSNumber],
+              !values.isEmpty else { return nil }
+        return values.map(\.doubleValue)
     }
 }
 

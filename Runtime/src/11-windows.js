@@ -149,14 +149,13 @@ sd.windows = {
     // axis never clamped, or null when nothing is known yet. Clamp live
     // writes to it instead of sending sizes the app will refuse.
     minSize(id) { return request({ type: "windows.byId.minSize", id }); },
-    // Raw AX hints for picking a corner radius in stack code. Returns
-    //   { toolbarPresent: bool, role: string|null, subrole: string|null }
-    // Stacks compose their own radius mapping, e.g. an outline stack writes
+    // Hints for matching a window's corners in stack code. Returns
+    //   { toolbarPresent: bool, role: string|null, subrole: string|null,
+    //     radii: [number, number, number, number]|null }
+    // `radii` is the window server's own corner radii in points (0 = square),
+    // null before macOS 26. An outline stack writes
     //   const h = await sd.windows.cornerHints(id);
-    //   const r = h.subrole === "AXSystemDialog" || h.role === "AXScrollArea"
-    //             ? 0 : 16;
-    // On macOS 27 every standard window rounds at 16pt, toolbar or not
-    // (Tahoe used 26 for toolbar windows).
+    //   const r = h.radii ? h.radii[0] : 16;
     cornerHints(id) { return request({ type: "windows.byId.cornerHints", id }); },
     // Traffic-light button frames (in the same global coord space as
     // `frame`). Returns
