@@ -5,6 +5,8 @@
 
   // sd.menubar.addItem returns a Promise<MenubarItem | null>. The handle is
   // bound to the stack lifetime — unload removes the NSStatusItem automatically.
+  // After remove() the handle is dead, so nothing touches it again.
+  let removed = false;
   const item = await sd.menubar.addItem({
     icon:    { sfSymbol: "battery.100" },
     tooltip: "battery — click for menu",
@@ -14,16 +16,20 @@
       { id: "quit", title: "Remove item" }
     ],
     onMenuPick: (pickId) => {
-      if (pickId === "info") item.setTitle(" ⓘ ");
-      if (pickId === "quit") item.remove();
-      setTimeout(() => item.setTitle(""), 1500);
+      if (pickId === "quit") {
+        removed = true;
+        item.remove();
+      } else if (pickId === "info") {
+        item.setTitle(" ⓘ ");
+        sd.timer.timeout(() => { if (!removed) item.setTitle(""); }, 1500);
+      }
     }
   });
 
   // Pick an SF Symbol that matches battery level. setIcon() can be called
   // any time after addItem to mutate the visible icon.
   sd.battery.subscribe(b => {
-    if (!b || b.percent < 0) return;
+    if (removed || !b || b.percent < 0) return;
     const sym = b.percent > 75 ? "battery.100" :
                 b.percent > 50 ? "battery.75"  :
                 b.percent > 25 ? "battery.50"  :

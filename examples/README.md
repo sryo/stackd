@@ -34,7 +34,6 @@ FSEvents picks it up; the panel appears within ~300ms.
 | [menubar-item](menubar-item) | `sd.menubar.addItem` with a dynamic icon and menu |
 | [mousemoved-test](mousemoved-test) | `eventtap: mouseMoved` — live deltas + cursor position |
 | [nlp-test](nlp-test) | `sd.nlp.language` / `tokens` / `lemmas` / `similarity` |
-| [overlay-border](overlay-border) | `sd.overlay.attach` — focused-window accent border via SLS overlay |
 | [sensors-test](sensors-test) | `sd.sensors` — temperatures, voltages, fans via IOHIDEventSystem |
 | [sound-test](sound-test) | `sd.sound.system`, `sd.sound.file`, `sd.sound.beep` on hotkeys |
 | [sqlite-test](sqlite-test) | `sd.sqlite.open` — open / exec / query / close round-trip |
@@ -43,5 +42,7 @@ FSEvents picks it up; the panel appears within ~300ms.
 | [usb-test](usb-test) | `sd.usb` device list with hot-plug updates |
 | [vision-ocr-test](vision-ocr-test) | `sd.display.snapshot` → `sd.vision.ocr` — text recognition pipeline |
 | [windows-batch-test](windows-batch-test) | `sd.windows.batch` — atomic multi-window `setFrame` vs. naive loop |
+
+For `sd.overlay.attach` (a focused-window border drawn in an SLS overlay), see the `overlay-border` stack in [sryo/stackd-stacks](https://github.com/sryo/stackd-stacks) (installed at `~/stackd/stacks/overlay-border`).
 
 Once you've copied one, `stackd doctor` validates the manifest. `stackd new <name>` scaffolds a fresh `hello`-style stack from the same template.
