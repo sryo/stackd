@@ -924,6 +924,12 @@ final class Bridge: NSObject, WKScriptMessageHandler {
             Sound.beep(); return true
         },
 
+        // Haptic: trackpad Taptic Engine click. Fire-and-forget; false for
+        // an unknown pattern name.
+        .sync("haptic.perform", permission: "haptic", denyValue: false) { body in
+            Haptic.perform(body["pattern"] as? String)
+        },
+
         // Update — pending macOS software updates via `softwareupdate -l`.
         // No TCC; the list verb runs without escalation. The subprocess is
         // slow (5-10s, network round-trip), so the primitive caches the

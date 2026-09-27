@@ -42,6 +42,7 @@ The complete author-facing JavaScript API. Everything is on the global `sd`. Sou
 | `sd.fs` | File read/write/list/stat/watch + xattr | RPC + watch callbacks | `fs` |
 | `sd.gesture` | Velocity tracking, rubber-band, projected release, catchable spring (pure JS) | Helper | none (`spring` → `displayLink`) |
 | `sd.handlers` | Generic slot-handler registration | Slot handlers | (per-kind) |
+| `sd.haptic` | Click the Force Touch trackpad | RPC | `haptic` |
 | `sd.host` | Host info, load channel, disk IO | Channel + RPC | `host` |
 | `sd.hotkey` | Dynamic Carbon hotkeys + modal modes + slot handlers | RPC + callbacks | `hotkey` |
 | `sd.httpserver` | Long-running HTTP server | RPC + request callbacks | `httpserver` |
@@ -204,6 +205,9 @@ Handle-based; handles are opaque ints owned by this stack — release them.
 
 ### `sd.handlers` — generic slot registration
 - `register(kind, name, fn) → disposer` — generic form of `sd.events.on` / `sd.hotkey.on` (kind e.g. `"Tap"`, `"Hotkey"`).
+
+### `sd.haptic`: trackpad feedback · `haptic`
+- `perform(pattern?) → Promise<bool>`, `pattern: "generic"` (default) `| "alignment" | "levelChange"`. Felt only while a finger is on the trackpad; unknown pattern → `false`.
 
 ### `sd.host` — host info/load · `host`
 - `sd.host.load` *(channel, poll-tunable)* — `{cpu{user,system,idle,total}, idleSeconds, memoryMB{used,free,wired}, memoryPressure, swap{totalMB,usedMB}, gpu{usagePercent}}`.

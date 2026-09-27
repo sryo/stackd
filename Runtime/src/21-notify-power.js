@@ -25,6 +25,13 @@ sd.sound = {
     file(path)   { return request({ type: "sound.file",   path }); },
     beep()       { return request({ type: "sound.beep" }); }
   };
+  // Click the Force Touch trackpad. Only felt while a finger is on it.
+  // Pattern is "generic" (default) | "alignment" | "levelChange"; an
+  // unknown name resolves false without clicking.
+  //   sd.haptic.perform("alignment")     // a detent while dragging a value
+sd.haptic = {
+    perform(pattern) { return request({ type: "haptic.perform", pattern }); }
+  };
   // System sleep / screen-lock signal: { sleeping, locked }.
   // Sleeping flips true between willSleep and didWake; locked flips true
   // between com.apple.screenIs{Locked,Unlocked} distributed notifications.
