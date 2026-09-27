@@ -99,7 +99,7 @@ extension Bridge {
                     let primaryMaxY = NSScreen.screens.first?.frame.maxY ?? 0
                     let global = StackWindow.screenRects(
                         viewport: parsed, panelFrame: win.frame, primaryMaxY: primaryMaxY)
-                    let key = "\(bridge.stackId):__sdInteractive"
+                    let key = StackWindow.interactiveRectsKey(stackId: bridge.stackId, owner: bridge)
                     if !bridge.interactiveHoverInstalled {
                         bridge.interactiveHoverInstalled = true
                         // Empty gate first so the observer can't fire before

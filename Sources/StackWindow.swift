@@ -454,6 +454,13 @@ final class StackWindow: NSPanel, WKNavigationDelegate {
         return n.boolValue
     }
 
+    /// EventTapRegistry key for one stack instance's hover gate. Keyed by the
+    /// owning bridge, not just the stack id, because a `display: "all"` stack
+    /// runs one instance per display and each needs its own rects.
+    static func interactiveRectsKey(stackId: String, owner: AnyObject) -> String {
+        "\(stackId):__sdInteractive:\(UInt(bitPattern: ObjectIdentifier(owner).hashValue))"
+    }
+
     /// Parse a `window.setInteractiveRects` body: `rects` is an array of
     /// {x, y, w, h} in CSS viewport coordinates (CSS px == AppKit points).
     /// Strict like parseSetFrame — any malformed rect nils the whole call

@@ -67,4 +67,14 @@ func registerInteractiveRectsTests() {
             primaryMaxY: 900)
         try expectEqual(global, [CGRect(x: -1435, y: 205, width: 20, height: 20)])
     }
+
+    test("interactiveRectsKey: instances of one stack get separate gates") {
+        // A display:"all" stack runs one bridge per display under the same
+        // stack id; a shared key would let each instance overwrite the
+        // others' rects.
+        let a = NSObject(), b = NSObject()
+        let ka = StackWindow.interactiveRectsKey(stackId: "bar", owner: a)
+        try expect(ka != StackWindow.interactiveRectsKey(stackId: "bar", owner: b))
+        try expectEqual(ka, StackWindow.interactiveRectsKey(stackId: "bar", owner: a))
+    }
 }
