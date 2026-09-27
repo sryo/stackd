@@ -86,6 +86,9 @@ extern CFArrayRef   MTDeviceCreateList(void) CF_RETURNS_RETAINED;
 // The AppleMultitouchDevice IOService behind a device (not retained).
 extern io_service_t MTDeviceGetService(MTDeviceRef device);
 
+// The device's multitouch ID, the key MTActuatorCreateFromDeviceID takes.
+extern OSStatus    MTDeviceGetDeviceID(MTDeviceRef device, uint64_t *deviceID);
+
 extern OSStatus    MTDeviceStart(MTDeviceRef device, int32_t runMode);
 extern OSStatus    MTDeviceStop(MTDeviceRef device);
 extern Boolean     MTDeviceIsRunning(MTDeviceRef device);
@@ -98,5 +101,16 @@ extern Boolean     MTRegisterContactFrameCallbackWithRefcon(MTDeviceRef device,
                                                             void *refcon);
 extern Boolean     MTUnregisterContactFrameCallback(MTDeviceRef device,
                                                     MTFrameCallbackFunction callback);
+
+// Taptic Engine of a Force Touch trackpad. Create returns NULL for devices
+// without one (Magic Mouse). Actuate plays a built-in waveform by ID (1-6,
+// 15 and 16 are known to play) whether or not a finger is on the pad; the
+// trailing arguments are undocumented and passed as zero.
+typedef CFTypeRef MTActuatorRef;
+extern MTActuatorRef MTActuatorCreateFromDeviceID(uint64_t deviceID) CF_RETURNS_RETAINED;
+extern OSStatus      MTActuatorOpen(MTActuatorRef actuator);
+extern OSStatus      MTActuatorClose(MTActuatorRef actuator);
+extern OSStatus      MTActuatorActuate(MTActuatorRef actuator, int32_t actuationID,
+                                       uint32_t unknown1, float unknown2, float unknown3);
 
 #endif

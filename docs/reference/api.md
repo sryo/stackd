@@ -208,6 +208,7 @@ Handle-based; handles are opaque ints owned by this stack — release them.
 
 ### `sd.haptic`: trackpad feedback · `haptic`
 - `perform(pattern?) → Promise<bool>`, `pattern: "generic"` (default) `| "alignment" | "levelChange"`. Felt only while a finger is on the trackpad; unknown pattern → `false`.
+- `actuate(id, device?) → Promise<bool>`: raw waveform `id` (1-6, 15, 16 play) straight to the actuator (MultitouchSupport SPI), felt even where `perform` is dropped, e.g. a finger on the pad's outer edge. `device` is a `sd.touchdevice` frame's `device`; omitted, every Force Touch trackpad clicks. Bad id or no actuator → `false`.
 
 ### `sd.host` — host info/load · `host`
 - `sd.host.load` *(channel, poll-tunable)* — `{cpu{user,system,idle,total}, idleSeconds, memoryMB{used,free,wired}, memoryPressure, swap{totalMB,usedMB}, gpu{usagePercent}}`.

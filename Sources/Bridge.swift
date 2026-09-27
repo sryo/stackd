@@ -929,6 +929,11 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         .sync("haptic.perform", permission: "haptic", denyValue: false) { body in
             Haptic.perform(body["pattern"] as? String)
         },
+        .sync("haptic.actuate", permission: "haptic", denyValue: false) { body in
+            guard let id = Haptic.actuationID(from: body["id"]) else { return false }
+            let device = (body["device"] as? NSNumber)?.uint64Value
+            return Haptic.actuate(id, device: device)
+        },
 
         // Update — pending macOS software updates via `softwareupdate -l`.
         // No TCC; the list verb runs without escalation. The subprocess is

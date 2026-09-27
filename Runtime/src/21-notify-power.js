@@ -29,8 +29,14 @@ sd.sound = {
   // Pattern is "generic" (default) | "alignment" | "levelChange"; an
   // unknown name resolves false without clicking.
   //   sd.haptic.perform("alignment")     // a detent while dragging a value
+  // actuate(id, device?) drives the actuator directly with a raw waveform
+  // ID (1-6, 15, 16 play) and clicks even where perform() is dropped, such
+  // as a finger on the pad's outer edge. `device` is an sd.touchdevice
+  // frame's `device`; omitted, every Force Touch trackpad clicks.
+  //   sd.haptic.actuate(3, snap.device)
 sd.haptic = {
-    perform(pattern) { return request({ type: "haptic.perform", pattern }); }
+    perform(pattern) { return request({ type: "haptic.perform", pattern }); },
+    actuate(id, device) { return request({ type: "haptic.actuate", id, device }); }
   };
   // System sleep / screen-lock signal: { sleeping, locked }.
   // Sleeping flips true between willSleep and didWake; locked flips true

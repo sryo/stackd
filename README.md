@@ -218,7 +218,7 @@ Available inside `{{ }}` templates and `import { sd } from "sd://runtime/api.js"
 | `sd.media.nowPlaying` / `sd.media.command(name)` | Spotify/Music/Podcasts/browser (MediaRemote SPI) |
 | `sd.speech.speak / stop / voices()` | AVSpeechSynthesizer TTS |
 | `sd.sound.system / file / beep` | short NSSound playback |
-| `sd.haptic.perform(pattern?)` | Force Touch trackpad click |
+| `sd.haptic.perform(pattern?) / actuate(id, device?)` | Force Touch trackpad click |
 | `sd.notify.show(spec)` | banner notification |
 
 ### Files, processes, persistence
