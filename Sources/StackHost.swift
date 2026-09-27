@@ -337,10 +337,10 @@ final class StackHost {
     // MARK: - Load one stack
 
     private func loadStack(source: StackSource) {
-        // Channels-only auto-permission merge. RPC actions (fs.*, proc,
-        // hotkey.bind, …) still require explicit manifest declaration —
-        // they carry real security implications and shouldn't be granted
-        // just because the stack source contains the string.
+        // Auto-permission merge: every permission in Permissions.inferable —
+        // channels and RPC namespaces (fs, proc, …) alike — is granted when
+        // the stack source mentions `sd.<perm>`. Only composites kept out of
+        // `inferable` (menubar.item) need an explicit manifest entry.
         var manifest = source.manifest
         let inferred = ChannelInference.infer(from: source.sourceText)
         let added = inferred.subtracting(manifest.permissions).sorted()

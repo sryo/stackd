@@ -17,8 +17,8 @@ sd.fs = {
     mkdir(path)           { return request({ type: "fs.mkdir", path }); },
     delete(path)          { return request({ type: "fs.delete", path }); },
     move(from, to)        { return request({ type: "fs.move", from, to }); },
-    // Push — returns a watchId you pass to unwatch(). Callback receives
-    // an array of { kind, path } events (coalesced by FSEvents at ~100ms).
+    // Push — returns a watchId you pass to unwatch(). Callback runs once
+    // per { kind, path } event (FSEvents coalesces them at ~100ms).
     async watch(path, fn) {
       const watchId = nextRequestId++;
       fsHandlers.set(watchId, fn);
