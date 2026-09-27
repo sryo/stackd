@@ -1506,9 +1506,9 @@ enum WindowsByID {
     ///                       "AXSystemDialog") — nil if unset
     ///
     /// Stacks (windowscape outline, overlay-border) map these to the actual
-    /// 26 / 16 / 0 radii that match Tahoe's WindowServer rounding. Centralizing
-    /// the policy in the stack lets each consumer override (a stack drawing a
-    /// debug rect doesn't need to match Apple's exact curve).
+    /// corner radii (16 / 0 on macOS 27; Tahoe used 26 for toolbar windows).
+    /// Centralizing the policy in the stack lets each consumer override (a
+    /// stack drawing a debug rect doesn't need to match Apple's exact curve).
     ///
     /// AX timeout capped at 100ms so one unresponsive app can't stall a
     /// per-tick overlay loop. Returns nil keys (or empty dict) when the AX

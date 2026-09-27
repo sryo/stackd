@@ -151,11 +151,12 @@ sd.windows = {
     minSize(id) { return request({ type: "windows.byId.minSize", id }); },
     // Raw AX hints for picking a corner radius in stack code. Returns
     //   { toolbarPresent: bool, role: string|null, subrole: string|null }
-    // Stacks compose their own 26/16/0 mapping — e.g. an outline stack writes
+    // Stacks compose their own radius mapping, e.g. an outline stack writes
     //   const h = await sd.windows.cornerHints(id);
     //   const r = h.subrole === "AXSystemDialog" || h.role === "AXScrollArea"
-    //             ? 0 : h.toolbarPresent ? 26 : 16;
-    // matching Tahoe's WindowServer rounding.
+    //             ? 0 : 16;
+    // On macOS 27 every standard window rounds at 16pt, toolbar or not
+    // (Tahoe used 26 for toolbar windows).
     cornerHints(id) { return request({ type: "windows.byId.cornerHints", id }); },
     // Traffic-light button frames (in the same global coord space as
     // `frame`). Returns
