@@ -383,7 +383,7 @@ final class EventTapRegistry {
     // sees it.
     private struct Consumer {
         let predicate: EventTapPredicate
-        let key: String                  // "\(stackId):\(callback)" — rectsAny lookup
+        let key: String                  // Bridge.eventTapKey — rectsAny lookup
         let onMatch: (CGEvent) -> Void   // fires async to JS after a match
     }
     private var consumers: [CGEventType: [Int: Consumer]] = [:]

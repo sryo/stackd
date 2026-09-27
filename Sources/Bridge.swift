@@ -439,7 +439,7 @@ final class Bridge: NSObject, WKScriptMessageHandler {
                 let cb = et.callback
                 if et.consume == true {
                     let predicate = Bridge.buildPredicate(et.`if`)
-                    let key = "\(manifest.id):\(cb)"
+                    let key = Bridge.eventTapKey(stackId: manifest.id, callback: cb, owner: self)
                     // requireRects: install an empty cursor-rect gate before
                     // the consumer can fire, so a consumer with no `if:`
                     // predicate doesn't eat every event of its type during
@@ -464,7 +464,7 @@ final class Bridge: NSObject, WKScriptMessageHandler {
                     // sd.mouse at 30Hz: declare the tap with requireRects,
                     // push the hit zones via sd.events.setTapRects, and the
                     // callback only fires when the cursor lands inside one.
-                    let key = "\(manifest.id):\(cb)"
+                    let key = Bridge.eventTapKey(stackId: manifest.id, callback: cb, owner: self)
                     if et.requireRects == true {
                         EventTapRegistry.shared.setConsumerRects(key: key, rects: [])
                     }

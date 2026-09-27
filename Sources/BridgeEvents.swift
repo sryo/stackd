@@ -67,7 +67,7 @@ extension Bridge {
             // would otherwise hide a typo behind a no-op).
             .syncBridge("events.setTapRects", permission: "events", denyValue: false) { bridge, body in
                 guard let callback = body["callback"] as? String, !callback.isEmpty else { return false }
-                let key = "\(bridge.stackId):\(callback)"
+                let key = Bridge.eventTapKey(stackId: bridge.stackId, callback: callback, owner: bridge)
                 if body["rects"] is NSNull || body["rects"] == nil {
                     EventTapRegistry.shared.setConsumerRects(key: key, rects: nil)
                     return true
@@ -102,6 +102,14 @@ extension Bridge {
                 EventTapRegistry.shared.releaseScroll(owner: Bridge.scrollClaimOwner(bridge))
             },
         ]
+    }
+
+    /// EventTapRegistry key for a manifest eventtap and its setTapRects gate.
+    /// Keyed by the owning bridge as well as the stack id: a `display: "all"`
+    /// stack runs one bridge per display, and each needs its own rects and
+    /// enter/leave state.
+    static func eventTapKey(stackId: String, callback: String, owner: AnyObject) -> String {
+        "\(stackId):\(callback)#\(UInt(bitPattern: ObjectIdentifier(owner).hashValue))"
     }
 
     /// Per-Bridge claim owner. A stack shown on several displays runs one
