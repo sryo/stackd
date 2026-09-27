@@ -12,7 +12,6 @@ html, body {
   background: transparent;
   color: var(--sd-fg);
   font: 13px var(--sd-font);
-  -webkit-font-smoothing: antialiased;
   user-select: none;
 }
 .card {
