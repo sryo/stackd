@@ -53,9 +53,9 @@ typedef enum {
 typedef struct {
     int32_t     frame;
     double      timestamp;
-    int32_t     pathIndex;        // transducer index ("P")
+    int32_t     pathIndex;        // stable per contact, touch-down to lift ("P")
     MTPathStage stage;
-    int32_t     fingerID;         // stable per-finger across frames ("F")
+    int32_t     fingerID;         // finger classification, revised mid-touch ("F")
     int32_t     handID;           // always 1 in practice ("H")
     MTVector    normalizedVector; // position + velocity, 0..1 trackpad-relative
     float       zTotal;           // ~surface area (0..1, multiple of 1/8)

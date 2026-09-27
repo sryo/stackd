@@ -18,6 +18,22 @@ func registerTouchFrameMailboxTests() {
         TouchFrame(device: device, timestamp: t ?? Double(n) * 0.01, frame: n, touches: touches)
     }
 
+    test("a contact's id is its pathIndex, which holds while fingerID is reclassified") {
+        // MultitouchSupport revises fingerID (its guess at which finger it
+        // is) during a touch, e.g. 0 at first contact then 2; pathIndex
+        // stays put from touch-down to lift.
+        var raw = MTTouch()
+        raw.pathIndex = 4
+        raw.stage = MTPathStage(rawValue: 3)
+        raw.fingerID = 0
+        let first = TouchContact(raw)
+        raw.fingerID = 2
+        let reclassified = TouchContact(raw)
+        try expectEqual(first.id, 4)
+        try expectEqual(reclassified.id, 4)
+        try expectEqual(first.stage, 3)
+    }
+
     test("TouchFrameMailbox: the first frame of a touch asks for a drain") {
         let mb = TouchFrameMailbox()
         try expectEqual(mb.offer(frame(1, [contact(1, makeTouch)]), now: 1.0), true)

@@ -1010,6 +1010,9 @@ enum TouchDevice {
 
 /// One finger in a MultitouchSupport contact frame. `stage` is the raw
 /// MTPathStage value; floats stay Float to keep the MT-thread copy small.
+/// `id` is the contact's pathIndex: MultitouchSupport's fingerID is its
+/// guess at which finger it is and gets revised mid-touch (0 at first
+/// contact, then a classification), so it can't key a touch.
 struct TouchContact: Equatable {
     var id: Int32
     var stage: Int32
@@ -1022,6 +1025,22 @@ struct TouchContact: Equatable {
     var pressure: Float
     var majorAxis: Float
     var minorAxis: Float
+}
+
+extension TouchContact {
+    init(_ t: MTTouch) {
+        self.init(id: t.pathIndex,
+                  stage: Int32(bitPattern: t.stage.rawValue),
+                  x: t.normalizedVector.position.x,
+                  y: t.normalizedVector.position.y,
+                  vx: t.normalizedVector.velocity.x,
+                  vy: t.normalizedVector.velocity.y,
+                  angle: t.angle,
+                  size: t.zTotal,
+                  pressure: t.zPressure,
+                  majorAxis: t.majorAxis,
+                  minorAxis: t.minorAxis)
+    }
 }
 
 /// One contact frame from one device. `timestamp` is the framework's
@@ -1343,21 +1362,7 @@ private func touchDeviceFrameCallback(_ device: UnsafeMutableRawPointer?,
     var contacts: [TouchContact] = []
     if let touches = touches, numTouches > 0 {
         contacts.reserveCapacity(numTouches)
-        for i in 0..<numTouches {
-            let t = touches[i]
-            contacts.append(TouchContact(
-                id: t.fingerID,
-                stage: Int32(bitPattern: t.stage.rawValue),
-                x: t.normalizedVector.position.x,
-                y: t.normalizedVector.position.y,
-                vx: t.normalizedVector.velocity.x,
-                vy: t.normalizedVector.velocity.y,
-                angle: t.angle,
-                size: t.zTotal,
-                pressure: t.zPressure,
-                majorAxis: t.majorAxis,
-                minorAxis: t.minorAxis))
-        }
+        for i in 0..<numTouches { contacts.append(TouchContact(touches[i])) }
     }
     observer.accept(TouchFrame(device: deviceId, timestamp: timestamp, frame: frame, touches: contacts,
                                receivedAt: ProcessInfo.processInfo.systemUptime))
