@@ -103,6 +103,7 @@ A stack is `stack.json` + `index.html` + `index.css`. The manifest says where th
   "size": { "w": 140, "h": 48 },
   "material": "glass",
   "cornerRadius": 24,
+  "padding": 0,
   "permissions": ["mouse"],
   "handles": ["user.beep"]
 }
