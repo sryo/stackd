@@ -76,7 +76,7 @@ func registerUtilTests() {
             flush();
             return before + "|" + seen.join(",");
         """)
-        // The trailing call fires with the args of the call that armed it.
-        try expectEqual(out, "1/1|1,2")
+        // The trailing call fires with the latest args.
+        try expectEqual(out, "1/1|1,4")
     }
 }

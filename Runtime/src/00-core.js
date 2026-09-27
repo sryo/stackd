@@ -327,13 +327,15 @@ const timer = {
     return wrapped;
   },
   // Leading-edge throttle. First call fires immediately; subsequent calls
-  // within `ms` are dropped; trailing edge re-arms after the window expires.
+  // within `ms` collapse into one trailing call, made with the latest args
+  // once the window expires.
   //   const tick = sd.timer.throttle(updateHUD, 100);
   throttle(fn, ms) {
-    let last = 0, scheduled = null;
+    let last = 0, scheduled = null, latest = null;
     return function (...args) {
       const now = Date.now();
       const remaining = ms - (now - last);
+      latest = { self: this, args };
       if (remaining <= 0) {
         last = now;
         if (scheduled !== null) { __sdCancel(scheduled, false); scheduled = null; }
@@ -343,7 +345,7 @@ const timer = {
           last = Date.now();
           __sdTimers.delete(scheduled);
           scheduled = null;
-          fn.apply(this, args);
+          fn.apply(latest.self, latest.args);
         }, remaining));
       }
     };

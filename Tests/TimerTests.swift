@@ -90,8 +90,9 @@ func registerTimerTests() {
           return [leading, scheduled, calls.join("")].join("|");
         })
         """)
-        // The trailing call keeps the args of the call that armed it.
-        try expectEqual(out, "a|1|ab")
+        // The trailing call carries the latest args, so the final value of a
+        // burst (a slider's last position) is never dropped.
+        try expectEqual(out, "a|1|ac")
     }
 
     test("util.debounce / util.throttle: delegate to sd.timer (back-compat)") {
