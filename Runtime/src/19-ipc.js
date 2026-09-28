@@ -148,7 +148,12 @@ sd.overlay = {
     //     rect: { x, y, w, h },          // global screen coords
     //     html: `<div class="ring"></div>`,
     //     css:  `.ring { position:absolute; inset:0; border:8px solid #1a4de6;
-    //                    border-radius:16px; pointer-events:none; }`
+    //                    border-radius:16px; pointer-events:none; }`,
+    //     level: "utility"               // optional: an hs.canvas.windowLevels
+    //                                    // name or a raw number. Default
+    //                                    // "status" (25) draws over Notification
+    //                                    // Center banners (21); "utility" (19)
+    //                                    // stays above app windows, under both.
     //   });
     //   p.setFrame({ x, y, w, h });      // re-place
     //   p.follow({ dx, dy });            // daemon moves the panel per vsync:
@@ -165,7 +170,8 @@ sd.overlay = {
         type: "overlay.region.create",
         rect: { x: +r.x || 0, y: +r.y || 0, w: +r.w || 0, h: +r.h || 0 },
         html: s.html != null ? String(s.html) : "",
-        css:  s.css  != null ? String(s.css)  : ""
+        css:  s.css  != null ? String(s.css)  : "",
+        level: typeof s.level === "number" || typeof s.level === "string" ? s.level : null
       });
       if (handleId == null) return null;
       return {

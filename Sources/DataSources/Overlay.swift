@@ -1605,6 +1605,33 @@ enum Overlay {
 
 // MARK: - Free-region overlay (fixed global rect, any display)
 
+/// The `level` option of sd.overlay.region. Names are hs.canvas.windowLevels'
+/// keys, read from the window server (CGWindowLevelForKey) rather than
+/// hard-coded; a number is a raw level. Absent or unknown → `.statusBar`.
+enum RegionOverlayLevel {
+    static let `default` = NSWindow.Level.statusBar
+
+    private static let keys: [String: CGWindowLevelKey] = [
+        "desktop": .desktopWindow, "desktopIcon": .desktopIconWindow,
+        "backstopMenu": .backstopMenu, "normal": .normalWindow,
+        "floating": .floatingWindow, "tornOffMenu": .tornOffMenuWindow,
+        "modalPanel": .modalPanelWindow, "utility": .utilityWindow,
+        "dock": .dockWindow, "mainMenu": .mainMenuWindow,
+        "status": .statusWindow, "popUpMenu": .popUpMenuWindow,
+        "overlay": .overlayWindow, "help": .helpWindow,
+        "dragging": .draggingWindow, "screenSaver": .screenSaverWindow,
+        "assistiveTechHigh": .assistiveTechHighWindow, "cursor": .cursorWindow,
+    ]
+
+    static func resolve(_ value: Any?) -> NSWindow.Level {
+        if let n = value as? NSNumber { return NSWindow.Level(rawValue: n.intValue) }
+        if let s = value as? String, let key = keys[s] {
+            return NSWindow.Level(rawValue: Int(CGWindowLevelForKey(key)))
+        }
+        return `default`
+    }
+}
+
 /// Pure geometry for the free-region overlay — validates the caller's rect and
 /// converts global (top-left) coords to AppKit (bottom-left). Separate + pure
 /// so the placement flip is testable without spawning an NSPanel.
@@ -1731,13 +1758,15 @@ extension Overlay {
     /// Create a free-region overlay at `rect` (global, top-left). Returns nil
     /// on a degenerate rect. Reuses attach()'s WKWebView + OverlayPanel recipe,
     /// minus the target/tick/reorder machinery.
-    static func region(id: Int, rect: CGRect, html: String, css: String) -> RegionOverlayHandle? {
+    static func region(id: Int, rect: CGRect, html: String, css: String,
+                       level: NSWindow.Level = RegionOverlayLevel.default) -> RegionOverlayHandle? {
         guard let sane = RegionOverlayGeometry.sanitize(rect) else { return nil }
         let appKit = RegionOverlayGeometry.toAppKit(sane)
 
         let webView = makeOverlayWebView(size: appKit.size)
 
         let panel = makeOverlayPanel(frame: appKit, attachedToWindow: false)
+        panel.level = level
         panel.contentView = webView
 
         let doc = """

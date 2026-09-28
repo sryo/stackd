@@ -189,7 +189,8 @@ extension Bridge {
                     bridge.nextOverlayId += 1
                     guard let handle = Overlay.region(
                         id: id, rect: CGRect(x: x, y: y, width: w, height: h),
-                        html: html, css: css
+                        html: html, css: css,
+                        level: RegionOverlayLevel.resolve(body["level"])
                     ) else {
                         bridge.respond(requestId: requestId, value: NSNull()); return
                     }

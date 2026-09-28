@@ -201,6 +201,52 @@ func registerOverlayTests() {
         }
     }
 
+    // MARK: - RegionOverlayLevel — the `level` option of sd.overlay.region
+
+    test("RegionOverlayLevel: no level keeps the statusBar default") {
+        try expectEqual(RegionOverlayLevel.resolve(nil), .statusBar)
+        try expectEqual(RegionOverlayLevel.resolve(NSNull()), .statusBar)
+    }
+
+    test("RegionOverlayLevel: hs.canvas.windowLevels names resolve to the window server's levels") {
+        try expectEqual(RegionOverlayLevel.resolve("normal").rawValue, 0)
+        try expectEqual(RegionOverlayLevel.resolve("floating").rawValue, 3)
+        try expectEqual(RegionOverlayLevel.resolve("utility").rawValue, 19)
+        try expectEqual(RegionOverlayLevel.resolve("dock").rawValue, 20)
+        try expectEqual(RegionOverlayLevel.resolve("status").rawValue, 25)
+        try expectEqual(RegionOverlayLevel.resolve("popUpMenu").rawValue, 101)
+        try expectEqual(RegionOverlayLevel.resolve("screenSaver").rawValue, 1000)
+    }
+
+    test("RegionOverlayLevel: 'utility' sits above app windows and below the Dock") {
+        // The band that clears every normal/floating/modal window without
+        // covering the Dock or Notification Center banners (one above the Dock).
+        let l = RegionOverlayLevel.resolve("utility")
+        try expect(l > .modalPanel)
+        try expect(l < RegionOverlayLevel.resolve("dock"))
+    }
+
+    test("RegionOverlayLevel: a number is taken as a raw level") {
+        try expectEqual(RegionOverlayLevel.resolve(NSNumber(value: 19)).rawValue, 19)
+        try expectEqual(RegionOverlayLevel.resolve(NSNumber(value: 1500)).rawValue, 1500)
+    }
+
+    test("RegionOverlayLevel: an unknown name falls back to the default") {
+        try expectEqual(RegionOverlayLevel.resolve("nope"), .statusBar)
+        try expectEqual(RegionOverlayLevel.resolve(""), .statusBar)
+    }
+
+    test("Overlay.region places its panel at the requested level") {
+        // Far off screen and fully transparent, so nothing shows during the suite.
+        guard let h = Overlay.region(id: 1, rect: CGRect(x: -9999, y: -9999, width: 4, height: 4),
+                                     html: "", css: "",
+                                     level: RegionOverlayLevel.resolve("utility")) else {
+            throw Expectation(message: "region returned nil for a valid rect")
+        }
+        defer { h.remove() }
+        try expectEqual(h.panel.level.rawValue, 19)
+    }
+
     test("RegionOverlayHandle.remove then setFrame is a safe no-op") {
         // Teardown race: a gesture step can land after the bracket closed and
         // remove() ran. The released guard must swallow setFrame rather than
