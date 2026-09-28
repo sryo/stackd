@@ -95,6 +95,14 @@ window.__sd_fs_event = (watchId, events) => {
     for (const ev of events) fn(ev);
   }
 };
+// Region overlay messages routed by region id. Populated by a region
+// handle's onMessage, dropped on remove(). Native fires:
+//   window.__sd_overlay_message(regionId, data)
+const overlayMessageHandlers = new Map();
+window.__sd_overlay_message = (regionId, data) => {
+  const fn = overlayMessageHandlers.get(regionId);
+  if (fn) fn(data);
+};
 // NSStatusItem callbacks routed by mint id. Populated by sd.menubar.addItem,
 // drained on item.remove(). Native fires:
 //   window.__sd_menubar_event(itemId, "click", null)

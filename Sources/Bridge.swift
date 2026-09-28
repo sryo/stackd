@@ -1227,6 +1227,12 @@ final class Bridge: NSObject, WKScriptMessageHandler {
     /// in api.js (sd.menubar.addItem) routes this to the stack's callbacks.
     /// Widened from fileprivate to internal so BridgeMenubar.swift's
     /// menubar.addItem closure can pump click / pick events back to JS.
+    /// Hand a region overlay page's `window.stack.post(data)` to the stack's
+    /// handle.onMessage (routed by region id in Runtime/src/19-ipc.js).
+    func dispatchOverlayMessage(regionId: Int, data: Any) {
+        fireGlobal(handler: "__sd_overlay_message", args: ["\(regionId)", Bridge.jsonify(data)])
+    }
+
     func dispatchMenubarEvent(itemId: Int, type: String, payload: Any?) {
         let payloadJson = payload.map { Bridge.jsonify($0) } ?? "null"
         fireGlobal(handler: "__sd_menubar_event",

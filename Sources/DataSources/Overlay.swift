@@ -1440,11 +1440,13 @@ enum Overlay {
     /// sd.overlay panel is ignoresMouseEvents=true by contract, and a
     /// drag-registered webview would make the invisible panel a Finder
     /// drag target (see PassthroughWebView).
-    static func makeOverlayWebView(size: CGSize) -> PassthroughWebView {
+    static func makeOverlayWebView(size: CGSize,
+                                   userContent: WKUserContentController? = nil) -> PassthroughWebView {
         let config = WKWebViewConfiguration()
         let prefs = WKPreferences()
         prefs.javaScriptCanOpenWindowsAutomatically = false
         config.preferences = prefs
+        if let userContent { config.userContentController = userContent }
 
         let webView = PassthroughWebView(
             frame: NSRect(origin: .zero, size: size),
@@ -1671,6 +1673,16 @@ enum RegionFollowGeometry {
 /// `OverlayHandle` it tracks no window — no per-vsync tick, no z-order reorder.
 /// Placed on create, re-placed via `setFrame`.
 final class RegionOverlayHandle: NSObject, WKNavigationDelegate {
+    /// Script message handler name behind the page's `window.stack.post`.
+    static let messageHandlerName = "sdOverlayMessage"
+    /// Defines `window.stack.post(data)` in the overlay page: hands `data`
+    /// (anything structured-clonable) to the owning stack's onMessage.
+    static let messageBootstrap = """
+    window.stack = Object.freeze({ post(data) {
+      window.webkit.messageHandlers.\(messageHandlerName).postMessage(data === undefined ? null : data);
+    } });
+    """
+
     let id: Int
     let panel: NSPanel
     let webView: WKWebView
@@ -1740,6 +1752,8 @@ final class RegionOverlayHandle: NSObject, WKNavigationDelegate {
     func remove() {
         if released { return }
         released = true
+        webView.configuration.userContentController
+            .removeScriptMessageHandler(forName: Self.messageHandlerName)
         Overlay.orderOutNow(panel)
         panel.orderOut(nil)
         panel.close()
@@ -1758,15 +1772,31 @@ extension Overlay {
     /// Create a free-region overlay at `rect` (global, top-left). Returns nil
     /// on a degenerate rect. Reuses attach()'s WKWebView + OverlayPanel recipe,
     /// minus the target/tick/reorder machinery.
+    ///
+    /// `interactive` makes the panel take real clicks, scrolls and hover
+    /// (still never key, so stackd never comes frontmost); whatever sits on
+    /// top of it, like a notification banner, gets its clicks first.
+    /// `onMessage` receives each `window.stack.post(data)` from the page.
     static func region(id: Int, rect: CGRect, html: String, css: String,
-                       level: NSWindow.Level = RegionOverlayLevel.default) -> RegionOverlayHandle? {
+                       level: NSWindow.Level = RegionOverlayLevel.default,
+                       interactive: Bool = false,
+                       onMessage: ((Any) -> Void)? = nil) -> RegionOverlayHandle? {
         guard let sane = RegionOverlayGeometry.sanitize(rect) else { return nil }
         let appKit = RegionOverlayGeometry.toAppKit(sane)
 
-        let webView = makeOverlayWebView(size: appKit.size)
+        let userContent = WKUserContentController()
+        if let onMessage {
+            userContent.addUserScript(WKUserScript(source: RegionOverlayHandle.messageBootstrap,
+                                                   injectionTime: .atDocumentStart,
+                                                   forMainFrameOnly: true))
+            userContent.add(RegionOverlayMessageRelay(onMessage),
+                            name: RegionOverlayHandle.messageHandlerName)
+        }
+        let webView = makeOverlayWebView(size: appKit.size, userContent: userContent)
 
         let panel = makeOverlayPanel(frame: appKit, attachedToWindow: false)
         panel.level = level
+        panel.ignoresMouseEvents = !interactive
         panel.contentView = webView
 
         let doc = """
@@ -1783,5 +1813,16 @@ extension Overlay {
         panel.orderFrontRegardless()
 
         return RegionOverlayHandle(id: id, panel: panel, webView: webView)
+    }
+}
+
+/// WKUserContentController retains its message handlers, so the relay holds
+/// only the callback; RegionOverlayHandle.remove() unregisters it.
+private final class RegionOverlayMessageRelay: NSObject, WKScriptMessageHandler {
+    private let onMessage: (Any) -> Void
+    init(_ onMessage: @escaping (Any) -> Void) { self.onMessage = onMessage }
+    func userContentController(_ controller: WKUserContentController,
+                               didReceive message: WKScriptMessage) {
+        onMessage(message.body)
     }
 }

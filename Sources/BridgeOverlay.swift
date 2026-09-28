@@ -190,7 +190,11 @@ extension Bridge {
                     guard let handle = Overlay.region(
                         id: id, rect: CGRect(x: x, y: y, width: w, height: h),
                         html: html, css: css,
-                        level: RegionOverlayLevel.resolve(body["level"])
+                        level: RegionOverlayLevel.resolve(body["level"]),
+                        interactive: body["interactive"] as? Bool ?? false,
+                        onMessage: { [weak bridge] data in
+                            bridge?.dispatchOverlayMessage(regionId: id, data: data)
+                        }
                     ) else {
                         bridge.respond(requestId: requestId, value: NSNull()); return
                     }

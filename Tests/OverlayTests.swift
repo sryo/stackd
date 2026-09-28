@@ -15,6 +15,13 @@ import WebKit
 // Not covered: `Overlay.attach(...)` and the tick itself, which need a
 // live foreign target window.
 
+private func spinOverlayRunLoop(for seconds: TimeInterval, until done: () -> Bool = { false }) {
+    let deadline = Date().addingTimeInterval(seconds)
+    while !done() && Date() < deadline {
+        RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.02))
+    }
+}
+
 func registerOverlayTests() {
     // MARK: - SkyLight readers — negative branch for invalid CGWindowID
 
@@ -245,6 +252,48 @@ func registerOverlayTests() {
         }
         defer { h.remove() }
         try expectEqual(h.panel.level.rawValue, 19)
+    }
+
+    // MARK: - Interactive regions — real clicks, messages back to the stack
+
+    test("Overlay.region: an interactive region takes clicks; the default stays click-through") {
+        let off = CGRect(x: -9999, y: -9999, width: 4, height: 4)
+        guard let plain = Overlay.region(id: 1, rect: off, html: "", css: ""),
+              let live = Overlay.region(id: 2, rect: off, html: "", css: "", interactive: true) else {
+            throw Expectation(message: "region returned nil for a valid rect")
+        }
+        defer { plain.remove(); live.remove() }
+        try expectEqual(plain.panel.ignoresMouseEvents, true)
+        try expectEqual(live.panel.ignoresMouseEvents, false)
+        // Taking clicks must not make it key: stackd is never frontmost.
+        try expectEqual(live.panel.canBecomeKey, false)
+    }
+
+    test("Overlay.region: window.stack.post in the overlay page reaches onMessage") {
+        var got: [String: Any]?
+        guard let h = Overlay.region(id: 3, rect: CGRect(x: -9999, y: -9999, width: 4, height: 4),
+                                     html: "<script>window.stack.post({ kind: 'down', x: 4 })</script>",
+                                     css: "", onMessage: { got = $0 as? [String: Any] }) else {
+            throw Expectation(message: "region returned nil for a valid rect")
+        }
+        defer { h.remove() }
+        spinOverlayRunLoop(for: 5) { got != nil }
+        try expectEqual(got?["kind"] as? String, "down")
+        try expectEqual((got?["x"] as? NSNumber)?.intValue, 4)
+    }
+
+    test("Overlay.region: a removed region delivers no more messages") {
+        var count = 0
+        guard let h = Overlay.region(id: 4, rect: CGRect(x: -9999, y: -9999, width: 4, height: 4),
+                                     html: "", css: "", onMessage: { _ in count += 1 }) else {
+            throw Expectation(message: "region returned nil for a valid rect")
+        }
+        let web = h.webView
+        spinOverlayRunLoop(for: 2) { !web.isLoading }
+        h.remove()
+        web.evaluateJavaScript("window.stack && window.stack.post(1)", completionHandler: nil)
+        spinOverlayRunLoop(for: 0.5)
+        try expectEqual(count, 0)
     }
 
     test("RegionOverlayHandle.remove then setFrame is a safe no-op") {

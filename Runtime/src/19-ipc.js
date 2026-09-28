@@ -149,12 +149,17 @@ sd.overlay = {
     //     html: `<div class="ring"></div>`,
     //     css:  `.ring { position:absolute; inset:0; border:8px solid #1a4de6;
     //                    border-radius:16px; pointer-events:none; }`,
+    //     interactive: true,             // optional: take real clicks and
+    //                                    // scrolls instead of passing them
+    //                                    // through. Never makes stackd key.
     //     level: "utility"               // optional: an hs.canvas.windowLevels
     //                                    // name or a raw number. Default
     //                                    // "status" (25) draws over Notification
     //                                    // Center banners (21); "utility" (19)
     //                                    // stays above app windows, under both.
     //   });
+    //   p.onMessage((data) => ...);      // the page calls
+    //                                    // window.stack.post(data)
     //   p.setFrame({ x, y, w, h });      // re-place
     //   p.follow({ dx, dy });            // daemon moves the panel per vsync:
     //                                    // origin = cursor + (dx, dy). Use for
@@ -171,11 +176,18 @@ sd.overlay = {
         rect: { x: +r.x || 0, y: +r.y || 0, w: +r.w || 0, h: +r.h || 0 },
         html: s.html != null ? String(s.html) : "",
         css:  s.css  != null ? String(s.css)  : "",
-        level: typeof s.level === "number" || typeof s.level === "string" ? s.level : null
+        level: typeof s.level === "number" || typeof s.level === "string" ? s.level : null,
+        interactive: s.interactive === true
       });
       if (handleId == null) return null;
       return {
         id: handleId,
+        // The overlay page's window.stack.post(data) lands here. One
+        // handler per region; calling again replaces it.
+        onMessage(fn) {
+          if (typeof fn === "function") overlayMessageHandlers.set(handleId, fn);
+          else overlayMessageHandlers.delete(handleId);
+        },
         setFrame(rect) {
           const q = rect || {};
           return request({ type: "overlay.region.setFrame", id: handleId,
@@ -191,7 +203,10 @@ sd.overlay = {
             dx: +o.dx || 0, dy: +o.dy || 0 });
         },
         unfollow() { return request({ type: "overlay.region.unfollow", id: handleId }); },
-        remove()  { return request({ type: "overlay.region.remove", id: handleId }); }
+        remove()  {
+          overlayMessageHandlers.delete(handleId);
+          return request({ type: "overlay.region.remove", id: handleId });
+        }
       };
     }
   };
