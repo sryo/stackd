@@ -917,6 +917,47 @@ struct AXInstallRetryGate {
     }
 }
 
+/// Which listed windows lack per-window AX observers. Every attach path
+/// can drop a window for good without a trace outside debug logging: the
+/// subrole recheck ladder runs dry while the app is still building the
+/// window, CGS 1325 lands before AX vends the element, the safety poll
+/// suppresses a create another announcer already made. Such a window
+/// still lists, tiles, and closes (CGS 804 covers destroy), but never
+/// reports minimize, deminimize, moved, or resized. The safety poll
+/// sweeps with this so the gap closes within one tick.
+enum PerWindowCoverage {
+    /// Minimum spacing between attach attempts for one window, so a window
+    /// AX keeps refusing costs one AX walk a minute, not one per tick.
+    static let retryInterval: Double = 60.0
+
+    /// `rows` are `Windows.all()` entries. Only AX-addressable standard
+    /// windows qualify: the probe already resolved those, so an attach is
+    /// expected to succeed.
+    static func uncovered(rows: [[String: Any]], covered: (Int) -> Bool) -> [(pid: Int, id: Int)] {
+        rows.compactMap { r in
+            guard let id = r["id"] as? Int, let pid = r["pid"] as? Int,
+                  r["isStandard"] as? Bool == true, r["addressable"] as? Bool == true,
+                  !covered(id) else { return nil }
+            return (pid, id)
+        }
+    }
+
+    struct Gate {
+        private var lastAttempt: [Int: Double] = [:]
+
+        mutating func shouldAttempt(id: Int, now: Double) -> Bool {
+            if let last = lastAttempt[id], now - last < PerWindowCoverage.retryInterval { return false }
+            lastAttempt[id] = now
+            return true
+        }
+
+        /// Drop windows no longer listed, keeping the map bounded.
+        mutating func retain(ids: Set<Int>) {
+            lastAttempt = lastAttempt.filter { ids.contains($0.key) }
+        }
+    }
+}
+
 /// Pure resolution order for a window's owning pid. `cached` maps each pid
 /// to the window ids its AX cache holds; `query` is the single-window
 /// CGWindowList fallback.
@@ -1808,6 +1849,7 @@ final class WindowsLifecycleObserver {
 
     private var snapshot: [Int: Snap] = [:]
     private var timer: Timer?
+    private var coverageGate = PerWindowCoverage.Gate()
 
     private init() {}
 
@@ -1836,7 +1878,8 @@ final class WindowsLifecycleObserver {
     }
 
     private func tick() {
-        let now = current()
+        let rows = Windows.all()
+        let now = current(rows)
         if Self.shouldSkipTick(previousCount: snapshot.count, currentCount: now.count) {
             WindowDebug.log("poll tick skipped: window list read empty (transient)")
             return
@@ -1882,6 +1925,7 @@ final class WindowsLifecycleObserver {
         if total > 0 {
             log("win-poll missed-by-ax: +\(missedCreated) -\(missedDestroyed) ~\(missedTitled) (10s safety backstop caught what AX did not fire)")
         }
+        sweepPerWindowCoverage(rows: rows, listed: Set(now.keys))
         WindowDebug.log("poll tick: total seen=\(diff.created.count + diff.destroyed.count + diff.titleChanged.count) missed-by-ax=\(total)")
         // Listener-fires sensor for the CGS codes: per-code counts since
         // launch, piggybacked on the poll's cadence. Codes stuck at zero
@@ -1999,9 +2043,28 @@ final class WindowsLifecycleObserver {
         ]
     }
 
-    private func current() -> [Int: Snap] {
+    /// Attach per-window observers to listed windows that have none (see
+    /// PerWindowCoverage). Logged plainly: every hit means some attach
+    /// path dropped a window, and until now it was deaf to minimize,
+    /// deminimize, moved, and resized.
+    private func sweepPerWindowCoverage(rows: [[String: Any]], listed: Set<Int>) {
+        coverageGate.retain(ids: listed)
+        let ax = WindowsAXObserver.shared
+        let uncovered = PerWindowCoverage.uncovered(rows: rows, covered: { ax.pidFor(wid: CGWindowID($0)) != nil })
+        let now = CFAbsoluteTimeGetCurrent()
+        var attempted: [Int] = []
+        for w in uncovered where coverageGate.shouldAttempt(id: w.id, now: now) {
+            ax.ensurePerWindow(pid: pid_t(w.pid), wid: CGWindowID(w.id))
+            attempted.append(w.id)
+        }
+        if !attempted.isEmpty {
+            log("win-poll uncovered-by-ax: \(attempted) had no per-window observers (no minimize/move/resize events); attaching")
+        }
+    }
+
+    private func current(_ rows: [[String: Any]] = Windows.all()) -> [Int: Snap] {
         var out: [Int: Snap] = [:]
-        for raw in Windows.all() {
+        for raw in rows {
             guard let id = raw["id"] as? Int else { continue }
             let frameDict = raw["frame"] as? [String: Int] ?? [:]
             out[id] = Snap(
