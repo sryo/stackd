@@ -387,9 +387,9 @@ final class OverlayHandle: NSObject, WKNavigationDelegate {
         let unfitted = size != fitted
         if let from = retargetFrom {
             retargetFrom = nil
-            let crossed = OverlayScreens.crossesScreens(from: from, to: appKitFrame,
-                                                         screens: NSScreen.screens.map(\.frame))
-            if reveal.retargeted(crossedScreens: crossed) { hideUntilPainted() }
+            let repaints = OverlayScreens.retargetRepaints(from: from, to: appKitFrame,
+                                                            screens: NSScreen.screens.map(\.frame))
+            if reveal.retargeted(repaints: repaints) { hideUntilPainted() }
         }
 
         let frameOp = OverlayTickPlan.frameOp(next: appKitFrame, last: lastFrame)
@@ -464,7 +464,10 @@ final class OverlayHandle: NSObject, WKNavigationDelegate {
         return true
     }
 
-    private static let revealFallback: TimeInterval = 0.25
+    /// Only for a page that never answers the paint confirm. Under heavy
+    /// system load the confirm itself takes a few hundred ms, and revealing
+    /// before it shows the stale border this gate exists to hide.
+    private static let revealFallback: TimeInterval = 1.0
 
     private func hideUntilPainted() {
         panel.alphaValue = 0
@@ -817,10 +820,20 @@ enum OverlayScreens {
         guard let a = index(from), let b = index(to) else { return false }
         return a != b
     }
+
+    /// True when a retarget from panel frame `from` to `to` needs the
+    /// WebView to repaint before the panel shows the right border: a new
+    /// size (the border is laid out for the old one) or another display (a
+    /// new backing scale). A same-size move only translates the panel.
+    static func retargetRepaints(from: CGRect, to: CGRect, screens: [CGRect]) -> Bool {
+        guard from != .zero else { return false }
+        let resized = abs(from.width - to.width) >= 0.5 || abs(from.height - to.height) >= 0.5
+        return resized || crossesScreens(from: from, to: to, screens: screens)
+    }
 }
 
-/// Holds a window-attached panel transparent after a retarget that crossed
-/// displays. The new display's backing scale makes the WebView repaint, and
+/// Holds a window-attached panel transparent after a retarget that resized
+/// it or moved it to another display. Either makes the WebView repaint, and
 /// until it does the compositor shows the previous target's border stretched
 /// over the new frame. Revealed by a confirm that the page painted (issued
 /// only once the target push is idle, so it lands after the new geometry),
@@ -832,8 +845,8 @@ struct OverlayRevealGate {
     private var confirming: Int?
 
     /// Returns true when the caller must hide the panel now.
-    mutating func retargeted(crossedScreens: Bool) -> Bool {
-        guard crossedScreens || hiddenGeneration != nil else { return false }
+    mutating func retargeted(repaints: Bool) -> Bool {
+        guard repaints || hiddenGeneration != nil else { return false }
         let wasHidden = hiddenGeneration != nil
         generation += 1
         hiddenGeneration = generation
