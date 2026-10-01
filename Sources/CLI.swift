@@ -5,7 +5,10 @@ enum CLI {
     stackd <verb> [args]
       list                                      list running stack IDs
       reload                                    tear down & reload all stacks from disk
-      toggle <id>                               enable/disable a single stack
+      list --disabled                           list parked stacks (in ~/stackd/disabled/)
+      disable <id>                              unload a stack and park it in ~/stackd/disabled/
+      enable <id>                               move a parked stack back and load it
+      toggle <id>                               unload/load a stack until the next reload
       set <id|/regex/> --css <prop>=<value>     set a CSS custom property on one or many stacks
       bang <name> [KEY=VAL ...]                 fire a bang to stacks that handle it
       new <name> [--template <t>]               scaffold a new stack at ~/stackd/stacks/<name>/
@@ -21,8 +24,8 @@ enum CLI {
       manifest before decoding. Useful for global permissions, anchors, etc.
 
     The daemon must be running for verbs that talk to live stacks (list,
-    reload, toggle, set, bang). `new` and `doctor` are local file ops and
-    work without the daemon. Start the daemon with:
+    reload, disable, enable, toggle, set, bang). `new` and `doctor` are
+    local file ops and work without the daemon. Start the daemon with:
       stackd                                    (no args)
     """
 
@@ -130,6 +133,13 @@ enum CLI {
         guard let verb = argv.first else { return helpText + "\n" }
         let rest = Array(argv.dropFirst())
         switch verb {
+        case "list" where rest.first == "--disabled":
+            let ids = host.disabledStackIds()
+            return ids.isEmpty ? "(no disabled stacks)\n" : ids.joined(separator: "\n") + "\n"
+        case "disable", "enable":
+            guard let id = rest.first else { return "usage: \(verb) <stack-id>\n" }
+            let error = verb == "disable" ? host.disable(id: id) : host.enable(id: id)
+            return error.map { "error: \($0)\n" } ?? "\(verb)d \(id)\n"
         case "list":
             let ids = host.listStacks()
             return ids.isEmpty ? "(no stacks loaded)\n" : ids.joined(separator: "\n") + "\n"

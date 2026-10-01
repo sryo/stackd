@@ -845,6 +845,7 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         + Bridge.bonjourPrimitives()
         + Bridge.procPrimitives()
         + Bridge.caffeinatePrimitives()
+        + Bridge.stacksPrimitives()
         + Bridge.sqlitePrimitives()
         + Bridge.hotkeyPrimitives()
         + Bridge.broadcastsPrimitives()

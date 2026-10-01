@@ -51,4 +51,36 @@ func registerFileWatcherTests() {
         spinMainRunLoop(for: 3.0, until: { fires > 0 })
         try expect(fires >= 1, "a stack-source edit should trigger a reload")
     }
+
+    test("FileWatcher skips a folder the daemon moves itself, but still sees other changes") {
+        let fm = FileManager.default
+        let created = fm.temporaryDirectory.appendingPathComponent("stackd-filewatcher-\(UUID().uuidString)")
+        try fm.createDirectory(at: created, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: created) }
+        guard let real = realpath(created.path, nil) else {
+            throw Expectation(message: "realpath failed for \(created.path)")
+        }
+        let root = URL(fileURLWithPath: String(cString: real))
+        free(real)
+        let watched = root.appendingPathComponent("stacks")
+        let parked = root.appendingPathComponent("disabled")
+        try fm.createDirectory(at: watched.appendingPathComponent("bar"), withIntermediateDirectories: true)
+        try Data("{}".utf8).write(to: watched.appendingPathComponent("bar/stack.json"))
+        try fm.createDirectory(at: parked, withIntermediateDirectories: true)
+
+        var fires = 0
+        let watcher = FileWatcher(paths: [watched.path], debounceMs: 50) { fires += 1 }
+        defer { watcher.stop() }
+        spinMainRunLoop(for: 0.6)
+        fires = 0
+
+        watcher.ignore(watched.appendingPathComponent("bar").path)
+        try fm.moveItem(at: watched.appendingPathComponent("bar"), to: parked.appendingPathComponent("bar"))
+        spinMainRunLoop(for: 1.0)
+        try expectEqual(fires, 0, "the ignored folder's move must not reload")
+
+        try fm.createDirectory(at: watched.appendingPathComponent("other"), withIntermediateDirectories: true)
+        spinMainRunLoop(for: 3.0, until: { fires > 0 })
+        try expect(fires >= 1, "an unrelated new folder still reloads")
+    }
 }

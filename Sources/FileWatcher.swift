@@ -6,6 +6,10 @@ final class FileWatcher {
     private let callback: () -> Void
     private var debounceTask: DispatchWorkItem?
     private let debounceMs: Int
+    // Folders the daemon is moving itself and applies surgically (stack
+    // disable / enable), with when to stop skipping them. Main thread only,
+    // like the stream callback.
+    private var ignored: [(path: String, until: Date)] = []
 
     // Only changes to these extensions trigger a reload. Runtime data files
     // (SQLite WALs from sd.sqlite, plists from sd.settings, .pid/.lock/.log
@@ -43,6 +47,7 @@ final class FileWatcher {
             for i in 0..<numEvents {
                 let path  = paths[i]
                 let flags = eventFlags[i]
+                if watcher.isIgnored(path) { continue }
                 let ext   = (path as NSString).pathExtension.lowercased()
                 if FileWatcher.reloadExtensions.contains(ext) {
                     watcher.scheduleFire(); return
@@ -73,6 +78,31 @@ final class FileWatcher {
         } else {
             log("FSEventStream creation failed")
         }
+    }
+
+    /// Skip events at or under `path` for the next `seconds`. Both the path
+    /// as given and its resolved form are matched, since FSEvents reports
+    /// canonical paths.
+    func ignore(_ path: String, for seconds: TimeInterval = 2) {
+        let until = Date().addingTimeInterval(seconds)
+        ignored.append((path, until))
+        // A folder about to be moved IN doesn't exist yet: resolve its parent.
+        let ns = path as NSString
+        let resolved = Self.resolved(path)
+            ?? Self.resolved(ns.deletingLastPathComponent).map { $0 + "/" + ns.lastPathComponent }
+        if let resolved = resolved, resolved != path { ignored.append((resolved, until)) }
+    }
+
+    private static func resolved(_ path: String) -> String? {
+        guard let real = realpath(path, nil) else { return nil }
+        defer { free(real) }
+        return String(cString: real)
+    }
+
+    private func isIgnored(_ path: String) -> Bool {
+        let now = Date()
+        ignored.removeAll { $0.until < now }
+        return ignored.contains { path == $0.path || path.hasPrefix($0.path + "/") }
     }
 
     private func scheduleFire() {

@@ -33,6 +33,17 @@
 sd.handlers = {
     register(kind, name, fn) { return __registerSlotHandler(kind, name, fn); }
   };
+// Stack management — the in-stack face of `stackd list|disable|enable`.
+// disable(id) unloads a stack and parks its folder in ~/stackd/disabled/ so
+// it stays off across reloads and restarts; enable(id) moves it back and
+// loads it. Both resolve { ok, error? }.
+//   const { loaded, disabled } = await sd.stacks.list();
+//   await sd.stacks.disable("bar");
+sd.stacks = {
+    list()      { return request({ type: "stacks.list" }); },
+    disable(id) { return request({ type: "stacks.disable", id: String(id) }); },
+    enable(id)  { return request({ type: "stacks.enable", id: String(id) }); }
+  };
 sd.bang = Object.assign(
     (name, detail) => request({ type: "bang", name, detail: detail || {} }),
     {

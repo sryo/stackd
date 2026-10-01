@@ -47,7 +47,7 @@ enum Permissions {
         "bonjour", "httpserver", "sqlite", "update", "cursor", "overlay",
         "shortcuts", "sound", "icons", "thumbnails", "events", "menu",
         "bluetooth", "disks", "hotkey", "urlhandler", "symbol", "desktop",
-        "haptic",
+        "haptic", "stacks",
 
         // --- Composite permissions (don't auto-infer; explicit only) ------
         // Composites carry stricter side-effects than their base namespace

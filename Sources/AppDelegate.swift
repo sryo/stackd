@@ -86,6 +86,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             log("file change → reload")
             host?.reloadAll()
         }
+        host.willMoveFolder = { [weak watcher = self.watcher] path in watcher?.ignore(path) }
 
         // Adapt stack panels when display geometry changes (resolution
         // change, monitor hotplug, scale factor flip). Without this,

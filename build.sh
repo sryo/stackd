@@ -31,6 +31,7 @@ SWIFT_SOURCES=(
   Sources/BridgeBonjour.swift
   Sources/BridgeBroadcasts.swift
   Sources/BridgeCaffeinate.swift
+  Sources/BridgeStacks.swift
   Sources/BridgeCalendar.swift
   Sources/BridgeCamera.swift
   Sources/BridgeChannels.swift

@@ -110,6 +110,74 @@ struct StackManifest: Decodable {
     }
 }
 
+/// Where a stack's folder lives decides whether it loads: `<root>/stacks/`
+/// is enabled, `<root>/disabled/` is parked. Backs `stackd disable|enable`
+/// and sd.stacks.disable|enable.
+enum StackFolders {
+    enum Location {
+        case enabled, disabled
+        var dirName: String { self == .enabled ? "stacks" : "disabled" }
+    }
+
+    /// A bare folder name: no separators, no leading dot, no instance
+    /// suffix (`bar@1` names a per-display instance, not a folder).
+    static func isValidId(_ id: String) -> Bool {
+        !id.isEmpty && !id.hasPrefix(".") && !id.contains("/") && !id.contains("@")
+    }
+
+    static func path(of id: String, in loc: Location, root: String) -> String {
+        root + "/" + loc.dirName + "/" + id
+    }
+
+    /// Stack folder names in `loc`, sorted; hidden entries and files skipped.
+    static func list(_ loc: Location, root: String) -> [String] {
+        let dir = root + "/" + loc.dirName
+        let fm = FileManager.default
+        guard let entries = try? fm.contentsOfDirectory(atPath: dir) else { return [] }
+        return entries.filter { name in
+            var isDir: ObjCBool = false
+            return !name.hasPrefix(".")
+                && fm.fileExists(atPath: dir + "/" + name, isDirectory: &isDir) && isDir.boolValue
+        }.sorted()
+    }
+
+    static func exists(_ id: String, in loc: Location, root: String) -> Bool {
+        var isDir: ObjCBool = false
+        return FileManager.default.fileExists(atPath: path(of: id, in: loc, root: root), isDirectory: &isDir)
+            && isDir.boolValue
+    }
+
+    /// Why `id` can't move into `to`, or nil when it can.
+    static func refusal(id: String, to: Location, root: String) -> String? {
+        guard isValidId(id) else { return "invalid stack id '\(id)'" }
+        let from: Location = to == .enabled ? .disabled : .enabled
+        if !exists(id, in: from, root: root) {
+            return exists(id, in: to, root: root)
+                ? "'\(id)' is already \(to == .enabled ? "enabled" : "disabled")"
+                : "no stack named '\(id)'"
+        }
+        if FileManager.default.fileExists(atPath: path(of: id, in: to, root: root)) {
+            return "can't \(to == .enabled ? "enable" : "disable") '\(id)': \(to.dirName)/\(id) already exists"
+        }
+        return nil
+    }
+
+    /// Move `id`'s folder into `to`. nil on success, else why it didn't move.
+    static func move(id: String, to: Location, root: String) -> String? {
+        if let reason = refusal(id: id, to: to, root: root) { return reason }
+        let from: Location = to == .enabled ? .disabled : .enabled
+        do {
+            try FileManager.default.createDirectory(atPath: root + "/" + to.dirName,
+                                                    withIntermediateDirectories: true)
+            try FileManager.default.moveItem(atPath: path(of: id, in: from, root: root),
+                                             toPath: path(of: id, in: to, root: root))
+        } catch {
+            return "can't \(to == .enabled ? "enable" : "disable") '\(id)': \(error.localizedDescription)"
+        }
+        return nil
+    }
+}
+
 final class StackHost {
     let rootPath: String
     let schemeHandler: StackdSchemeHandler
@@ -204,6 +272,53 @@ final class StackHost {
             DispatchQueue.main.async { win.webView.sdEvaluate(js, completionHandler: nil) }
         }
         return true
+    }
+
+    /// Called with a stack folder's path just before the host moves it, so
+    /// the file watcher skips the move instead of reloading every stack.
+    var willMoveFolder: ((String) -> Void)?
+
+    /// Loaded stacks by base id (per-display instances `<id>@<N>` folded).
+    func loadedStackIds() -> [String] {
+        Array(Set(windows.keys.map { String($0.split(separator: "@").first ?? "") })
+            .union(awaitingDisplay)).sorted()
+    }
+
+    func disabledStackIds() -> [String] {
+        StackFolders.list(.disabled, root: rootPath)
+    }
+
+    /// Unload `id` and park its folder in disabled/, so it stays off across
+    /// reloads and restarts. nil on success, else why not.
+    func disable(id: String) -> String? {
+        if let reason = StackFolders.refusal(id: id, to: .disabled, root: rootPath) { return reason }
+        willMoveFolder?(StackFolders.path(of: id, in: .enabled, root: rootPath))
+        unloadAllInstances(baseId: id)
+        sources.removeValue(forKey: id)
+        awaitingDisplay.remove(id)
+        if let error = StackFolders.move(id: id, to: .disabled, root: rootPath) {
+            if let src = StackSource.loadFolder(at: StackFolders.path(of: id, in: .enabled, root: rootPath),
+                                                defaults: defaults) {
+                loadStack(source: src)
+            }
+            return error
+        }
+        log("disabled \(id)")
+        return nil
+    }
+
+    /// Move `id`'s folder back into stacks/ and load it. nil on success.
+    func enable(id: String) -> String? {
+        if let reason = StackFolders.refusal(id: id, to: .enabled, root: rootPath) { return reason }
+        willMoveFolder?(StackFolders.path(of: id, in: .enabled, root: rootPath))
+        if let error = StackFolders.move(id: id, to: .enabled, root: rootPath) { return error }
+        guard let src = StackSource.loadFolder(at: StackFolders.path(of: id, in: .enabled, root: rootPath),
+                                               defaults: defaults) else {
+            return "enabled '\(id)', but its stack.json didn't load (see stackd doctor)"
+        }
+        loadStack(source: src)
+        log("enabled \(id)")
+        return nil
     }
 
     /// Enable/disable a single stack by id. If currently loaded, unload it
