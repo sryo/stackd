@@ -112,6 +112,10 @@ final class OverlayHandle: NSObject, WKNavigationDelegate {
     private var pendingTargetJS: String?
     private var lastPushedTargetJS: String?
     private var targetPush = NewestWinsPush()
+    private var reveal = OverlayRevealGate()
+    // The panel frame before the last retarget, for the cross-display check
+    // on the tick that places it on the new target.
+    private var retargetFrom: CGRect?
     private var resizeDetector = LiveResizeDetector()
     private var headroom = OverlayHeadroom()
     // True after a window-server move AppKit didn't see: `panel.frame` still
@@ -149,6 +153,7 @@ final class OverlayHandle: NSObject, WKNavigationDelegate {
         if released { return }
         if newWID == targetWID { return }
         targetWID = newWID
+        retargetFrom = lastFrame
         commandedFrame = nil
         OverlayEventFollow.track(self)
         forceRepin()
@@ -380,6 +385,12 @@ final class OverlayHandle: NSObject, WKNavigationDelegate {
         let panelFrame = OverlayGeometry.panelFrame(target: targetFrame, outset: outset, size: size)
         let appKitFrame = OverlayHandle.cgsToAppKit(panelFrame)
         let unfitted = size != fitted
+        if let from = retargetFrom {
+            retargetFrom = nil
+            let crossed = OverlayScreens.crossesScreens(from: from, to: appKitFrame,
+                                                         screens: NSScreen.screens.map(\.frame))
+            if reveal.retargeted(crossedScreens: crossed) { hideUntilPainted() }
+        }
 
         let frameOp = OverlayTickPlan.frameOp(next: appKitFrame, last: lastFrame)
         let eventMoved = OverlayEventFollow.takeApplied(self)
@@ -439,6 +450,7 @@ final class OverlayHandle: NSObject, WKNavigationDelegate {
         let payload = OverlayGeometry.targetPayloadJS(targetFrame: targetFrame, outset: outset,
                                                       resizing: resizing)
         guard let js = OverlayTickPlan.payloadToPush(payload, lastPushed: lastPushedTargetJS) else {
+            confirmPaintIfHidden()
             return frameChanged || unfitted
         }
         lastPushedTargetJS = js
@@ -448,7 +460,35 @@ final class OverlayHandle: NSObject, WKNavigationDelegate {
             // Buffer — flushed in webView(_:didFinish:).
             pendingTargetJS = js
         }
+        confirmPaintIfHidden()
         return true
+    }
+
+    private static let revealFallback: TimeInterval = 0.25
+
+    private func hideUntilPainted() {
+        panel.alphaValue = 0
+        trace.note("hide-until-painted")
+        guard let gen = reveal.hiddenGeneration else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.revealFallback) { [weak self] in
+            guard let self = self, !self.released else { return }
+            if self.reveal.fallback(generation: gen) { self.panel.alphaValue = 1 }
+        }
+    }
+
+    /// Once the new target geometry has reached the page, wait for two
+    /// animation frames there — the second fires only after the first
+    /// painted frame at the new size and scale was committed — then reveal.
+    private func confirmPaintIfHidden() {
+        guard navigationReady,
+              let gen = reveal.confirmation(pushInFlight: targetPush.inFlight) else { return }
+        webView.callAsyncJavaScript(
+            "await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))",
+            arguments: [:], in: nil, in: .page
+        ) { [weak self] _ in
+            guard let self = self, !self.released else { return }
+            if self.reveal.confirmed(generation: gen) { self.panel.alphaValue = 1 }
+        }
     }
 
     private func pushTarget(_ js: String) {
@@ -460,6 +500,7 @@ final class OverlayHandle: NSObject, WKNavigationDelegate {
         webView.sdEvaluate(js) { [weak self] _, _ in
             guard let self = self, !self.released else { return }
             if let next = self.targetPush.complete() { self.sendTarget(next) }
+            else { self.confirmPaintIfHidden() }
         }
     }
 
@@ -762,6 +803,65 @@ enum OverlayFrameSource {
 /// is handed; when the web process falls behind, the backlog makes the
 /// overlay replay stale sizes. Payloads offered while one is outstanding
 /// replace each other, and only the newest is sent once it completes.
+// MARK: - Cross-display reveal (pure, testable)
+
+enum OverlayScreens {
+    /// True when `from` and `to` sit on different screens (by center point,
+    /// AppKit coordinates). A `.zero` or off-screen `from` is a first
+    /// placement, not a crossing.
+    static func crossesScreens(from: CGRect, to: CGRect, screens: [CGRect]) -> Bool {
+        guard from != .zero else { return false }
+        func index(_ r: CGRect) -> Int? {
+            screens.firstIndex { $0.contains(CGPoint(x: r.midX, y: r.midY)) }
+        }
+        guard let a = index(from), let b = index(to) else { return false }
+        return a != b
+    }
+}
+
+/// Holds a window-attached panel transparent after a retarget that crossed
+/// displays. The new display's backing scale makes the WebView repaint, and
+/// until it does the compositor shows the previous target's border stretched
+/// over the new frame. Revealed by a confirm that the page painted (issued
+/// only once the target push is idle, so it lands after the new geometry),
+/// or by a fallback. Every retarget while hidden restarts the wait; a
+/// confirm or fallback for an older generation is ignored.
+struct OverlayRevealGate {
+    private(set) var hiddenGeneration: Int?
+    private var generation = 0
+    private var confirming: Int?
+
+    /// Returns true when the caller must hide the panel now.
+    mutating func retargeted(crossedScreens: Bool) -> Bool {
+        guard crossedScreens || hiddenGeneration != nil else { return false }
+        let wasHidden = hiddenGeneration != nil
+        generation += 1
+        hiddenGeneration = generation
+        confirming = nil
+        return !wasHidden
+    }
+
+    /// The generation to confirm a paint for, or nil when nothing is hidden,
+    /// a confirm is already out, or a target push hasn't finished.
+    mutating func confirmation(pushInFlight: Bool) -> Int? {
+        guard let h = hiddenGeneration, confirming == nil, !pushInFlight else { return nil }
+        confirming = h
+        return h
+    }
+
+    /// Returns true when the caller must reveal the panel now.
+    mutating func confirmed(generation g: Int) -> Bool {
+        if confirming == g { confirming = nil }
+        guard hiddenGeneration == g else { return false }
+        hiddenGeneration = nil
+        return true
+    }
+
+    mutating func fallback(generation g: Int) -> Bool {
+        confirmed(generation: g)
+    }
+}
+
 struct NewestWinsPush {
     private(set) var inFlight = false
     private var held: String?
