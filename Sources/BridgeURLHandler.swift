@@ -50,7 +50,7 @@ extension Bridge {
                     guard let webView = bridge?.webView else { return }
                     let json = Bridge.jsonify(payload)
                     DispatchQueue.main.async {
-                        webView.evaluateJavaScript("window.__sd_urlhandler_fire && window.__sd_urlhandler_fire(\(id), \(json));",
+                        webView.sdEvaluate("window.__sd_urlhandler_fire && window.__sd_urlhandler_fire(\(id), \(json));",
                                                    completionHandler: nil)
                     }
                 }

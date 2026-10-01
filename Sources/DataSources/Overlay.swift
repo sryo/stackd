@@ -325,7 +325,7 @@ final class OverlayHandle: NSObject, WKNavigationDelegate {
     func evaluate(_ js: String) {
         if released { return }
         if navigationReady {
-            webView.evaluateJavaScript(js, completionHandler: nil)
+            webView.sdEvaluate(js, completionHandler: nil)
         } else {
             // Append rather than replace — multiple eval calls during the
             // load window must all run on flush. pendingTargetJS already
@@ -457,7 +457,7 @@ final class OverlayHandle: NSObject, WKNavigationDelegate {
     }
 
     private func sendTarget(_ js: String) {
-        webView.evaluateJavaScript(js) { [weak self] _, _ in
+        webView.sdEvaluate(js) { [weak self] _, _ in
             guard let self = self, !self.released else { return }
             if let next = self.targetPush.complete() { self.sendTarget(next) }
         }
@@ -486,7 +486,7 @@ final class OverlayHandle: NSObject, WKNavigationDelegate {
         }
         if let pending = pendingEvalJS {
             pendingEvalJS = nil
-            webView.evaluateJavaScript(pending, completionHandler: nil)
+            webView.sdEvaluate(pending, completionHandler: nil)
         }
     }
 
@@ -1742,7 +1742,7 @@ final class RegionOverlayHandle: NSObject, WKNavigationDelegate {
     func evaluate(_ js: String) {
         if released { return }
         if navigationReady {
-            webView.evaluateJavaScript(js, completionHandler: nil)
+            webView.sdEvaluate(js, completionHandler: nil)
         } else {
             pendingEvalJS = (pendingEvalJS ?? "") + ";" + js
         }
@@ -1763,7 +1763,7 @@ final class RegionOverlayHandle: NSObject, WKNavigationDelegate {
         navigationReady = true
         if let pending = pendingEvalJS {
             pendingEvalJS = nil
-            webView.evaluateJavaScript(pending, completionHandler: nil)
+            webView.sdEvaluate(pending, completionHandler: nil)
         }
     }
 }

@@ -13,6 +13,7 @@ SWIFT_SOURCES=(
   Sources/Log.swift
   Sources/StackWindow.swift
   Sources/PassthroughWebView.swift
+  Sources/WebViewEval.swift
   Sources/ScreenshotHider.swift
   Sources/StackMaterial.swift
   Sources/StackHost.swift

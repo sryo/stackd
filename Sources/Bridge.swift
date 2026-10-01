@@ -642,7 +642,7 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         guard let webView = webView else { return }
         let payload = Bridge.jsonify(Bridge.screenInfo(screen: screen, index: index))
         let script = "window.__sd_screen=\(payload);if(window.sd&&sd.screen)sd.screen.current=window.__sd_screen;window.dispatchEvent(new CustomEvent('sd:screen',{detail:window.__sd_screen}));"
-        webView.evaluateJavaScript(script, completionHandler: nil)
+        webView.sdEvaluate(script, completionHandler: nil)
     }
 
     /// Detail can hold any JSON-compatible Any (String, Int, Bool, Array, Dict).
@@ -745,11 +745,11 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         let inline = evalGate.shouldRunInline(isMain: Thread.isMainThread)
         evalGateLock.unlock()
         if inline {
-            webView.evaluateJavaScript(script, completionHandler: nil)
+            webView.sdEvaluate(script, completionHandler: nil)
             return
         }
         DispatchQueue.main.async { [weak self] in
-            webView.evaluateJavaScript(script, completionHandler: nil)
+            webView.sdEvaluate(script, completionHandler: nil)
             guard let self = self else { return }
             self.evalGateLock.lock()
             self.evalGate.drained()

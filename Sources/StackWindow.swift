@@ -230,7 +230,7 @@ final class StackWindow: NSPanel, WKNavigationDelegate {
         let name = webView.url?.host ?? "?"
         log("stack '\(name)' frame=\(Int(f.minX)),\(Int(f.minY)) \(Int(f.width))×\(Int(f.height)) display=\(displayId)")
         let js = "window.dispatchEvent(new CustomEvent('stackd:frame',{detail:{x:\(f.minX),y:\(f.minY),w:\(f.width),h:\(f.height),displayId:\(displayId)}}))"
-        webView.evaluateJavaScript(js, completionHandler: nil)
+        webView.sdEvaluate(js, completionHandler: nil)
     }
 
     /// Build the backing material view (NSVisualEffectView for `.vibrancy`,
@@ -514,7 +514,7 @@ final class StackWindow: NSPanel, WKNavigationDelegate {
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         log("webview did-finish \(webView.url?.absoluteString ?? "?")")
-        webView.evaluateJavaScript("window.dispatchEvent(new Event('stackd:load'))", completionHandler: nil)
+        webView.sdEvaluate("window.dispatchEvent(new Event('stackd:load'))", completionHandler: nil)
         // Latch the loaded flag so a later first-arm (invocable stack on
         // first invoke) knows it can skip the fallback-timer wait.
         hasFinishedLoad = true

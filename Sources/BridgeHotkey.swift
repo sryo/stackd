@@ -60,7 +60,7 @@ extension Bridge {
                     // async to keep main from re-entering JS while a script is mid-flight.
                     guard let webView = bridge?.webView else { return }
                     DispatchQueue.main.async {
-                        webView.evaluateJavaScript("window.__sd_hotkey_fire && window.__sd_hotkey_fire(\(id));",
+                        webView.sdEvaluate("window.__sd_hotkey_fire && window.__sd_hotkey_fire(\(id));",
                                                    completionHandler: nil)
                     }
                 }

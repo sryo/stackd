@@ -201,7 +201,7 @@ final class StackHost {
         let js = "document.documentElement.style.setProperty(\"\(p)\", \"\(v)\");"
         for k in keys {
             guard let win = windows[k] else { continue }
-            DispatchQueue.main.async { win.webView.evaluateJavaScript(js, completionHandler: nil) }
+            DispatchQueue.main.async { win.webView.sdEvaluate(js, completionHandler: nil) }
         }
         return true
     }
@@ -236,7 +236,7 @@ final class StackHost {
             // sd.bind doesn't strictly need this (subscriptions die with the
             // WebView), but stacks can listen for `stackd:unload` to save
             // state, log, or release things outside the page lifecycle.
-            win.webView.evaluateJavaScript(
+            win.webView.sdEvaluate(
                 "window.dispatchEvent(new Event('stackd:unload'))",
                 completionHandler: nil
             )
@@ -256,7 +256,7 @@ final class StackHost {
     private func unloadAllInstances(baseId: String) {
         let keys = windows.keys.filter { $0 == baseId || $0.hasPrefix(baseId + "@") }
         for k in keys {
-            windows[k]?.webView.evaluateJavaScript(
+            windows[k]?.webView.sdEvaluate(
                 "window.dispatchEvent(new Event('stackd:unload'))",
                 completionHandler: nil
             )

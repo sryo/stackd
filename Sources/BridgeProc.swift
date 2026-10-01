@@ -55,7 +55,7 @@ extension Bridge {
                     let json = Bridge.jsonify(payload)
                     // Proc.stream already hops to main before invoking onEvent;
                     // evaluateJavaScript runs synchronously from here.
-                    webView.evaluateJavaScript(
+                    webView.sdEvaluate(
                         "window.__sd_proc_stream_fire && window.__sd_proc_stream_fire(\(id), \(json));",
                         completionHandler: nil
                     )
