@@ -180,6 +180,10 @@ final class Bridge: NSObject, WKScriptMessageHandler {
     // camera.stream.start / .stop closures can mint and release stream handles.
     var cameraStreamHandles: [Int: Token] = [:]
     var nextCameraStreamId: Int = 1
+    // sd.windows.stream() handles — one WindowStream timer per entry, pushed
+    // on "windows:stream:<id>". Drained on stack unload like camera streams.
+    var windowStreamHandles: [Int: Token] = [:]
+    var nextWindowStreamId: Int = 1
     // sd.speech.listen handles — one Listener per active listen() call. The
     // Listener owns the SFSpeechRecognizer task + AVAudioEngine + tap, so the
     // Token's cancel calls listener.stop() (which removes the tap, cancels
@@ -574,6 +578,11 @@ final class Bridge: NSObject, WKScriptMessageHandler {
             guard let self = self else { return }
             for (_, t) in self.cameraStreamHandles { t.cancel() }
             self.cameraStreamHandles.removeAll()
+        })
+        scope.adopt(Token { [weak self] in
+            guard let self = self else { return }
+            for (_, t) in self.windowStreamHandles { t.cancel() }
+            self.windowStreamHandles.removeAll()
         })
         // Speech listeners — stop every active SFSpeechRecognizer task +
         // audio tap owned by this stack. Without this, a stack that hot-

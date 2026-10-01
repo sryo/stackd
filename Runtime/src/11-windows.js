@@ -220,6 +220,53 @@ sd.windows = {
         quality: o.quality ?? 0.85   // canonical default lives here, not in Swift
       });
     },
+    // Live thumbnail of one window, re-captured by the daemon at `fps`
+    // (default 10, max 30) and scaled to `width` device pixels wide. Only
+    // changed frames are pushed. Works for minimized / hidden / off-space
+    // windows, like snapshot().
+    //   const s = sd.windows.stream(wid, { fps: 15, width: 280 });
+    //   s.subscribe(({ dataURL, width, height }) => { img.src = dataURL; });
+    //   // ...later...
+    //   await s.stop();
+    stream(id, opts) {
+      const o = opts || {};
+      const localSubs = new Set();
+      let realCh = null;
+      let realId = null;
+      let stopped = false;
+      // The channel replays its current value (null until the first frame)
+      // to each new subscriber; callbacks only ever see real frames.
+      const framesOnly = (fn) => (f) => { if (f) fn(f); };
+      const start = request({
+        type:     "windows.stream.start",
+        windowId: id,
+        fps:      o.fps,
+        width:    o.width,
+        quality:  o.quality ?? 0.7
+      }).then((sid) => {
+        if (sid == null) return null;
+        if (stopped) { request({ type: "windows.stream.stop", id: sid }); return null; }
+        realId = sid;
+        realCh = channel("windows:stream:" + sid);
+        for (const fn of localSubs) realCh.subscribe(framesOnly(fn));
+        localSubs.clear();
+        return sid;
+      });
+      return {
+        get id() { return realId; },
+        subscribe(fn) {
+          if (realCh) return realCh.subscribe(framesOnly(fn));
+          localSubs.add(fn);
+          return () => { localSubs.delete(fn); };
+        },
+        async stop() {
+          stopped = true;
+          const sid = await start;
+          if (sid == null) return false;
+          return request({ type: "windows.stream.stop", id: sid });
+        }
+      };
+    },
     // Multi-window frame batch. setFrame calls with an explicit id inside
     // the closure are queued (last-write-wins per window) and applied in one
     // daemon-side burst on closure return — every frame rides the same AX

@@ -251,6 +251,36 @@ extension Bridge {
                 )
             },
 
+            // Live per-window thumbnail: a WindowStream re-captures the
+            // window at `fps` (default 10, max 30), scales it to `width`
+            // pixels wide and pushes each changed frame as
+            // { dataURL, width, height } on "windows:stream:<id>". Same
+            // handle-table + scope-drain shape as camera.stream. Returns the
+            // handle id; JS wraps it as { id, subscribe, stop }.
+            .syncBridge("windows.stream.start", permission: "windows") { bridge, body in
+                let windowID = CGWindowID((body["windowId"] as? Int) ?? 0)
+                let width = (body["width"] as? Int).flatMap { $0 > 0 ? $0 : nil }
+                let quality = max(0, min(1, (body["quality"] as? Double) ?? 0.7))
+                let id = bridge.nextWindowStreamId
+                bridge.nextWindowStreamId += 1
+                let channel = "windows:stream:\(id)"
+                let stream = WindowStream.forWindow(
+                    windowID, fps: WindowStream.clampedFps(body["fps"] as? Double),
+                    maxWidth: width, quality: quality
+                ) { [weak bridge] frame in
+                    bridge?.push(channel: channel, json: Bridge.jsonify(frame))
+                }
+                bridge.windowStreamHandles[id] = Token { stream.stop() }
+                stream.start()
+                return id
+            },
+            .syncBridge("windows.stream.stop", permission: "windows", denyValue: false) { b, body in
+                guard let id = body["id"] as? Int,
+                      let t = b.windowStreamHandles.removeValue(forKey: id) else { return false }
+                t.cancel()
+                return true
+            },
+
             // Multi-window frame batch. begin installs the WindowsByID.batchSink
             // that queues per-id setFrame frames; commit applies them all through
             // the normal AX write path in one main-thread burst and clears the
