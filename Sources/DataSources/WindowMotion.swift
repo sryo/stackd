@@ -179,6 +179,42 @@ enum FrameWriteOrder: Equatable {
     }
 }
 
+/// The AX writes that land a final frame. Size→position→size, the
+/// hs.window:setFrame sequence — preceded by a lift when the window
+/// overhangs the display it is headed for: AppKit refuses a size write
+/// that keeps a window hanging past its display's edge (seen on a portrait
+/// display stacked above another), so from there the sizes never take and
+/// the window stays taller than asked. Moving it fully inside at its
+/// current size first lets the size land.
+enum FrameWriteSteps {
+    enum Step: Equatable {
+        case position(CGPoint)
+        case size(CGSize)
+    }
+
+    static func plan(current: CGRect?, target: CGRect, display: CGRect?) -> [Step] {
+        let write: [Step] = [.size(target.size), .position(target.origin), .size(target.size)]
+        guard let c = current, let d = display,
+              c.intersects(d), !d.insetBy(dx: -1, dy: -1).contains(c) else { return write }
+        let x = c.width >= d.width ? d.minX : min(max(c.minX, d.minX), d.maxX - c.width)
+        let y = c.height >= d.height ? d.minY : min(max(c.minY, d.minY), d.maxY - c.height)
+        return [.position(CGPoint(x: x, y: y))] + write
+    }
+
+    /// Where to move a window the app held larger than `target`, so it stays
+    /// on the display the target lies on instead of hanging off its edge
+    /// (where it would read as the neighboring display's window). nil when
+    /// the target itself isn't inside the display or the landed frame is.
+    static func keepInside(target: CGRect, landed: CGRect, display: CGRect?) -> CGPoint? {
+        guard let d = display else { return nil }
+        let slack = d.insetBy(dx: -1, dy: -1)
+        guard slack.contains(target), !slack.contains(landed) else { return nil }
+        let x = landed.width >= d.width ? d.minX : min(max(landed.minX, d.minX), d.maxX - landed.width)
+        let y = landed.height >= d.height ? d.minY : min(max(landed.minY, d.minY), d.maxY - landed.height)
+        return CGPoint(x: x, y: y)
+    }
+}
+
 /// Pure scheduling core. One registration per window (last-write-wins).
 /// Start times are assigned by the FIRST tick a registration sees, not at
 /// register time — every window registered between two ticks starts on the

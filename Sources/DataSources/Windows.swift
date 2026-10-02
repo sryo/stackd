@@ -1267,9 +1267,11 @@ enum WindowsByID {
         // first lets AX honor the new dimensions; the second size set is
         // the standard hs.window:setFrame belt-and-suspenders for apps
         // that clamped the first size against the still-old position.
+        liftIfOverhanging(element: el, target: frame)
         _ = AXUIElementSetAttributeValue(el, kAXSizeAttribute     as CFString, szVal)
         let pOK = AXUIElementSetAttributeValue(el, kAXPositionAttribute as CFString, posVal)
         let sOK = AXUIElementSetAttributeValue(el, kAXSizeAttribute     as CFString, szVal)
+        keepInsideIfHeldLarger(element: el, target: frame)
         return pOK == .success && sOK == .success
     }
 
@@ -1315,6 +1317,46 @@ enum WindowsByID {
     /// case, and the read-back catches the rest. Skipping the third set
     /// saves one AX round trip and one extra app layout pass per settle.
     /// Thread-agnostic.
+    /// The lift step of FrameWriteSteps: a window overhanging the display
+    /// its target is on moves fully inside at its current size before the
+    /// size writes, which AppKit otherwise refuses. Thread-agnostic.
+    static func liftIfOverhanging(element el: AXUIElement, target: CGRect) {
+        guard let display = displayBounds(for: target),
+              let current = axFrame(element: el),
+              case .position(var lift)? = FrameWriteSteps.plan(current: current, target: target, display: display).first,
+              let liftVal = AXValueCreate(.cgPoint, &lift) else { return }
+        _ = AXUIElementSetAttributeValue(el, kAXPositionAttribute as CFString, liftVal)
+    }
+
+    /// The keepInside step of FrameWriteSteps: a window the app held larger
+    /// than the target moves back onto the target's display. Thread-agnostic.
+    static func keepInsideIfHeldLarger(element el: AXUIElement, target: CGRect) {
+        guard let landed = axFrame(element: el),
+              var origin = FrameWriteSteps.keepInside(target: target, landed: landed,
+                                                      display: displayBounds(for: target)),
+              let val = AXValueCreate(.cgPoint, &origin) else { return }
+        _ = AXUIElementSetAttributeValue(el, kAXPositionAttribute as CFString, val)
+    }
+
+    private static func displayBounds(for target: CGRect) -> CGRect? {
+        let displays = MotionClock.activeDisplays()
+        guard let id = MotionClock.display(for: target, displays: displays) else { return nil }
+        return displays.first(where: { $0.id == id })?.bounds
+    }
+
+    private static func axFrame(element el: AXUIElement) -> CGRect? {
+        var posRef: CFTypeRef?, sizeRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(el, kAXPositionAttribute as CFString, &posRef) == .success,
+              AXUIElementCopyAttributeValue(el, kAXSizeAttribute as CFString, &sizeRef) == .success,
+              let p = posRef, let z = sizeRef else { return nil }
+        var pos = CGPoint.zero, size = CGSize.zero
+        // swiftlint:disable force_cast
+        guard AXValueGetValue(p as! AXValue, .cgPoint, &pos),
+              AXValueGetValue(z as! AXValue, .cgSize, &size) else { return nil }
+        // swiftlint:enable force_cast
+        return CGRect(origin: pos, size: size)
+    }
+
     static func settleFrameAX(element el: AXUIElement, frame: CGRect, order: FrameWriteOrder) -> Bool {
         var pos = frame.origin
         var sz = frame.size
@@ -1322,6 +1364,7 @@ enum WindowsByID {
               let szVal = AXValueCreate(.cgSize, &sz) else { return false }
         var pOK: AXError
         var sOK: AXError
+        liftIfOverhanging(element: el, target: frame)
         switch order {
         case .positionThenSize:
             pOK = AXUIElementSetAttributeValue(el, kAXPositionAttribute as CFString, posVal)
@@ -1340,6 +1383,7 @@ enum WindowsByID {
         }
         if FrameWriteOrder.needsSizeReassert(target: frame, readBack: readBack) {
             sOK = AXUIElementSetAttributeValue(el, kAXSizeAttribute as CFString, szVal)
+            keepInsideIfHeldLarger(element: el, target: frame)
         }
         return pOK == .success && sOK == .success
     }

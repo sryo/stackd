@@ -272,6 +272,66 @@ func registerMotionPlannerTests() {
                    "an unreadable size is not evidence of a mismatch")
     }
 
+    // Finder on a portrait display above another: a window hanging past
+    // its display's bottom edge refuses size writes that keep it hanging,
+    // so size→position→size from there leaves it stuck taller than asked.
+    test("FrameWriteSteps: a window hanging off its target display is lifted inside first") {
+        let display = rect(77, -2560, 1080, 2560)
+        let current = rect(77, -622, 1080, 684)
+        let target = rect(77, -622, 1080, 622)
+        try expectEqual(FrameWriteSteps.plan(current: current, target: target, display: display), [
+            .position(CGPoint(x: 77, y: -684)),
+            .size(target.size), .position(target.origin), .size(target.size),
+        ])
+    }
+
+    test("FrameWriteSteps: a window already inside its display writes size→position→size") {
+        let display = rect(0, 0, 1710, 1112)
+        let target = rect(855, 38, 855, 1074)
+        let plain: [FrameWriteSteps.Step] = [.size(target.size), .position(target.origin), .size(target.size)]
+        try expectEqual(FrameWriteSteps.plan(current: rect(0, 38, 1710, 1074), target: target, display: display), plain)
+        try expectEqual(FrameWriteSteps.plan(current: nil, target: target, display: display), plain)
+        try expectEqual(FrameWriteSteps.plan(current: rect(0, 38, 1710, 1074), target: target, display: nil), plain)
+    }
+
+    test("FrameWriteSteps: a cross-display move is not lifted onto the destination") {
+        // Current frame on another display entirely: the lift only rescues a
+        // window overhanging the display it is headed for.
+        let display = rect(77, -2560, 1080, 2560)
+        let target = rect(77, -941, 1080, 941)
+        try expectEqual(FrameWriteSteps.plan(current: rect(0, 38, 855, 1074), target: target, display: display),
+                        [.size(target.size), .position(target.origin), .size(target.size)])
+    }
+
+    test("FrameWriteSteps: a lift clamps a window larger than the display to its top-left") {
+        let display = rect(0, 0, 1710, 1112)
+        let target = rect(0, 38, 855, 1074)
+        let steps = FrameWriteSteps.plan(current: rect(100, 500, 2000, 1500), target: target, display: display)
+        try expectEqual(steps.first, .position(CGPoint(x: 0, y: 0)))
+    }
+
+    // Finder asked for 50px at the bottom of a portrait display holds its
+    // 252px minimum at the written origin — hanging 202px onto the display
+    // below, where it reads as that display's window.
+    test("FrameWriteSteps.keepInside: a size the app held larger is pulled back onto the display") {
+        let display = rect(77, -2560, 1080, 2560)
+        let target = rect(77, -50, 1080, 50)
+        let landed = rect(77, -50, 1080, 252)
+        try expectEqual(FrameWriteSteps.keepInside(target: target, landed: landed, display: display),
+                        CGPoint(x: 77, y: -252))
+    }
+
+    test("FrameWriteSteps.keepInside: a frame that landed inside, or a target off the display, is left alone") {
+        let display = rect(77, -2560, 1080, 2560)
+        try expectEqual(FrameWriteSteps.keepInside(target: rect(77, -300, 1080, 252), landed: rect(77, -300, 1080, 260),
+                                                   display: display), nil)
+        // The caller asked for a frame hanging off the display: honor it.
+        try expectEqual(FrameWriteSteps.keepInside(target: rect(77, -50, 1080, 300), landed: rect(77, -50, 1080, 300),
+                                                   display: display), nil)
+        try expectEqual(FrameWriteSteps.keepInside(target: rect(77, -50, 1080, 50), landed: rect(77, -50, 1080, 252),
+                                                   display: nil), nil)
+    }
+
     test("MotionRouting: duration or spring animates when Reduce Motion is off") {
         try expect(MotionRouting.animates(duration: 0.25, easing: nil, reduceMotion: false, respectReduceMotion: true))
         try expect(MotionRouting.animates(duration: 0, easing: .spring, reduceMotion: false, respectReduceMotion: true))
