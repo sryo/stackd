@@ -44,6 +44,17 @@ func registerWindowsTests() {
 
     // MARK: - WindowsLifecycleObserver.detail (pure: Snap → JSON dict)
 
+    test("isAppWindowLevel admits normal, floating and modal-panel levels only") {
+        try expect(Windows.isAppWindowLevel(Int(CGWindowLevelForKey(.normalWindow))))
+        try expect(Windows.isAppWindowLevel(Int(CGWindowLevelForKey(.floatingWindow))))
+        try expect(Windows.isAppWindowLevel(Int(CGWindowLevelForKey(.modalPanelWindow))))
+        try expect(!Windows.isAppWindowLevel(Int(CGWindowLevelForKey(.mainMenuWindow))))
+        try expect(!Windows.isAppWindowLevel(Int(CGWindowLevelForKey(.statusWindow))))
+        try expect(!Windows.isAppWindowLevel(Int(CGWindowLevelForKey(.popUpMenuWindow))))
+        try expect(!Windows.isAppWindowLevel(Int(CGWindowLevelForKey(.screenSaverWindow))))
+        try expect(!Windows.isAppWindowLevel(-1))
+    }
+
     test("detail maps a Snap into the documented bang-detail dict shape") {
         // Every `sd.window.created` / `.destroyed` / `.titleChanged` payload
         // that the polling observer pushes to JS is built here. Locks the

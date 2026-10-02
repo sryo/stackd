@@ -283,6 +283,20 @@ enum Windows {
     /// stackd's own panels can opt in.
     private static let ownPid: Int = Int(ProcessInfo.processInfo.processIdentifier)
 
+    /// Window-server levels an app's own document windows live at: normal,
+    /// floating ("keep on top" windows, e.g. Claude's main window when
+    /// pinned) and modal panel — yabai's standard-level set. Menus, status
+    /// items, popups and screen-saver-level overlays stay out.
+    private static let appWindowLevels: Set<Int> = [
+        Int(CGWindowLevelForKey(.normalWindow)),
+        Int(CGWindowLevelForKey(.floatingWindow)),
+        Int(CGWindowLevelForKey(.modalPanelWindow)),
+    ]
+
+    static func isAppWindowLevel(_ layer: Int) -> Bool {
+        appWindowLevels.contains(layer)
+    }
+
     static func all(includeOwn: Bool = false, includeNonStandard: Bool = false) -> [[String: Any]] {
         // SLSCopyWindowsWithOptionsAndTags is the yabai-style "authoritative"
         // path but crashes inside SkyLight on macOS 26 (Tahoe) — repro: any
@@ -317,7 +331,7 @@ enum Windows {
         return list.compactMap { info -> [String: Any]? in
             guard let num   = info[kCGWindowNumber as String]    as? Int,
                   let layer = info[kCGWindowLayer  as String]    as? Int,
-                  layer == 0,
+                  Windows.isAppWindowLevel(layer),
                   let owner = info[kCGWindowOwnerName as String] as? String,
                   let pid   = info[kCGWindowOwnerPID  as String] as? Int,
                   let bounds = info[kCGWindowBounds as String]   as? [String: CGFloat]
@@ -357,6 +371,7 @@ enum Windows {
                 "addressable": probe.addressable,
                 "isStandard":  probe.isStandard,
                 "isMinimized": probe.isMinimized,
+                "level": layer,
                 "frame": [
                     "x": originX,
                     "y": originY,
@@ -2941,16 +2956,16 @@ enum WindowEvents {
             WindowServerIntake.requestSpaces()
             return
         }
-        // Snap from CGWindowList; layer-0 standard candidates only. Title
+        // Snap from CGWindowList; app-level standard candidates only. Title
         // via kCGWindowName is TCC-gated (screen recording) — empty is fine,
         // AX fills it in on its own create/titleChanged pass.
         guard let info = WindowsByID.windowInfo(windowID: cgWid),
-              (info[kCGWindowLayer as String] as? Int) == 0,
+              (info[kCGWindowLayer as String] as? Int).map(Windows.isAppWindowLevel) == true,
               let pid = info[kCGWindowOwnerPID as String] as? Int
         else { return }
         // Before the subrole gate below, which needs AX for this app.
         WindowsAXObserver.shared.ensurePerWindow(pid: pid_t(pid), wid: cgWid)
-        // Standard-window gate (positive verdict only): layer 0 alone
+        // Standard-window gate (positive verdict only): the level gate alone
         // admits app helper windows — Arc's tab-creation hint, Chromium
         // bubbles, tooltips-with-a-layer. Non-standard or not-yet-readable
         // subroles fall back to the AX create path and its retry ladder.
@@ -3140,7 +3155,7 @@ final class WindowAnimationObserver {
         for entry in info {
             guard let wid = entry[kCGWindowNumber as String] as? CGWindowID else { continue }
             listed.insert(wid)
-            guard (entry[kCGWindowLayer as String] as? Int) == 0,
+            guard (entry[kCGWindowLayer as String] as? Int).map(Windows.isAppWindowLevel) == true,
                   WindowsAXObserver.shared.pidFor(wid: wid) != nil,
                   let dict = entry[kCGWindowBounds as String] as? NSDictionary,
                   let bounds = CGRect(dictionaryRepresentation: dict),
@@ -3555,7 +3570,7 @@ enum Spaces {
         let list = raw as! [[String: Any]]
         var out: [UInt32] = []
         for info in list {
-            guard let layer = info[kCGWindowLayer as String] as? Int, layer == 0,
+            guard let layer = info[kCGWindowLayer as String] as? Int, Windows.isAppWindowLevel(layer),
                   let num = info[kCGWindowNumber as String] as? Int else { continue }
             let onscreen = (info[kCGWindowIsOnscreen as String] as? Int) ?? 0
             if onscreen != 0 { continue }
