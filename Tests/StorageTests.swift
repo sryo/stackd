@@ -7,7 +7,8 @@ import Foundation
 //      ("com.stackd.stack.<id>") + NSNull sanitization are bug-prone:
 //      NSNull anywhere in a nested array/dict crashes the plist writer if
 //      it leaks through. We hammer the sanitize path indirectly via set/get
-//      using a UUID-prefixed suite so the user's real defaults stay untouched.
+//      using a scratch suite (withScratchSettings) so the user's real
+//      defaults stay untouched.
 //
 //   2. SQLite. Path resolution (":memory:" / absolute / per-stack default),
 //      mode parsing (readonly vs rw+create), and the typed parameter binding
@@ -19,108 +20,117 @@ import Foundation
 // (real ~ expansion is fine; pasteboard mutation isn't) — we only exercise
 // the pure / temp-scoped corners here.
 
+/// A scratch StackSettings suite for one test. Scratch suites use a fixed
+/// set of names, emptied before and after use: cfprefsd writes each suite's
+/// plist into ~/Library/Preferences on its own schedule — after any in-test
+/// cleanup — so a fresh name per run leaves one more (empty) file behind
+/// every run. `slot` picks one of the fixed names, for tests that need two
+/// suites at once.
+private func withScratchSettings(slot: Int = 0, _ body: (StackSettings) throws -> Void) rethrows {
+    let settings = StackSettings(stackId: scratchSettingsId(slot: slot))
+    let domain = "com.stackd.stack.\(settings.stackId)"
+    settings.suite.removePersistentDomain(forName: domain)
+    defer { settings.suite.removePersistentDomain(forName: domain) }
+    try body(settings)
+}
+
+private func scratchSettingsId(slot: Int) -> String { "test-scratch-\(slot)" }
+
 func registerStorageTests() {
     // MARK: - StackSettings (per-stack UserDefaults suite)
 
+    test("scratch settings suites reuse fixed names, so runs don't pile up preference files") {
+        var names: [String] = []
+        for _ in 0..<2 { withScratchSettings { names.append($0.stackId) } }
+        try expectEqual(names[0], names[1])
+        try expect(UUID(uuidString: String(names[0].suffix(36))) == nil,
+                   "scratch suite name \(names[0]) is per-run unique")
+    }
+
+    test("a scratch suite starts empty even when an earlier run left keys behind") {
+        // A run that crashed mid-test never reached its cleanup.
+        StackSettings(stackId: scratchSettingsId(slot: 0)).set("left-over", "x")
+        try withScratchSettings { settings in
+            try expectEqual(settings.all().count, 0)
+        }
+    }
+
     test("StackSettings round-trips primitive + dict values in an isolated suite") {
-        // UUID-prefixed stackId → unique suite name; cleaned up at the end so
-        // we never pollute com.stackd.stack.* with test debris.
-        let stackId = "test-\(UUID().uuidString)"
-        let settings = StackSettings(stackId: stackId)
-        defer {
-            settings.suite.removePersistentDomain(forName: "com.stackd.stack.\(stackId)")
-        }
+        try withScratchSettings { settings in
+            settings.set("greeting", "hello")
+            settings.set("count", 42)
+            settings.set("nested", ["a": 1, "b": "two"] as [String: Any])
 
-        settings.set("greeting", "hello")
-        settings.set("count", 42)
-        settings.set("nested", ["a": 1, "b": "two"] as [String: Any])
-
-        try expectEqual(settings.get("greeting") as? String, "hello")
-        try expectEqual(settings.get("count") as? Int, 42)
-        guard let nested = settings.get("nested") as? [String: Any] else {
-            throw Expectation(message: "nested dict missing after round-trip")
+            try expectEqual(settings.get("greeting") as? String, "hello")
+            try expectEqual(settings.get("count") as? Int, 42)
+            guard let nested = settings.get("nested") as? [String: Any] else {
+                throw Expectation(message: "nested dict missing after round-trip")
+            }
+            try expectEqual(nested["a"] as? Int, 1)
+            try expectEqual(nested["b"] as? String, "two")
         }
-        try expectEqual(nested["a"] as? Int, 1)
-        try expectEqual(nested["b"] as? String, "two")
     }
 
     test("StackSettings.set with NSNull at top level deletes the key") {
         // The sanitize path returns nil for top-level NSNull → set should
         // route through removeObject rather than crashing the plist writer.
-        let stackId = "test-\(UUID().uuidString)"
-        let settings = StackSettings(stackId: stackId)
-        defer {
-            settings.suite.removePersistentDomain(forName: "com.stackd.stack.\(stackId)")
+        try withScratchSettings { settings in
+            settings.set("k", "initial")
+            try expectEqual(settings.get("k") as? String, "initial")
+
+            settings.set("k", NSNull())
+            try expect(settings.get("k") == nil, "expected nil after NSNull set, got \(String(describing: settings.get("k")))")
         }
-
-        settings.set("k", "initial")
-        try expectEqual(settings.get("k") as? String, "initial")
-
-        settings.set("k", NSNull())
-        try expect(settings.get("k") == nil, "expected nil after NSNull set, got \(String(describing: settings.get("k")))")
     }
 
     test("StackSettings.set strips NSNull from nested arrays and dicts") {
         // The sanitize recursion must drop NSNull from inside arrays and
         // dicts — UserDefaults' plist writer crashes if any leak through.
-        let stackId = "test-\(UUID().uuidString)"
-        let settings = StackSettings(stackId: stackId)
-        defer {
-            settings.suite.removePersistentDomain(forName: "com.stackd.stack.\(stackId)")
-        }
+        try withScratchSettings { settings in
+            let mixed: [Any] = ["a", NSNull(), "b", NSNull(), 3]
+            settings.set("arr", mixed)
+            guard let out = settings.get("arr") as? [Any] else {
+                throw Expectation(message: "array missing after sanitize")
+            }
+            try expectEqual(out.count, 3)
+            try expectEqual(out[0] as? String, "a")
+            try expectEqual(out[1] as? String, "b")
+            try expectEqual(out[2] as? Int, 3)
 
-        let mixed: [Any] = ["a", NSNull(), "b", NSNull(), 3]
-        settings.set("arr", mixed)
-        guard let out = settings.get("arr") as? [Any] else {
-            throw Expectation(message: "array missing after sanitize")
+            let dict: [String: Any] = ["keep": "yes", "drop": NSNull()]
+            settings.set("d", dict)
+            guard let outDict = settings.get("d") as? [String: Any] else {
+                throw Expectation(message: "dict missing after sanitize")
+            }
+            try expectEqual(outDict.count, 1)
+            try expectEqual(outDict["keep"] as? String, "yes")
+            try expect(outDict["drop"] == nil, "NSNull dict value should have been stripped")
         }
-        try expectEqual(out.count, 3)
-        try expectEqual(out[0] as? String, "a")
-        try expectEqual(out[1] as? String, "b")
-        try expectEqual(out[2] as? Int, 3)
-
-        let dict: [String: Any] = ["keep": "yes", "drop": NSNull()]
-        settings.set("d", dict)
-        guard let outDict = settings.get("d") as? [String: Any] else {
-            throw Expectation(message: "dict missing after sanitize")
-        }
-        try expectEqual(outDict.count, 1)
-        try expectEqual(outDict["keep"] as? String, "yes")
-        try expect(outDict["drop"] == nil, "NSNull dict value should have been stripped")
     }
 
     test("StackSettings.all returns only this suite's keys (no global bleed-through)") {
         // dictionaryRepresentation would include every inherited default;
         // all() must filter to keys actually written into our suite.
-        let stackId = "test-\(UUID().uuidString)"
-        let settings = StackSettings(stackId: stackId)
-        defer {
-            settings.suite.removePersistentDomain(forName: "com.stackd.stack.\(stackId)")
+        try withScratchSettings { settings in
+            settings.set("one", 1)
+            settings.set("two", "2")
+            let all = settings.all()
+            try expectEqual(all.count, 2)
+            try expectEqual(all["one"] as? Int, 1)
+            try expectEqual(all["two"] as? String, "2")
         }
-
-        settings.set("one", 1)
-        settings.set("two", "2")
-        let all = settings.all()
-        try expectEqual(all.count, 2)
-        try expectEqual(all["one"] as? Int, 1)
-        try expectEqual(all["two"] as? String, "2")
     }
 
     test("StackSettings suites are isolated across stack ids") {
         // Two different stackIds → two different suites; writes don't bleed.
-        let idA = "test-\(UUID().uuidString)"
-        let idB = "test-\(UUID().uuidString)"
-        let a = StackSettings(stackId: idA)
-        let b = StackSettings(stackId: idB)
-        defer {
-            a.suite.removePersistentDomain(forName: "com.stackd.stack.\(idA)")
-            b.suite.removePersistentDomain(forName: "com.stackd.stack.\(idB)")
+        try withScratchSettings(slot: 0) { a in
+            try withScratchSettings(slot: 1) { b in
+                a.set("shared-key", "from-a")
+                b.set("shared-key", "from-b")
+                try expectEqual(a.get("shared-key") as? String, "from-a")
+                try expectEqual(b.get("shared-key") as? String, "from-b")
+            }
         }
-
-        a.set("shared-key", "from-a")
-        b.set("shared-key", "from-b")
-        try expectEqual(a.get("shared-key") as? String, "from-a")
-        try expectEqual(b.get("shared-key") as? String, "from-b")
     }
 
     // MARK: - SQLite
