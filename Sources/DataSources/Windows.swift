@@ -4740,6 +4740,7 @@ final class WindowsAXObserver {
         let isSelf = FrameLedger.shared.isSelf(
             windowID: key.windowID, observed: frame, now: readAt
         )
+        FrameLedger.shared.observeSize(windowID: key.windowID, size: frame.size)
         WindowDebug.log("ax: window \(key.kind.rawValue) wid=\(key.windowID) self=\(isSelf)")
         AppDelegate.shared?.host?.bang(name: key.kind.bangName, detail: [
             "id": Int(key.windowID),

@@ -530,6 +530,15 @@ final class FrameLedger {
         return (m.width > 0 ? m.width : nil, m.height > 0 ? m.height : nil)
     }
 
+    /// The window was seen at `size`. A learned floor it now sits under is
+    /// contradicted — the app does go that small — so it is dropped.
+    func observeSize(windowID: CGWindowID, size: CGSize) {
+        guard var m = minSizes[windowID] else { return }
+        if m.width > 0, size.width < m.width - Self.sizeToleranceFloor { m.width = 0 }
+        if m.height > 0, size.height < m.height - Self.sizeToleranceFloor { m.height = 0 }
+        minSizes[windowID] = m
+    }
+
     /// `refused`: the app held the window at `observed` instead of
     /// `target` (a grid snap is not a refusal).
     private func learnMinSize(windowID: CGWindowID, target: CGSize, observed: CGSize, refused: Bool) {
@@ -537,10 +546,9 @@ final class FrameLedger {
         // Held above the target: the app's floor is at least this.
         if refused, observed.width > target.width + Self.sizeToleranceFloor { m.width = max(m.width, observed.width) }
         if refused, observed.height > target.height + Self.sizeToleranceFloor { m.height = max(m.height, observed.height) }
-        // Accepted below the floor: the floor was wrong (the app changed it).
-        if m.width > 0, observed.width < m.width - Self.sizeToleranceFloor { m.width = 0 }
-        if m.height > 0, observed.height < m.height - Self.sizeToleranceFloor { m.height = 0 }
         minSizes[windowID] = m
+        // Accepted below the floor: the floor was wrong (the app changed it).
+        observeSize(windowID: windowID, size: observed)
     }
 
     /// The size the app enforced the last time it refused `targetSize` for

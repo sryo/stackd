@@ -117,6 +117,30 @@ func registerFrameLedgerTests() {
         try expectEqual(l.generation(windowID: 9), 0, "clear resets")
     }
 
+    test("a learned minimum is dropped once the window is seen smaller") {
+        // A transient oversized read-back taught a floor; the window now
+        // sits well under it, so the floor must not keep blocking neighbors.
+        let l = FrameLedger()
+        let target = rect(0, 0, 800, 200)
+        let held = rect(0, 0, 800, 2529)
+        _ = l.verify(windowID: 11, target: target, observed: held)
+        _ = l.verify(windowID: 11, target: target, observed: held)
+        try expectEqual(l.minSize(windowID: 11)?.height, 2529)
+        l.observeSize(windowID: 11, size: CGSize(width: 800, height: 2278))
+        try expectEqual(l.minSize(windowID: 11)?.height, nil)
+    }
+
+    test("observing a size at or above the floor keeps it") {
+        let l = FrameLedger()
+        let target = rect(0, 0, 800, 200)
+        let held = rect(0, 0, 800, 600)
+        _ = l.verify(windowID: 12, target: target, observed: held)
+        _ = l.verify(windowID: 12, target: target, observed: held)
+        l.observeSize(windowID: 12, size: CGSize(width: 800, height: 600))
+        l.observeSize(windowID: 12, size: CGSize(width: 800, height: 598))
+        try expectEqual(l.minSize(windowID: 12)?.height, 600)
+    }
+
     test("clear drops all per-window state") {
         let l = FrameLedger()
         l.recordWrite(windowID: 8, frame: rect(1, 1, 2, 2), now: 0)
