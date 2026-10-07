@@ -2264,25 +2264,6 @@ enum WindowLifecycleFanout {
 
 // MARK: - FrontmostWindowObserver: event-driven focus/title changes
 
-/// Dedupe between the two app-activation triggers, CGS 1508 and
-/// NSWorkspace's didActivateApplication: an activation runs only for a pid
-/// other than the last one activated, so the second report of one switch
-/// is a no-op.
-struct FrontmostActivation {
-    private(set) var lastPid: pid_t?
-
-    mutating func shouldActivate(pid: pid_t) -> Bool {
-        if pid == lastPid { return false }
-        lastPid = pid
-        return true
-    }
-
-    /// Seed with the app that is frontmost now (nil forgets).
-    mutating func reset(to pid: pid_t?) {
-        lastPid = pid
-    }
-}
-
 /// When the frontmost app's focused window is read off main. Triggers (an
 /// activation, an AX focused/main-window notification) request a read for
 /// a pid; the newest requested pid is the target.
@@ -2433,7 +2414,6 @@ final class FrontmostWindowObserver: RefCountedObserver {
     private override init() { super.init() }
 
     private var currentTokens: [Token] = []
-    private var activation = FrontmostActivation()
     private var reads = FocusedReadSchedule()
     private var installRetry = AXInstallRetry()
 
@@ -2489,13 +2469,12 @@ final class FrontmostWindowObserver: RefCountedObserver {
         ])
         // Install for current frontmost immediately so subscribers don't have
         // to wait for the next app switch.
-        let front = NSWorkspace.shared.frontmostApplication?.processIdentifier
-        if let pid = front { installFor(pid: pid) }
-        activation.reset(to: front)
+        if let pid = NSWorkspace.shared.frontmostApplication?.processIdentifier {
+            installFor(pid: pid)
+        }
         return Token { [weak self] in
             ncToken.cancel()
             guard let self = self else { return }
-            self.activation.reset(to: nil)
             self.reads.reset()
             self.installRetry.reset(to: nil)
             // Cancel the pool subscriptions so the AXObserverPool tears down
@@ -2506,23 +2485,13 @@ final class FrontmostWindowObserver: RefCountedObserver {
         }
     }
 
-    /// CGS 1508 named `pid` as the new frontmost app. It lands a few ms
-    /// before didActivateApplication for the same switch; whichever comes
-    /// first runs the activation. Main thread.
-    func windowServerActivated(pid: pid_t) {
-        guard isActive else { return }
-        activate(pid: pid)
-    }
-
-    /// The app switch, once per new frontmost pid (FrontmostActivation).
+    /// The app switch (didActivateApplication). Main thread.
     private func activate(pid: pid_t) {
-        guard activation.shouldActivate(pid: pid) else { return }
         installFor(pid: pid)
         fireAppActivated()
         // The focused-window side of the switch (focusedChanged and the
         // union channel) waits for the confirmed read of this pid: a
-        // main-thread read here would block on the app, and at CGS 1508
-        // time NSWorkspace still names the previous app as frontmost.
+        // main-thread read here would block on the app.
         requestFocusedRead(pid: pid)
     }
 
@@ -2659,10 +2628,9 @@ final class FrontmostWindowObserver: RefCountedObserver {
 //           interest list. 1325 is the FAST create trigger (fires before
 //           slow AX trees publish) and the space-move signal for known
 //           windows.
-//   - 1508 — frontmost app changed. Distinct from AX's
-//            kAXFocusedWindowChangedNotification because 1508 fires on
-//            user-driven app activation specifically (mouse click,
-//            Cmd-Tab); AX focused-changed fires on programmatic focus too.
+//   - 1508: focus by mouse click, within one app too. Its payload is
+//            empty, so it names no app; it is a bang, not an activation
+//            trigger.
 //
 // Per-connection registration (`SLSRegisterConnectionNotifyProc`, yabai's
 // pattern in `src/yabai.c`).
@@ -2728,9 +2696,13 @@ private enum SkyLightWindowEvents {
 //   1327 — window animation began (payload is a counter, not a wid; the
 //                                  genie into the Dock posts it ~25ms in,
 //                                  long before AX reports the minimize)
-//   1508 — frontmost app changed  (int32 pid at offset 0; surfaced as
-//                                  sd.window.focusedByMouse and run as a
-//                                  focus trigger ahead of NSWorkspace)
+//   1508 (focused by mouse)       (empty payload on macOS 27, so no pid:
+//                                  fires on mouse clicks, within one app
+//                                  too, and lands within ~12 ms of
+//                                  didActivateApplication, on either
+//                                  side, when it does switch apps.
+//                                  Surfaced as sd.window.focusedByMouse;
+//                                  activation stays on NSWorkspace)
 //
 // Probe-only codes, named per CGSInternal's CGSNotificationType list. They
 // are counted and, under STACKD_CGS_DEBUG, logged with their payload's
@@ -2781,8 +2753,7 @@ enum CGSDecodedWindowEvent: Equatable {
     case spaceWindowCreated(wid: UInt32, spaceID: UInt64)
     case spaceWindowDestroyed(wid: UInt32, spaceID: UInt64)
     case animationBegan
-    /// nil when the payload carries no usable pid.
-    case frontmostByMouse(pid: pid_t?)
+    case frontmostByMouse
     /// A probe-only code: its leading payload words (little-endian uint32,
     /// at most `probeWordLimit`), since the layout is not known yet.
     case probe(code: UInt32, words: [UInt32])
@@ -2815,10 +2786,7 @@ enum CGSWindowEventDecoder {
             guard let s = space(at: 0), let w = wid(at: 8) else { return .malformed }
             return .spaceWindowDestroyed(wid: w, spaceID: s)
         case kSDWindowAnimationBegan: return .animationBegan
-        case kSDWindowFocusedByMouse:
-            guard let data = data, length >= 4 else { return .frontmostByMouse(pid: nil) }
-            let pid = data.loadUnaligned(fromByteOffset: 0, as: Int32.self)
-            return .frontmostByMouse(pid: pid > 0 ? pid : nil)
+        case kSDWindowFocusedByMouse: return .frontmostByMouse
         case let code where kSDProbeEventNames[code] != nil:
             let count = data == nil ? 0 : min(max(length, 0) / 4, probeWordLimit)
             return .probe(code: code, words: (0..<count).compactMap { wid(at: $0 * 4) })
@@ -3054,11 +3022,8 @@ enum WindowEvents {
             // Destroy rides 804; a space-move fires 1325 on the NEW
             // space, which re-pushes sd.spaces.all. Counted only.
             break
-        case .frontmostByMouse(let pid):
+        case .frontmostByMouse:
             host.bang(name: "sd.window.focusedByMouse", detail: [:])
-            if let pid = pid {
-                FrontmostWindowObserver.shared.windowServerActivated(pid: pid)
-            }
         case .animationBegan:
             WindowAnimationObserver.shared.animationBegan()
         case .probe, .ignored, .malformed:

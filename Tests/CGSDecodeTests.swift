@@ -35,16 +35,10 @@ func registerCGSDecodeTests() {
         try expectEqual(decode(1326, payload), .spaceWindowDestroyed(wid: 555, spaceID: 31))
     }
 
-    test("1508 decodes the frontmost pid from the first 4 bytes") {
-        try expectEqual(decode(1508, u32(4321)), .frontmostByMouse(pid: 4321))
-        try expectEqual(decode(1508, u32(4321) + u32(99)), .frontmostByMouse(pid: 4321))
-    }
-
-    test("1508 without a usable pid still decodes, with no pid") {
-        try expectEqual(decode(1508, []), .frontmostByMouse(pid: nil))
-        try expectEqual(decode(1508, [0x01, 0x02]), .frontmostByMouse(pid: nil))
-        try expectEqual(decode(1508, u32(0)), .frontmostByMouse(pid: nil))
-        try expectEqual(decode(1508, u32(UInt32(bitPattern: -1))), .frontmostByMouse(pid: nil))
+    test("1508 decodes as frontmostByMouse whatever the payload") {
+        // macOS 27 posts it with an empty payload: no pid to read.
+        try expectEqual(decode(1508, []), .frontmostByMouse)
+        try expectEqual(decode(1508, u32(4321)), .frontmostByMouse)
     }
 
     test("1327 decodes as animationBegan whatever the payload (a counter, not a wid)") {

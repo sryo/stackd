@@ -81,9 +81,8 @@ func registerWindowServerIntakeTests() {
                         IntakeKey(kind: .spaceWindowCreated, id: 3))
     }
 
-    test("IntakeEvent.key: 1508s merge into one frontmost item whatever the pid") {
-        try expectEqual(IntakeEvent.window(.frontmostByMouse(pid: 10)).key, IntakeKey(kind: .frontmost, id: 0))
-        try expectEqual(IntakeEvent.window(.frontmostByMouse(pid: nil)).key, IntakeKey(kind: .frontmost, id: 0))
+    test("IntakeEvent.key: 1508s merge into one frontmost item") {
+        try expectEqual(IntakeEvent.window(.frontmostByMouse).key, IntakeKey(kind: .frontmost, id: 0))
     }
 
     test("IntakeEvent.key: process-wide events share one key each") {
