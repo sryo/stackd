@@ -2371,6 +2371,49 @@ struct FocusedReadSchedule {
     }
 }
 
+/// When to retry installing the frontmost app's AX observers. A
+/// just-launched app is activated before it answers AX:
+/// AXObserverAddNotification fails with kAXErrorCannotComplete until it
+/// does (0.25-0.75 s measured on macOS 27 for Calculator, Font Book and
+/// Notes). Nothing announces the moment it starts answering:
+/// isFinishedLaunching and didLaunchApplication both land while the app is
+/// still refusing, so the install is retried on a backoff, as yabai does.
+/// Without the retry the app runs unobserved until the user switches away
+/// and back, and its focus changes never reach sd.windows.focusedChanged.
+///
+/// Main-thread state.
+struct AXInstallRetry {
+    static let delays: [TimeInterval] = [0.05, 0.1, 0.2, 0.4, 0.8, 1.6, 3.2]
+
+    private var pid: pid_t?
+    private var attempt = 0
+    private var token: UInt64 = 0
+
+    /// An activation installs for `pid` (nil: teardown). Cancels any pending
+    /// retry and restarts the backoff.
+    mutating func reset(to pid: pid_t?) {
+        self.pid = pid
+        attempt = 0
+        token &+= 1
+    }
+
+    /// An install for `pid` left notifications unregistered. Returns when to
+    /// try again, or nil when `pid` is no longer current or the attempts are
+    /// spent.
+    mutating func failed(pid: pid_t) -> (after: TimeInterval, token: UInt64)? {
+        guard pid == self.pid, attempt < Self.delays.count else { return nil }
+        let delay = Self.delays[attempt]
+        attempt += 1
+        token &+= 1
+        return (delay, token)
+    }
+
+    /// The delay elapsed. True: this retry is still the current one.
+    func isDue(pid: pid_t, token: UInt64) -> Bool {
+        pid == self.pid && token == self.token
+    }
+}
+
 /// Singleton that maintains an AXAppObserver bound to whichever app is
 /// currently frontmost. Event-driven, not polled — within-app focused-window
 /// / title changes fire the moment AX reports them, with no polling lag.
@@ -2392,6 +2435,7 @@ final class FrontmostWindowObserver: RefCountedObserver {
     private var currentTokens: [Token] = []
     private var activation = FrontmostActivation()
     private var reads = FocusedReadSchedule()
+    private var installRetry = AXInstallRetry()
 
     /// Per-event-type callbacks. Multi-subscriber: every Bridge that calls
     /// startWorkspace appends its own handler; we fire ALL of them on each
@@ -2453,6 +2497,7 @@ final class FrontmostWindowObserver: RefCountedObserver {
             guard let self = self else { return }
             self.activation.reset(to: nil)
             self.reads.reset()
+            self.installRetry.reset(to: nil)
             // Cancel the pool subscriptions so the AXObserverPool tears down
             // its per-pid AXAppObserver when this was the last subscriber —
             // matching the Token contract instead of waiting on deinit.
@@ -2519,13 +2564,26 @@ final class FrontmostWindowObserver: RefCountedObserver {
         }
     }
 
+    private static let observedNotifications = [
+        kAXFocusedWindowChangedNotification,
+        kAXMainWindowChangedNotification,
+        kAXTitleChangedNotification
+    ]
+
     private func installFor(pid: pid_t) {
         // Drop the previous app's pool subscriptions before subscribing to the
         // new pid so AXObserverPool can retire the old AXAppObserver if no
         // other consumers are using it.
         for t in currentTokens { t.cancel() }
         currentTokens.removeAll()
+        installRetry.reset(to: pid)
+        install(pid: pid, notifications: Self.observedNotifications, retrying: false)
+    }
 
+    /// Subscribes `pid` to `notifications`; the ones the app refuses (a
+    /// just-launched app refuses all of them, see AXInstallRetry) are
+    /// retried on the backoff while `pid` stays frontmost.
+    private func install(pid: pid_t, notifications: [String], retrying: Bool) {
         // Route each AX notification to its dedicated callback. Focus and
         // main-window changes (the main window IS the focus target for most
         // apps) go through the confirmed off-main read, whose delivery fires
@@ -2542,14 +2600,46 @@ final class FrontmostWindowObserver: RefCountedObserver {
                 self.fire()
             }
         }
-        for notif in [
-            kAXFocusedWindowChangedNotification,
-            kAXMainWindowChangedNotification,
-            kAXTitleChangedNotification
-        ] {
-            if let t = AXObserverPool.observe(pid: pid, notification: notif as String, callback: handler) {
+        // Each refusal can hold main for the app's 0.1 s AX messaging
+        // timeout, and an app that refuses one notification refuses the
+        // rest, so the first refusal defers the remainder to the retry.
+        var refused: [String] = []
+        for (i, notif) in notifications.enumerated() {
+            if let t = AXObserverPool.observe(pid: pid, notification: notif, callback: handler) {
                 currentTokens.append(t)
+            } else {
+                refused = Array(notifications[i...])
+                break
             }
+        }
+        // The app answers now, but its window may have taken focus while it
+        // was refusing: that posted nothing we could hear, and the
+        // activation's read may already have delivered "no window".
+        let focusNotif = kAXFocusedWindowChangedNotification
+        if retrying && notifications.contains(focusNotif) && !refused.contains(focusNotif) {
+            requestFocusedRead(pid: pid)
+        }
+        // Plain log, not WindowDebug: these fire once per app launch, and a
+        // frontmost app nobody observes is otherwise invisible.
+        let name = NSRunningApplication(processIdentifier: pid)?.localizedName ?? "?"
+        if retrying && refused.isEmpty {
+            log("frontmost: pid=\(pid) (\(name)) AX observers installed on retry")
+        }
+        guard !refused.isEmpty else { return }
+        guard let next = installRetry.failed(pid: pid) else {
+            if retrying {
+                log("frontmost: pid=\(pid) (\(name)) still refuses \(refused) after all retries; its focus changes go unseen until the next activation")
+            }
+            return
+        }
+        if !retrying {
+            log("frontmost: pid=\(pid) (\(name)) refused \(refused) at activation; retrying")
+        }
+        WindowDebug.log("frontmost: pid=\(pid) refused \(refused), retry in \(next.after)s")
+        DispatchQueue.main.asyncAfter(deadline: .now() + next.after) { [weak self] in
+            guard let self = self, self.isActive,
+                  self.installRetry.isDue(pid: pid, token: next.token) else { return }
+            self.install(pid: pid, notifications: refused, retrying: true)
         }
     }
 }
