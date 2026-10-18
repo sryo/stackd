@@ -39,7 +39,10 @@ enum JSHarness {
     /// tests start mutating shared signals.)
     static func reset() {}
 
-    private static func makeContext() -> JSContext? {
+    /// A context of its own, with api.js just loaded. For tests that read
+    /// the runtime as a page first sees it: the shared `context` carries
+    /// whatever earlier tests installed (bang handlers, pushed values).
+    static func makeContext() -> JSContext? {
         guard let ctx = JSContext() else { return nil }
         ctx.exceptionHandler = { _, exc in
             let msg = exc?.toString() ?? "<no exception>"

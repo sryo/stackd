@@ -871,6 +871,14 @@ final class Bridge: NSObject, WKScriptMessageHandler {
     static let primitivePermissions: Set<String> =
         Set(primitives.compactMap { $0.permission })
 
+    /// What a stack can observe of each primitive without calling it: the
+    /// wire type, its permission gate, and the JSON a denied call resolves
+    /// to. Sorted by type. `Tests/PublicSurfaceTests.swift` snapshots it.
+    static var primitiveContract: [(type: String, permission: String?, deny: String)] {
+        primitives.map { ($0.type, $0.permission, jsonify($0.denyValue)) }
+            .sorted { $0.type < $1.type }
+    }
+
     /// Every primitive that wasn't pulled into a `Bridge<Group>.swift`
     /// file yet. Lives as a method (not a let) so the source order can
     /// stay roughly historical — moving them out one group at a time
