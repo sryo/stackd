@@ -6,14 +6,76 @@ import Carbon
 // Streamed counterpart (Proc.stream) below — progressive chunks via a
 // per-pipe readabilityHandler instead of buffer-to-completion.
 
+/// What a finished one-shot child left behind. `code` is the exit status, or
+/// -1 when the child never launched (then `stderr` says why).
+struct ProcOutput {
+    var code: Int
+    var stdout: String
+    var stderr: String
+
+    var payload: [String: Any] { ["code": code, "stdout": stdout, "stderr": stderr] }
+}
+
 enum Proc {
+    /// Launches `cmd`, then delivers the output on the main queue. A child
+    /// that fails to launch completes inline on the calling thread with
+    /// code -1. Returns whether the child launched.
+    @discardableResult
     static func exec(
         cmd: String,
         args: [String],
         input: String? = nil,
         timeoutSeconds: Double? = nil,
         completion: @escaping ([String: Any]) -> Void
-    ) {
+    ) -> Bool {
+        switch launch(cmd: cmd, args: args, input: input, timeoutSeconds: timeoutSeconds) {
+        case .failed(let output):
+            completion(output.payload)
+            return false
+        case .running(let child):
+            collect(child) { output in
+                DispatchQueue.main.async { completion(output.payload) }
+            }
+            return true
+        }
+    }
+
+    /// Blocking counterpart of `exec` for callers that need the answer
+    /// before they return. Never hops through the main queue, so it is safe
+    /// to call from main.
+    static func run(
+        cmd: String,
+        args: [String],
+        input: String? = nil,
+        timeoutSeconds: Double? = nil
+    ) -> ProcOutput {
+        switch launch(cmd: cmd, args: args, input: input, timeoutSeconds: timeoutSeconds) {
+        case .failed(let output):
+            return output
+        case .running(let child):
+            let finished = DispatchSemaphore(value: 0)
+            var result = ProcOutput(code: -1, stdout: "", stderr: "")
+            collect(child) { output in
+                result = output
+                finished.signal()
+            }
+            finished.wait()
+            return result
+        }
+    }
+
+    private struct Child {
+        let task: Process
+        let outPipe: Pipe
+        let errPipe: Pipe
+    }
+
+    private enum Launch {
+        case running(Child)
+        case failed(ProcOutput)
+    }
+
+    private static func launch(cmd: String, args: [String], input: String?, timeoutSeconds: Double?) -> Launch {
         let task = Process()
         task.launchPath = cmd
         task.arguments = args
@@ -37,44 +99,46 @@ enum Proc {
         do {
             try task.run()
         } catch {
-            completion([
-                "code":   -1,
-                "stdout": "",
-                "stderr": "stackd: failed to launch \(cmd): \(error.localizedDescription)"
-            ])
-            return
-        }
-
-        // Drain both pipes concurrently: reading one to EOF before the other
-        // leaves a child that fills the unread pipe's buffer blocked on write.
-        var stdoutData = Data()
-        var stderrData = Data()
-        let drained = DispatchGroup()
-        drained.enter()
-        DispatchQueue.global(qos: .utility).async {
-            stdoutData = (try? outPipe.fileHandleForReading.readToEnd()) ?? Data()
-            drained.leave()
-        }
-        drained.enter()
-        DispatchQueue.global(qos: .utility).async {
-            stderrData = (try? errPipe.fileHandleForReading.readToEnd()) ?? Data()
-            drained.leave()
-        }
-        drained.notify(queue: .global(qos: .utility)) {
-            task.waitUntilExit()
-            DispatchQueue.main.async {
-                completion([
-                    "code":   Int(task.terminationStatus),
-                    "stdout": String(data: stdoutData, encoding: .utf8) ?? "",
-                    "stderr": String(data: stderrData, encoding: .utf8) ?? ""
-                ])
-            }
+            return .failed(ProcOutput(
+                code: -1,
+                stdout: "",
+                stderr: "stackd: failed to launch \(cmd): \(error.localizedDescription)"
+            ))
         }
 
         if let timeout = timeoutSeconds {
             DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + timeout) {
                 if task.isRunning { task.terminate() }
             }
+        }
+        return .running(Child(task: task, outPipe: outPipe, errPipe: errPipe))
+    }
+
+    /// Drains both pipes concurrently: reading one to EOF before the other
+    /// leaves a child that fills the unread pipe's buffer blocked on write.
+    /// `done` runs on a utility queue once both pipes hit EOF and the child
+    /// has exited.
+    private static func collect(_ child: Child, done: @escaping (ProcOutput) -> Void) {
+        var stdoutData = Data()
+        var stderrData = Data()
+        let drained = DispatchGroup()
+        drained.enter()
+        DispatchQueue.global(qos: .utility).async {
+            stdoutData = (try? child.outPipe.fileHandleForReading.readToEnd()) ?? Data()
+            drained.leave()
+        }
+        drained.enter()
+        DispatchQueue.global(qos: .utility).async {
+            stderrData = (try? child.errPipe.fileHandleForReading.readToEnd()) ?? Data()
+            drained.leave()
+        }
+        drained.notify(queue: .global(qos: .utility)) {
+            child.task.waitUntilExit()
+            done(ProcOutput(
+                code: Int(child.task.terminationStatus),
+                stdout: String(data: stdoutData, encoding: .utf8) ?? "",
+                stderr: String(data: stderrData, encoding: .utf8) ?? ""
+            ))
         }
     }
 

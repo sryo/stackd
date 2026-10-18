@@ -3,7 +3,9 @@ import Foundation
 // Tests for the pure `softwareupdate -l` stdout parser. The subprocess
 // hop and caching aren't tested here — they're impure / require a Mac
 // with pending updates to be meaningful. The parser is the bug surface
-// (format drift across macOS versions) so it gets the coverage.
+// (format drift across macOS versions) so it gets the coverage. `fetch` is
+// exercised with a stand-in tool so the subprocess hop is covered without
+// touching the network.
 
 func registerUpdateParserTests() {
     test("parse empty input returns no updates") {
@@ -104,5 +106,36 @@ func registerUpdateParserTests() {
         let updates = Update.parse(raw)
         try expectEqual(updates.count, 1)
         try expectEqual(updates[0]["label"] as? String, "Real-1.0")
+    }
+
+    test("fetch parses the tool's stdout even when it writes more than a pipe buffer to stderr first") {
+        // 200KB of stderr before any stdout: reading stdout to EOF first would
+        // leave the tool blocked on stderr forever.
+        let script = "head -c 200000 /dev/zero >&2; printf '* Label: Test-1.0\\n\\tTitle: Test, Version: 1.0, Size: 10KiB, Recommended: YES,\\n'"
+        var result: [[String: Any]]?
+        var onMain = false
+        Update.fetch(tool: "/bin/sh", args: ["-c", script]) { updates in
+            onMain = Thread.isMainThread
+            result = updates
+        }
+        let deadline = Date().addingTimeInterval(8)
+        while result == nil && Date() < deadline {
+            RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.01))
+        }
+        guard let updates = result else { throw Expectation(message: "fetch never completed") }
+        try expect(onMain, "completion must be delivered on main")
+        try expectEqual(updates.count, 1)
+        try expectEqual(updates[0]["label"] as? String, "Test-1.0")
+        try expectEqual(updates[0]["sizeKiB"] as? Int, 10)
+    }
+
+    test("fetch yields no updates when the tool cannot launch") {
+        var result: [[String: Any]]?
+        Update.fetch(tool: "/usr/bin/definitely-not-a-real-binary-\(UUID().uuidString)", args: []) { result = $0 }
+        let deadline = Date().addingTimeInterval(5)
+        while result == nil && Date() < deadline {
+            RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.01))
+        }
+        try expectEqual(result?.count, 0)
     }
 }

@@ -16,30 +16,26 @@ import Foundation
 // notunes (toast on Music kill). bar/battery-low becomes consumer 3.
 
 enum Notify {
-    /// Spawns the osascript subprocess. Quoting handles `"` and `\` in
-    /// title/body — anything else is passed through. AppleScript display
-    /// notification supports: title, subtitle, body, sound name.
+    /// Spawns the osascript subprocess without waiting for it. Returns
+    /// whether it launched. Quoting handles `"` and `\` in title/body —
+    /// anything else is passed through. AppleScript display notification
+    /// supports: title, subtitle, body, sound name.
     @discardableResult
     static func show(title: String, body: String, subtitle: String? = nil, sound: String? = nil) -> Bool {
-        // Build the AppleScript line. Order: body text, then `with title ...`,
-        // then optional `subtitle ...`, then optional `sound name ...`.
+        // Best-effort: if osascript isn't reachable or the notification daemon
+        // rejects, we silently no-op rather than crash the daemon.
+        Proc.exec(cmd: "/usr/bin/osascript",
+                  args: ["-e", script(title: title, body: body, subtitle: subtitle, sound: sound)]) { _ in }
+    }
+
+    /// The AppleScript line. Order: body text, then `with title ...`, then
+    /// optional `subtitle ...`, then optional `sound name ...`.
+    internal static func script(title: String, body: String, subtitle: String?, sound: String?) -> String {
         var script = "display notification \(escape(body))"
         script += " with title \(escape(title))"
         if let sub = subtitle { script += " subtitle \(escape(sub))" }
         if let snd = sound    { script += " sound name \(escape(snd))" }
-
-        let task = Process()
-        task.launchPath = "/usr/bin/osascript"
-        task.arguments = ["-e", script]
-        // Best-effort: if osascript isn't reachable or the notification daemon
-        // rejects, we silently no-op rather than crash the daemon. The caller
-        // gets back true only when launch succeeded.
-        do {
-            try task.run()
-            return true
-        } catch {
-            return false
-        }
+        return script
     }
 
     /// AppleScript string literal: wrap in double quotes, escape backslashes

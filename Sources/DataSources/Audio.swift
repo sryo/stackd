@@ -956,28 +956,13 @@ enum Media {
         NSWorkspace.shared.runningApplications.contains { $0.bundleIdentifier == bundleId }
     }
 
-    /// Spawns osascript with stderr routed to /dev/null and stdout drained
-    /// after waitUntilExit. Returns (stdout, success). stderr must NOT be
-    /// a Pipe() — an undrained pipe whose ~16-64KB kernel buffer fills (TCC
-    /// denial messages, AppleScript syntax errors, deprecation warnings)
-    /// blocks osascript on write and hangs waitUntilExit forever. Classic
-    /// Process footgun.
+    /// Runs osascript and returns (stdout, success). Goes through Proc.run so
+    /// stderr (TCC denial messages, AppleScript syntax errors, deprecation
+    /// warnings) is drained alongside stdout — an unread pipe whose kernel
+    /// buffer fills blocks osascript on write and hangs the wait forever.
     private static func runOsascript(_ script: String) -> (output: String, success: Bool) {
-        let task = Process()
-        task.launchPath = "/usr/bin/osascript"
-        task.arguments = ["-e", script]
-        let outPipe = Pipe()
-        task.standardOutput = outPipe
-        task.standardError = FileHandle.nullDevice
-        do {
-            try task.run()
-            task.waitUntilExit()
-            let data = outPipe.fileHandleForReading.readDataToEndOfFile()
-            let output = String(data: data, encoding: .utf8) ?? ""
-            return (output, task.terminationStatus == 0)
-        } catch {
-            return ("", false)
-        }
+        let result = Proc.run(cmd: "/usr/bin/osascript", args: ["-e", script])
+        return (result.stdout, result.code == 0)
     }
 }
 

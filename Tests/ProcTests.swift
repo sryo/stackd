@@ -86,6 +86,48 @@ func registerProcTests() {
         try expectEqual((r["stderr"] as? String)?.utf8.count, 200000)
     }
 
+    test("Proc.exec reports whether the child launched") {
+        var done = false
+        let launched = Proc.exec(cmd: "/bin/sh", args: ["-c", "true"]) { _ in done = true }
+        procSpin(timeout: 5) { done }
+        try expect(launched, "a real binary launches")
+        let missing = Proc.exec(cmd: "/usr/bin/definitely-not-a-real-binary-\(UUID().uuidString)", args: []) { _ in }
+        try expect(!missing, "a missing binary does not")
+    }
+
+    // MARK: - Proc.run (blocking)
+
+    test("Proc.run returns code, stdout and stderr without a main-queue hop") {
+        // Called from main with the run loop idle: a completion that needed
+        // main to deliver would never arrive.
+        let r = Proc.run(cmd: "/bin/sh", args: ["-c", "printf out; printf err >&2; exit 3"])
+        try expectEqual(r.code, 3)
+        try expectEqual(r.stdout, "out")
+        try expectEqual(r.stderr, "err")
+    }
+
+    test("Proc.run drains a chatty stderr that is written before stdout") {
+        let r = Proc.run(cmd: "/bin/sh", args: ["-c", "head -c 200000 /dev/zero >&2; echo ok"], timeoutSeconds: 4)
+        try expectEqual(r.code, 0)
+        try expectEqual(r.stdout, "ok\n")
+        try expectEqual(r.stderr.utf8.count, 200000)
+    }
+
+    test("Proc.run launch failure reports code -1 and a launch message") {
+        let r = Proc.run(cmd: "/usr/bin/definitely-not-a-real-binary-\(UUID().uuidString)", args: [])
+        try expectEqual(r.code, -1)
+        try expectEqual(r.stdout, "")
+        try expect(r.stderr.contains("failed to launch"), "got: \(r.stderr)")
+    }
+
+    test("Proc.run pipes input to stdin and honors timeoutSeconds") {
+        try expectEqual(Proc.run(cmd: "/bin/cat", args: [], input: "piped-input").stdout, "piped-input")
+        let start = Date()
+        let r = Proc.run(cmd: "/bin/sleep", args: ["30"], timeoutSeconds: 0.2)
+        try expect(Date().timeIntervalSince(start) < 5, "child outlived its timeout")
+        try expectEqual(r.code, 15)
+    }
+
     // MARK: - Proc.stream
 
     test("Proc.stream returns nil when the cmd path doesn't exist") {

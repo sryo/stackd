@@ -48,4 +48,13 @@ func registerNotifyTests() {
         try expectEqual(Notify.escape(attack),
                         "\"\\\"\nbeep\ndisplay alert \\\"pwned\"")
     }
+
+    test("script: body, title, then optional subtitle and sound, each escaped") {
+        try expectEqual(Notify.script(title: "T", body: "B", subtitle: nil, sound: nil),
+                        "display notification \"B\" with title \"T\"")
+        try expectEqual(Notify.script(title: "T", body: "B", subtitle: "S", sound: "Ping"),
+                        "display notification \"B\" with title \"T\" subtitle \"S\" sound name \"Ping\"")
+        try expectEqual(Notify.script(title: "a\"b", body: "c\\d", subtitle: nil, sound: nil),
+                        "display notification \"c\\\\d\" with title \"a\\\"b\"")
+    }
 }

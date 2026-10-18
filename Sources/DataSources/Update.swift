@@ -10,8 +10,9 @@ import Foundation
 // Stacks rendering an "update available" badge poll every few hours; the
 // cache makes that cheap.
 //
-// Parser is pure and unit-tested (Tests/UpdateParserTests.swift). The
-// subprocess + cache hop is impure and isn't tested in isolation.
+// Parser is pure and unit-tested (Tests/UpdateParserTests.swift), as is
+// fetch() against a stand-in tool. The cache is time-dependent and isn't
+// tested in isolation.
 
 enum Update {
     private static var cache: (updates: [[String: Any]], at: TimeInterval)?
@@ -29,11 +30,20 @@ enum Update {
             DispatchQueue.main.async { completion(c) }
             return
         }
-        DispatchQueue.global(qos: .utility).async {
-            let raw = run("/usr/sbin/softwareupdate", ["-l"]) ?? ""
-            let updates = parse(raw)
+        fetch { updates in
             store(updates)
-            DispatchQueue.main.async { completion(updates) }
+            completion(updates)
+        }
+    }
+
+    /// Runs the update tool and parses its stdout. An empty or missing
+    /// stdout (launch failure, nothing pending) reads as "no updates", the
+    /// safe default. Completion fires on the main queue.
+    static func fetch(tool: String = "/usr/sbin/softwareupdate",
+                      args: [String] = ["-l"],
+                      completion: @escaping ([[String: Any]]) -> Void) {
+        Proc.exec(cmd: tool, args: args) { result in
+            completion(parse(result["stdout"] as? String ?? ""))
         }
     }
 
@@ -121,25 +131,5 @@ enum Update {
             }
         }
         return true
-    }
-
-    /// Synchronously run a tool and return stdout as a String, or nil on
-    /// launch failure / nonzero exit.
-    private static func run(_ tool: String, _ args: [String]) -> String? {
-        let task = Process()
-        task.launchPath = tool
-        task.arguments = args
-        let out = Pipe()
-        let err = Pipe()
-        task.standardOutput = out
-        task.standardError  = err
-        do { try task.run() } catch { return nil }
-        let data = (try? out.fileHandleForReading.readToEnd()) ?? Data()
-        _ = try? err.fileHandleForReading.readToEnd()
-        task.waitUntilExit()
-        // softwareupdate -l prints to stderr in some versions, stdout in
-        // others. We capture stdout; on empty output the caller treats it
-        // as "no updates available" which is the safe default.
-        return String(data: data, encoding: .utf8)
     }
 }
