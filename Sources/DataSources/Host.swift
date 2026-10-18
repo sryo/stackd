@@ -4,6 +4,59 @@ import IOKit
 
 // MARK: - Host (CPU/memory/GPU/system info)
 
+/// Cumulative CPU tick counters, summed over all cores.
+struct CPUTicks: Equatable {
+    var user: UInt64
+    var system: UInt64
+    var idle: UInt64
+    var nice: UInt64
+}
+
+/// Turns cumulative CPU ticks into load fractions over the window since the
+/// previous full sample. Every subscribed stack reads the load on each tick,
+/// so a sample that follows another within `minimumWindow` repeats that
+/// sample's fractions instead of measuring a window of a few ticks, and
+/// leaves the baseline in place for the next full window.
+struct CPULoadSampler {
+    static let minimumWindow: TimeInterval = 0.5
+
+    private var baseline: (ticks: CPUTicks, at: TimeInterval)?
+    private var latest: [String: Double]?
+
+    /// nil until a full window has elapsed since the first sample.
+    mutating func sample(_ ticks: CPUTicks, at now: TimeInterval) -> [String: Double]? {
+        guard let base = baseline else {
+            baseline = (ticks, now)
+            return nil
+        }
+        guard now - base.at >= CPULoadSampler.minimumWindow else { return latest }
+        baseline = (ticks, now)
+        let dUser   = ticks.user   &- base.ticks.user
+        let dSystem = ticks.system &- base.ticks.system
+        let dIdle   = ticks.idle   &- base.ticks.idle
+        let dNice   = ticks.nice   &- base.ticks.nice
+        let dTotal  = dUser + dSystem + dIdle + dNice
+        guard dTotal > 0 else { return nil }
+
+        let total = Double(dTotal)
+        let userF = Double(dUser + dNice) / total
+        let sysF  = Double(dSystem) / total
+        let idleF = Double(dIdle) / total
+        let load = [
+            "user":   round3(userF),
+            "system": round3(sysF),
+            "idle":   round3(idleF),
+            "total":  round3(userF + sysF)
+        ]
+        latest = load
+        return load
+    }
+
+    private func round3(_ d: Double) -> Double {
+        (d * 1000).rounded() / 1000
+    }
+}
+
 enum Host {
     /// One-shot system info: hostname, OS, locale, arch, cpu count, RAM.
     /// Cheap to call — every field reads from APIs that are effectively
@@ -54,10 +107,9 @@ enum Host {
 
     // MARK: - CPU
 
-    // Previous host_processor_info tick totals, kept across calls so each
-    // poll computes deltas against the last one. nil means "no prior tick" —
-    // loadSnapshot() returns nil and the observer fires once more 2s later.
-    private static var lastCpuTicks: (user: UInt64, system: UInt64, idle: UInt64, nice: UInt64)?
+    // Shared by every loadSnapshot() caller; its first sample seeds the
+    // baseline, so loadSnapshot() returns nil until a full window has passed.
+    private static var cpuSampler = CPULoadSampler()
 
     private static func cpuFractions() -> [String: Double]? {
         var cpuCount: natural_t = 0
@@ -73,37 +125,15 @@ enum Host {
                           vm_size_t(infoCount) * vm_size_t(MemoryLayout<integer_t>.size))
         }
 
-        var user: UInt64 = 0, system: UInt64 = 0, idle: UInt64 = 0, nice: UInt64 = 0
+        var ticks = CPUTicks(user: 0, system: 0, idle: 0, nice: 0)
         for i in 0..<Int(cpuCount) {
             let base = i * Int(CPU_STATE_MAX)
-            user   += UInt64(UInt32(bitPattern: info[base + Int(CPU_STATE_USER)]))
-            system += UInt64(UInt32(bitPattern: info[base + Int(CPU_STATE_SYSTEM)]))
-            idle   += UInt64(UInt32(bitPattern: info[base + Int(CPU_STATE_IDLE)]))
-            nice   += UInt64(UInt32(bitPattern: info[base + Int(CPU_STATE_NICE)]))
+            ticks.user   += UInt64(UInt32(bitPattern: info[base + Int(CPU_STATE_USER)]))
+            ticks.system += UInt64(UInt32(bitPattern: info[base + Int(CPU_STATE_SYSTEM)]))
+            ticks.idle   += UInt64(UInt32(bitPattern: info[base + Int(CPU_STATE_IDLE)]))
+            ticks.nice   += UInt64(UInt32(bitPattern: info[base + Int(CPU_STATE_NICE)]))
         }
-
-        guard let prev = lastCpuTicks else {
-            lastCpuTicks = (user, system, idle, nice)
-            return nil
-        }
-        let dUser   = user   &- prev.user
-        let dSystem = system &- prev.system
-        let dIdle   = idle   &- prev.idle
-        let dNice   = nice   &- prev.nice
-        let dTotal  = dUser + dSystem + dIdle + dNice
-        lastCpuTicks = (user, system, idle, nice)
-        guard dTotal > 0 else { return nil }
-
-        let total = Double(dTotal)
-        let userF = Double(dUser + dNice) / total
-        let sysF  = Double(dSystem) / total
-        let idleF = Double(dIdle) / total
-        return [
-            "user":   round3(userF),
-            "system": round3(sysF),
-            "idle":   round3(idleF),
-            "total":  round3(userF + sysF)
-        ]
+        return cpuSampler.sample(ticks, at: ProcessInfo.processInfo.systemUptime)
     }
 
     // MARK: - Idle time
@@ -305,10 +335,6 @@ enum Host {
     }
 
     // MARK: - Helpers
-
-    private static func round3(_ d: Double) -> Double {
-        (d * 1000).rounded() / 1000
-    }
 
     private static func osBuild() -> String {
         // sysctl kern.osversion is the "24C101"-style build string Apple ships;

@@ -111,12 +111,13 @@ func registerSensorsTests() {
 
     test("Host.loadSnapshot yields cpu fractions, idleSeconds and a known memoryPressure once primed") {
         // The first call after process start seeds the CPU-tick baseline and
-        // returns nil; lastCpuTicks is process-global, so earlier tests may
-        // already have primed it. Retry briefly until a diff is available.
+        // returns nil until a full sampling window has passed; the baseline is
+        // process-global, so earlier tests may already have primed it.
         var snap: [String: Any]?
-        for _ in 0..<5 where snap == nil {
+        let deadline = Date().addingTimeInterval(10)
+        while snap == nil && Date() < deadline {
             snap = Host.loadSnapshot()
-            if snap == nil { Thread.sleep(forTimeInterval: 0.05) }
+            if snap == nil { Thread.sleep(forTimeInterval: 0.1) }
         }
         guard let snap = snap else {
             throw Expectation(message: "loadSnapshot stayed nil after priming")
