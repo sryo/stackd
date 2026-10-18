@@ -139,12 +139,19 @@ final class OverlayHandle: NSObject, WKNavigationDelegate {
     func start() {
         if released || started { return }
         started = true
-        let timer = Timer(timeInterval: OverlayTickArm.backstopInterval, repeats: true) { [weak self] _ in
-            self?.backstopTick()
-        }
+        let timer = OverlayHandle.backstopTimer { [weak self] in self?.backstopTick() }
         RunLoop.main.add(timer, forMode: .common)
         backstop = timer
         arm()
+    }
+
+    /// The disarmed overlay's backstop tick, not yet scheduled. The
+    /// tolerance lets the system batch its wakeups with other timers; the
+    /// backstop only bounds staleness, so 0.1 s of slack costs nothing.
+    static func backstopTimer(_ fire: @escaping () -> Void) -> Timer {
+        let timer = Timer(timeInterval: OverlayTickArm.backstopInterval, repeats: true) { _ in fire() }
+        timer.tolerance = 0.1
+        return timer
     }
 
     /// Stop ticking. Part of detach().

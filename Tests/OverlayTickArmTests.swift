@@ -96,6 +96,13 @@ func registerOverlayTickArmTests() {
         try expect(OverlayTickArm.backstopInterval <= 1)
     }
 
+    test("OverlayHandle backstop timer: repeats every backstopInterval and lets the system coalesce its wakeups") {
+        let timer = OverlayHandle.backstopTimer {}
+        defer { timer.invalidate() }
+        try expectEqual(timer.timeInterval, OverlayTickArm.backstopInterval)
+        try expect(abs(timer.tolerance - 0.1) < 0.001, "tolerance \(timer.tolerance)")
+    }
+
     test("OverlayArmEvents: frame and z-order bangs arm for the idle spell") {
         for name in ["sd.window.moved", "sd.window.resized", "sd.window.reordered",
                      "sd.window.focused", "sd.window.focusedByMouse"] {
