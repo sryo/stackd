@@ -14,10 +14,12 @@ private func row(_ id: Int, pid: Int = 10, onscreen: Bool, addressable: Bool,
 
 func registerWindowTabsTests() {
     let sameSpace: (Int) -> Set<UInt64> = { _ in [1] }
+    // Accessibility lists only the selected tab (id 1) and any minimized window.
+    let selectedOnly: (Int) -> Set<Int>? = { _ in [1] }
 
-    test("WindowTabs: a hidden, unreadable window at a visible window's size is its tab sibling") {
+    test("WindowTabs: a hidden window at a visible window's size that Accessibility does not list is its tab sibling") {
         let rows = [row(1, onscreen: true, addressable: true), row(2, onscreen: false, addressable: false)]
-        try expectEqual(WindowTabs.siblingIDs(in: rows, spacesOf: sameSpace), [2])
+        try expectEqual(WindowTabs.siblingIDs(in: rows, spacesOf: sameSpace, axWindowIDs: selectedOnly), [2])
     }
 
     test("WindowTabs: every hidden tab of the group is a sibling") {
@@ -25,54 +27,65 @@ func registerWindowTabsTests() {
                     row(2, onscreen: false, addressable: false),
                     row(3, onscreen: false, addressable: false),
                     row(4, onscreen: false, addressable: false)]
-        try expectEqual(WindowTabs.siblingIDs(in: rows, spacesOf: sameSpace), [2, 3, 4])
+        try expectEqual(WindowTabs.siblingIDs(in: rows, spacesOf: sameSpace, axWindowIDs: selectedOnly), [2, 3, 4])
     }
 
     test("WindowTabs: a same-size window on another Space is not a tab") {
         let rows = [row(1, onscreen: true, addressable: true), row(2, onscreen: false, addressable: false)]
         let spaces: (Int) -> Set<UInt64> = { $0 == 1 ? [1] : [2] }
-        try expectEqual(WindowTabs.siblingIDs(in: rows, spacesOf: spaces), [])
+        try expectEqual(WindowTabs.siblingIDs(in: rows, spacesOf: spaces, axWindowIDs: selectedOnly), [])
     }
 
     test("WindowTabs: a hidden window of a different size is not a tab") {
         let rows = [row(1, onscreen: true, addressable: true),
                     row(2, onscreen: false, addressable: false, w: 900)]
-        try expectEqual(WindowTabs.siblingIDs(in: rows, spacesOf: sameSpace), [])
+        try expectEqual(WindowTabs.siblingIDs(in: rows, spacesOf: sameSpace, axWindowIDs: selectedOnly), [])
     }
 
     test("WindowTabs: sizes within two points still match") {
         let rows = [row(1, onscreen: true, addressable: true),
                     row(2, onscreen: false, addressable: false, w: 601, h: 799)]
-        try expectEqual(WindowTabs.siblingIDs(in: rows, spacesOf: sameSpace), [2])
+        try expectEqual(WindowTabs.siblingIDs(in: rows, spacesOf: sameSpace, axWindowIDs: selectedOnly), [2])
     }
 
     test("WindowTabs: another app's window is not a tab") {
         let rows = [row(1, pid: 10, onscreen: true, addressable: true),
                     row(2, pid: 11, onscreen: false, addressable: false)]
-        try expectEqual(WindowTabs.siblingIDs(in: rows, spacesOf: sameSpace), [])
+        try expectEqual(WindowTabs.siblingIDs(in: rows, spacesOf: sameSpace, axWindowIDs: selectedOnly), [])
     }
 
-    test("WindowTabs: a minimized window is not a tab") {
+    test("WindowTabs: a window already known to be minimized is not a tab") {
         let rows = [row(1, onscreen: true, addressable: true),
                     row(2, onscreen: false, addressable: true, minimized: true)]
-        try expectEqual(WindowTabs.siblingIDs(in: rows, spacesOf: sameSpace), [])
+        try expectEqual(WindowTabs.siblingIDs(in: rows, spacesOf: sameSpace, axWindowIDs: selectedOnly), [])
     }
 
-    test("WindowTabs: a hidden window Accessibility can read is not a tab") {
+    test("WindowTabs: a stale readable verdict does not keep a hidden tab in the list") {
+        // The addressability cache remembers the tab it once read.
         let rows = [row(1, onscreen: true, addressable: true), row(2, onscreen: false, addressable: true)]
-        try expectEqual(WindowTabs.siblingIDs(in: rows, spacesOf: sameSpace), [])
+        try expectEqual(WindowTabs.siblingIDs(in: rows, spacesOf: sameSpace, axWindowIDs: selectedOnly), [2])
+    }
+
+    test("WindowTabs: a hidden window Accessibility lists is a real window, not a tab") {
+        let rows = [row(1, onscreen: true, addressable: true), row(2, onscreen: false, addressable: true)]
+        try expectEqual(WindowTabs.siblingIDs(in: rows, spacesOf: sameSpace, axWindowIDs: { _ in [1, 2] }), [])
+    }
+
+    test("WindowTabs: when Accessibility cannot be read nothing is called a tab") {
+        let rows = [row(1, onscreen: true, addressable: true), row(2, onscreen: false, addressable: false)]
+        try expectEqual(WindowTabs.siblingIDs(in: rows, spacesOf: sameSpace, axWindowIDs: { _ in nil }), [])
     }
 
     test("WindowTabs: with no visible readable window there is no group to belong to") {
         let hiddenApp = [row(2, onscreen: false, addressable: false), row(3, onscreen: false, addressable: false)]
-        try expectEqual(WindowTabs.siblingIDs(in: hiddenApp, spacesOf: sameSpace), [])
+        try expectEqual(WindowTabs.siblingIDs(in: hiddenApp, spacesOf: sameSpace, axWindowIDs: selectedOnly), [])
         let unreadableVisible = [row(1, onscreen: true, addressable: false), row(2, onscreen: false, addressable: false)]
-        try expectEqual(WindowTabs.siblingIDs(in: unreadableVisible, spacesOf: sameSpace), [])
+        try expectEqual(WindowTabs.siblingIDs(in: unreadableVisible, spacesOf: sameSpace, axWindowIDs: selectedOnly), [])
     }
 
     test("WindowTabs: a window with no known Space is left in the list") {
         let rows = [row(1, onscreen: true, addressable: true), row(2, onscreen: false, addressable: false)]
-        try expectEqual(WindowTabs.siblingIDs(in: rows, spacesOf: { _ in [] }), [])
+        try expectEqual(WindowTabs.siblingIDs(in: rows, spacesOf: { _ in [] }, axWindowIDs: selectedOnly), [])
     }
 
     test("Windows.decode leaves a hidden tab out of the list") {
@@ -88,7 +101,8 @@ func registerWindowTabsTests() {
                                                                       isMinimized: false, ts: 0)
                                   },
                                   display: { _, _ in nil },
-                                  spaces: { _ in [1] })
+                                  spaces: { _ in [1] },
+                                  axWindowIDs: { _ in [1] })
         try expectEqual(rows.compactMap { $0["id"] as? Int }, [1])
     }
 }

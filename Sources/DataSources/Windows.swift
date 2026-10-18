@@ -286,7 +286,8 @@ enum Windows {
             WindowAddressabilityCache.probe(pid: $0, windowID: $1)
         },
         display: (CGWindowID?, CGRect) -> [String: Any]? = WindowDisplay.liveResolver(),
-        spaces: (CGWindowID) -> Set<UInt64> = { Set(Spaces.windowSpaces(windowID: $0)) }
+        spaces: (CGWindowID) -> Set<UInt64> = { Set(Spaces.windowSpaces(windowID: $0)) },
+        axWindowIDs: (Int) -> Set<Int>? = { WindowsByID.currentWindowIDs(pid: pid_t($0)) }
     ) -> [[String: Any]] {
         var bundleIds: [Int: String?] = [:]
         func bundleId(_ pid: Int) -> String? {
@@ -351,7 +352,7 @@ enum Windows {
             if let t = verdict.traits { out.merge(t.fields) { $1 } }
             return out
         }
-        let tabs = WindowTabs.siblingIDs(in: rows, spacesOf: { spaces(CGWindowID($0)) })
+        let tabs = WindowTabs.siblingIDs(in: rows, spacesOf: { spaces(CGWindowID($0)) }, axWindowIDs: axWindowIDs)
         return tabs.isEmpty ? rows : rows.filter { !tabs.contains(($0["id"] as? Int) ?? -1) }
     }
 }
@@ -707,6 +708,24 @@ enum WindowsByID {
     /// walks the app's window list and merges every element it finds into
     /// the cache. nil when the walk doesn't list the window (the cache keeps
     /// whatever it held for it).
+    /// The ids of the windows `pid` lists through Accessibility right now,
+    /// read without touching the element cache. nil when the app cannot be
+    /// read (busy, not trusted).
+    static func currentWindowIDs(pid: pid_t) -> Set<Int>? {
+        guard let getWindow = AXShim.getWindow else { return nil }
+        let appEl = AXUIElementCreateApplication(pid)
+        AXUIElementSetMessagingTimeout(appEl, 0.1)
+        var ref: AnyObject?
+        guard AXUIElementCopyAttributeValue(appEl, kAXWindowsAttribute as CFString, &ref) == .success,
+              let arr = ref as? [AXUIElement] else { return nil }
+        var ids = Set<Int>()
+        for el in arr {
+            var wid: CGWindowID = 0
+            if getWindow(el, &wid) == .success { ids.insert(Int(wid)) }
+        }
+        return ids
+    }
+
     static func freshElement(windowID: CGWindowID, pid: pid_t) -> AXUIElement? {
         guard let getWindow = AXShim.getWindow else { return nil }
         let appEl = AXUIElementCreateApplication(pid)

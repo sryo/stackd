@@ -14,11 +14,16 @@ enum WindowTabs {
     private static let sizeTolerance = 2
 
     /// The ids in `rows` (Windows.all() rows) that are hidden tabs: not on
-    /// screen, unreadable to Accessibility, not minimized, and the size of a
-    /// visible, readable window of the same app on the same Space.
-    /// `spacesOf` is asked only for windows that pass the cheaper checks.
+    /// screen, not minimized, absent from the app's current Accessibility
+    /// window list, and the size of a visible, readable window of the same
+    /// app on the same Space. The addressability verdict in the row is not
+    /// used for a hidden window: the cache keeps a tab's earlier "readable"
+    /// answer after another tab is selected.
+    /// `spacesOf` and `axWindowIDs` (nil when the app cannot be read) are
+    /// asked only for windows that pass the cheaper checks.
     static func siblingIDs(in rows: [[String: Any]],
-                           spacesOf: (Int) -> Set<UInt64>) -> Set<Int> {
+                           spacesOf: (Int) -> Set<UInt64>,
+                           axWindowIDs: (Int) -> Set<Int>?) -> Set<Int> {
         var anchorsByPid: [Int: [(id: Int, w: Int, h: Int)]] = [:]
         for r in rows where (r["onscreen"] as? Bool) == true && (r["addressable"] as? Bool) == true {
             guard let id = r["id"] as? Int, let pid = r["pid"] as? Int, let size = size(of: r) else { continue }
@@ -27,9 +32,9 @@ enum WindowTabs {
         guard !anchorsByPid.isEmpty else { return [] }
 
         var siblings = Set<Int>()
+        var listed: [Int: Set<Int>?] = [:]
         for r in rows {
             guard (r["onscreen"] as? Bool) == false,
-                  (r["addressable"] as? Bool) == false,
                   (r["isMinimized"] as? Bool) != true,
                   let id = r["id"] as? Int, let pid = r["pid"] as? Int,
                   let size = size(of: r),
@@ -39,10 +44,11 @@ enum WindowTabs {
             }
             guard !matching.isEmpty else { continue }
             let mine = spacesOf(id)
-            guard !mine.isEmpty else { continue }
-            if matching.contains(where: { !spacesOf($0.id).isDisjoint(with: mine) }) {
-                siblings.insert(id)
-            }
+            guard !mine.isEmpty,
+                  matching.contains(where: { !spacesOf($0.id).isDisjoint(with: mine) }) else { continue }
+            if listed[pid] == nil { listed[pid] = .some(axWindowIDs(pid)) }
+            guard let inAX = listed[pid] ?? nil, !inAX.contains(id) else { continue }
+            siblings.insert(id)
         }
         return siblings
     }
