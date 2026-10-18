@@ -650,22 +650,20 @@ struct MotionWriteMailbox {
         var callbacks: [UInt64] = []
     }
 
-    private var pending: [CGWindowID: Entry] = [:]
-    private var order: [CGWindowID] = []
+    private var pending = LatestWinsQueue<CGWindowID, Entry>()
     private var inFlight: Set<CGWindowID> = []
     private(set) var draining = false
 
     var isIdle: Bool { !draining && pending.isEmpty }
 
     func involves(_ windowID: CGWindowID) -> Bool {
-        pending[windowID] != nil || inFlight.contains(windowID)
+        pending.contains(windowID) || inFlight.contains(windowID)
     }
 
     /// Queue `entry`. True when no drain is running: the caller takes the
     /// batch and starts one now.
     mutating func post(_ entry: Entry) -> Bool {
-        let wid = entry.write.windowID
-        if let old = pending[wid] {
+        pending.offer(entry.write.windowID, entry) { old, entry in
             var merged = entry
             // An axis the replaced write would have changed still has to be
             // written, or a size step followed by a position-only step
@@ -673,19 +671,14 @@ struct MotionWriteMailbox {
             merged.write.writeSize = entry.write.writeSize || old.write.writeSize
             merged.write.writePosition = entry.write.writePosition || old.write.writePosition
             merged.callbacks = old.callbacks + entry.callbacks
-            pending[wid] = merged
-        } else {
-            pending[wid] = entry
-            order.append(wid)
+            return merged
         }
         return !draining
     }
 
     /// Everything pending, first-seen order, now in flight.
     mutating func take() -> [Entry] {
-        let batch = order.compactMap { pending[$0] }
-        pending = [:]
-        order = []
+        let batch = pending.take().map { $0.value }
         inFlight = Set(batch.map { $0.write.windowID })
         draining = true
         return batch

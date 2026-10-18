@@ -47,35 +47,65 @@ struct IntakeItem<Payload> {
     var count: Int
 }
 
+/// Values waiting under keys, in first-arrival order. Offering a key that
+/// already waits merges into the waiting value in place, so the key keeps
+/// its position and one entry stands for every offer made since the last
+/// `take`. Pure: the caller owns locking and scheduling.
+struct LatestWinsQueue<Key: Hashable, Value> {
+    private var order: [Key] = []
+    private var values: [Key: Value] = [:]
+
+    var isEmpty: Bool { order.isEmpty }
+    var count: Int { order.count }
+
+    func contains(_ key: Key) -> Bool { values[key] != nil }
+
+    /// Queue `value` under `key`. A key already waiting gets
+    /// `merge(waiting, value)` in its place instead. True when the key was
+    /// new.
+    @discardableResult
+    mutating func offer(_ key: Key, _ value: Value, merge: (Value, Value) -> Value) -> Bool {
+        if let waiting = values[key] {
+            values[key] = merge(waiting, value)
+            return false
+        }
+        order.append(key)
+        values[key] = value
+        return true
+    }
+
+    /// Everything waiting, first-arrival order; the queue is left empty.
+    mutating func take() -> [(key: Key, value: Value)] {
+        let batch = order.compactMap { key in values[key].map { (key: key, value: $0) } }
+        order.removeAll(keepingCapacity: true)
+        values.removeAll(keepingCapacity: true)
+        return batch
+    }
+}
+
 /// Pending events merged per key, in first-arrival order. Pure: the
 /// caller owns locking and scheduling. `offer` returns true when the queue
 /// was empty — exactly when a drain has to be scheduled, since `take`
 /// empties it at the start of every drain.
 struct IntakeQueue<Payload> {
-    private var order: [IntakeKey] = []
-    private var items: [IntakeKey: IntakeItem<Payload>] = [:]
+    private var queue = LatestWinsQueue<IntakeKey, IntakeItem<Payload>>()
 
-    var isEmpty: Bool { order.isEmpty }
-    var pendingCount: Int { order.count }
+    var isEmpty: Bool { queue.isEmpty }
+    var pendingCount: Int { queue.count }
 
     mutating func offer(_ key: IntakeKey, _ payload: Payload, now: UInt64?) -> Bool {
-        if var item = items[key] {
-            item.payload = payload
-            item.count += 1
-            items[key] = item
-            return false
+        let wasEmpty = queue.isEmpty
+        queue.offer(key, IntakeItem(key: key, payload: payload, firstEnqueued: now, count: 1)) {
+            waiting, offered in
+            IntakeItem(key: key, payload: offered.payload,
+                       firstEnqueued: waiting.firstEnqueued,
+                       count: waiting.count + offered.count)
         }
-        let wasEmpty = order.isEmpty
-        order.append(key)
-        items[key] = IntakeItem(key: key, payload: payload, firstEnqueued: now, count: 1)
         return wasEmpty
     }
 
     mutating func take() -> [IntakeItem<Payload>] {
-        let batch = order.compactMap { items[$0] }
-        order.removeAll(keepingCapacity: true)
-        items.removeAll(keepingCapacity: true)
-        return batch
+        queue.take().map { $0.value }
     }
 }
 
