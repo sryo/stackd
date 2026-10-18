@@ -16,7 +16,7 @@ enum WindowTabs {
     /// The ids in `rows` (Windows.all() rows) that are hidden tabs: not on
     /// screen, not minimized, absent from the app's current Accessibility
     /// window list, and the size of a visible, readable window of the same
-    /// app on the same Space. The addressability verdict in the row is not
+    /// app, on the same Space or on none. The addressability verdict in the row is not
     /// used for a hidden window: the cache keeps a tab's earlier "readable"
     /// answer after another tab is selected.
     /// `spacesOf` and `axWindowIDs` (nil when the app cannot be read) are
@@ -43,14 +43,31 @@ enum WindowTabs {
                 abs($0.w - size.w) <= sizeTolerance && abs($0.h - size.h) <= sizeTolerance
             }
             guard !matching.isEmpty else { continue }
+            // A hidden tab is ordered out, which files it under no Space; a
+            // window on another Space is ordered in there, under that Space.
             let mine = spacesOf(id)
-            guard !mine.isEmpty,
-                  matching.contains(where: { !spacesOf($0.id).isDisjoint(with: mine) }) else { continue }
+            guard mine.isEmpty
+                    || matching.contains(where: { !spacesOf($0.id).isDisjoint(with: mine) }) else { continue }
             if listed[pid] == nil { listed[pid] = .some(axWindowIDs(pid)) }
             guard let inAX = listed[pid] ?? nil, !inAX.contains(id) else { continue }
             siblings.insert(id)
         }
         return siblings
+    }
+
+    /// Windows that share a size with another window of their app, with the
+    /// fields the tab decision reads (for STACKD_WIN_DEBUG).
+    static func debugSummary(_ rows: [[String: Any]], siblings: Set<Int>) -> String {
+        var parts: [String] = []
+        for r in rows {
+            guard let id = r["id"] as? Int, let pid = r["pid"] as? Int, let sz = size(of: r),
+                  rows.contains(where: { o in
+                      (o["id"] as? Int) != id && (o["pid"] as? Int) == pid
+                          && size(of: o).map({ abs($0.w - sz.w) <= sizeTolerance && abs($0.h - sz.h) <= sizeTolerance }) == true
+                  }) else { continue }
+            parts.append("\(id)[pid=\(pid) on=\(r["onscreen"] ?? "?") addr=\(r["addressable"] ?? "?") min=\(r["isMinimized"] ?? "?") \(siblings.contains(id) ? "TAB" : "kept")]")
+        }
+        return parts.isEmpty ? "-" : parts.joined(separator: " ")
     }
 
     private static func size(of row: [String: Any]) -> (w: Int, h: Int)? {

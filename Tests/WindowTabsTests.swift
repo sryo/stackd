@@ -83,9 +83,11 @@ func registerWindowTabsTests() {
         try expectEqual(WindowTabs.siblingIDs(in: unreadableVisible, spacesOf: sameSpace, axWindowIDs: selectedOnly), [])
     }
 
-    test("WindowTabs: a window with no known Space is left in the list") {
+    test("WindowTabs: a hidden tab is ordered out, so it belongs to no Space") {
+        // The window server files an ordered-out window under no Space.
         let rows = [row(1, onscreen: true, addressable: true), row(2, onscreen: false, addressable: false)]
-        try expectEqual(WindowTabs.siblingIDs(in: rows, spacesOf: { _ in [] }, axWindowIDs: selectedOnly), [])
+        let spaces: (Int) -> Set<UInt64> = { $0 == 1 ? [1] : [] }
+        try expectEqual(WindowTabs.siblingIDs(in: rows, spacesOf: spaces, axWindowIDs: selectedOnly), [2])
     }
 
     test("Windows.decode leaves a hidden tab out of the list") {

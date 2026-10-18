@@ -353,6 +353,7 @@ enum Windows {
             return out
         }
         let tabs = WindowTabs.siblingIDs(in: rows, spacesOf: { spaces(CGWindowID($0)) }, axWindowIDs: axWindowIDs)
+        WindowDebug.log("tabs: \(WindowTabs.debugSummary(rows, siblings: tabs))")
         return tabs.isEmpty ? rows : rows.filter { !tabs.contains(($0["id"] as? Int) ?? -1) }
     }
 }
