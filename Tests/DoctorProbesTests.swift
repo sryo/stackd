@@ -14,6 +14,31 @@ private final class FakeDoctorBackend: DoctorProbeBackend {
         transactionAttempts += 1
         return transaction
     }
+
+    var ownPID: pid_t = 100
+    var ownName = "stackd"
+    var windows: [ListedWindow] = []
+    /// Replaces the default read (the window's listed bounds); called with the
+    /// window id and the 1-based index of the read.
+    var serverBoundsOverride: ((CGWindowID, Int) -> CGRect?)?
+    private(set) var serverReads = 0
+    private(set) var listings = 0
+
+    func onScreenWindows() -> [ListedWindow] {
+        listings += 1
+        return windows
+    }
+
+    func serverBounds(of id: CGWindowID) -> CGRect? {
+        serverReads += 1
+        if let override = serverBoundsOverride { return override(id, serverReads) }
+        return windows.first { $0.id == id }?.bounds
+    }
+}
+
+private func listed(_ id: CGWindowID, pid: pid_t = 500, owner: String = "Safari", layer: Int = 0,
+                    _ bounds: CGRect = CGRect(x: 10, y: 20, width: 800, height: 600)) -> ListedWindow {
+    ListedWindow(id: id, ownerPID: pid, ownerName: owner, layer: layer, bounds: bounds)
 }
 
 func registerDoctorProbesTests() {
@@ -99,15 +124,111 @@ func registerDoctorProbesTests() {
         try expect(detail.contains("SLSTransactionCreate"), detail)
     }
 
+    // MARK: - Window bounds agreement
+
+    test("bounds probe is inconclusive when no window is on screen") {
+        guard case .inconclusive = DoctorProbes.windowBounds(FakeDoctorBackend()) else {
+            throw Expectation(message: "expected inconclusive")
+        }
+    }
+
+    test("bounds probe only samples layer-0 windows that stackd does not own") {
+        let backend = FakeDoctorBackend()
+        backend.windows = [
+            listed(1, pid: 100, owner: "Terminal"),
+            listed(2, pid: 900, owner: "stackd"),
+            listed(3, layer: 25),
+            listed(4, CGRect(x: 0, y: 0, width: 0, height: 40)),
+        ]
+        guard case .inconclusive = DoctorProbes.windowBounds(backend) else {
+            throw Expectation(message: "expected inconclusive")
+        }
+        try expectEqual(backend.serverReads, 0)
+    }
+
+    test("bounds probe works when the window server agrees with CGWindowList") {
+        let backend = FakeDoctorBackend()
+        backend.windows = [listed(1), listed(2)]
+        guard case .works(let detail) = DoctorProbes.windowBounds(backend) else {
+            throw Expectation(message: "expected works")
+        }
+        try expect(detail.contains("2"), "detail should count the windows: \(detail)")
+    }
+
+    test("bounds probe reads at most three windows, front to back") {
+        let backend = FakeDoctorBackend()
+        backend.windows = (1...5).map { listed(CGWindowID($0)) }
+        var read: [CGWindowID] = []
+        backend.serverBoundsOverride = { id, _ in
+            read.append(id)
+            return CGRect(x: 10, y: 20, width: 800, height: 600)
+        }
+        _ = DoctorProbes.windowBounds(backend)
+        try expectEqual(read, [1, 2, 3])
+    }
+
+    test("bounds probe tolerates a one point difference and no more") {
+        let base = CGRect(x: 10, y: 20, width: 800, height: 600)
+        try expect(DoctorProbes.boundsAgree(base, base.offsetBy(dx: 1, dy: -1)))
+        try expect(DoctorProbes.boundsAgree(base, CGRect(x: 10, y: 20, width: 801, height: 599)))
+        try expect(!DoctorProbes.boundsAgree(base, base.offsetBy(dx: 1.01, dy: 0)))
+        try expect(!DoctorProbes.boundsAgree(base, CGRect(x: 10, y: 20, width: 800, height: 602)))
+    }
+
+    test("bounds probe fails and names the window when the bounds differ") {
+        let backend = FakeDoctorBackend()
+        backend.windows = [listed(1), listed(42, owner: "Notes")]
+        backend.serverBoundsOverride = { id, _ in
+            id == 42 ? CGRect(x: 10, y: 20, width: 900, height: 600) : CGRect(x: 10, y: 20, width: 800, height: 600)
+        }
+        guard case .failed(let detail) = DoctorProbes.windowBounds(backend) else {
+            throw Expectation(message: "expected failed")
+        }
+        try expect(detail.contains("42") && detail.contains("Notes"), detail)
+        try expect(detail.contains("900"), "detail should show the server's bounds: \(detail)")
+    }
+
+    test("bounds probe fails when the window server will not read a listed window") {
+        let backend = FakeDoctorBackend()
+        backend.windows = [listed(1)]
+        backend.serverBoundsOverride = { _, _ in nil }
+        guard case .failed(let detail) = DoctorProbes.windowBounds(backend) else {
+            throw Expectation(message: "expected failed")
+        }
+        try expect(detail.contains("SLSGetWindowBounds"), detail)
+    }
+
+    test("bounds probe forgives a window that moved between the two reads") {
+        let backend = FakeDoctorBackend()
+        backend.windows = [listed(1)]
+        backend.serverBoundsOverride = { _, read in
+            read == 1 ? CGRect(x: 300, y: 20, width: 800, height: 600) : CGRect(x: 10, y: 20, width: 800, height: 600)
+        }
+        guard case .works = DoctorProbes.windowBounds(backend) else {
+            throw Expectation(message: "expected works")
+        }
+        try expectEqual(backend.listings, 2)
+    }
+
+    test("bounds probe keeps the failure when a second look still disagrees") {
+        let backend = FakeDoctorBackend()
+        backend.windows = [listed(1)]
+        backend.serverBoundsOverride = { _, _ in CGRect(x: 300, y: 20, width: 800, height: 600) }
+        guard case .failed = DoctorProbes.windowBounds(backend) else {
+            throw Expectation(message: "expected failed")
+        }
+        try expectEqual(backend.listings, 2)
+    }
+
     // MARK: - Runner
 
     test("doctor probes: run reports every probe once, in order") {
         let results = DoctorProbes.run(FakeDoctorBackend())
-        try expectEqual(results.map(\.name), ["windowserver"])
+        try expectEqual(results.map(\.name), ["windowserver", "window-bounds"])
     }
 
     test("doctor probes: the live backend completes every probe without trapping") {
         let results = DoctorProbes.run(LiveDoctorBackend())
-        try expectEqual(results.map(\.name), ["windowserver"])
+        try expectEqual(results.map(\.name), ["windowserver", "window-bounds"])
     }
 }
