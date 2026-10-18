@@ -1,12 +1,12 @@
-qa-windowscape run — 2026-10-18T03:48:16
+qa-windowscape run — 2026-10-18T17:00:32
 subject app: TextEdit | second app: Calculator | excluded apps: com.apple.loginwindow
 oracle: CGWindowList via JXA (no Hammerspoon)
 
-S1 open                PASS 3 windows tiled; last: converged step=5 (OK n=5)
-S2 close               PASS closed id=; converged step=2 (OK n=5)
-S3 minimize/restore    PASS minimize absorbed + restore re-slotted (id=134289); converged step=5 (OK n=5)
-S4 resize pairwise     PASS A=134289 +150px, B=134291 absorbed, others still
-S5 outline             PASS 134289:ok 134291:ok 134293:ok 134296:ok calc-134302:ok
-S6 churn               PASS open2+close1+min1+restore1 settled; converged step=6 (OK n=7)
+S1 open                PASS 3 windows tiled; last: converged step=4 (OK n=4)
+S2 close               PASS closed id=; converged step=2 (OK n=4)
+S3 minimize/restore    PASS minimize absorbed + restore re-slotted (id=141382); converged step=6 (OK n=4)
+S4 resize pairwise     PASS A=141382 +150px, B=141384 absorbed, others still
+S5 outline             PASS 141382:ok 141384:ok 141386:ok 141389:ok calc-141395:ok
+S6 churn               PASS open2+close1+min1+restore1 settled; converged step=5 (OK n=6)
 
-summary: 6/6 passed, 0 failed — 2026-10-18T03:48:16
+summary: 6/6 passed, 0 failed — 2026-10-18T17:00:32
