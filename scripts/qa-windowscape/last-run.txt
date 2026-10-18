@@ -1,12 +1,12 @@
-qa-windowscape run — 2026-06-10T03:16:35
+qa-windowscape run — 2026-10-18T03:48:16
 subject app: TextEdit | second app: Calculator | excluded apps: com.apple.loginwindow
 oracle: CGWindowList via JXA (no Hammerspoon)
 
-S1 open                FAIL after opening window 3 (id=35750): timeout after 12x250ms: FAIL overlap 35738(Arc) x 35745(Editor de Texto) 34x1607px; FAIL overlap 35738(Arc) x 35745(Editor de Texto) 34x1607px
-S2 close               FAIL closed id=; timeout after 12x250ms: FAIL overlap 35738(Arc) x 35745(Editor de Texto) 34x1607px; FAIL overlap 35738(Arc) x 35745(Editor de Texto) 34x1607px
-S3 minimize/restore    PASS minimize absorbed + restore re-slotted (id=35745); converged step=6 (OK n=6)
-S4 resize pairwise     PASS A=35748 +150px, B=35750 absorbed, others still
-S5 outline             PASS 35745:ok 35748:ok 35750:ok 35754:ok calc-35760:ok
-S6 churn               FAIL timeout after 20x250ms: layout-never-stable; OK n=8
+S1 open                PASS 3 windows tiled; last: converged step=5 (OK n=5)
+S2 close               PASS closed id=; converged step=2 (OK n=5)
+S3 minimize/restore    PASS minimize absorbed + restore re-slotted (id=134289); converged step=5 (OK n=5)
+S4 resize pairwise     PASS A=134289 +150px, B=134291 absorbed, others still
+S5 outline             PASS 134289:ok 134291:ok 134293:ok 134296:ok calc-134302:ok
+S6 churn               PASS open2+close1+min1+restore1 settled; converged step=6 (OK n=7)
 
-summary: 3/6 passed, 3 failed — 2026-06-10T03:16:35
+summary: 6/6 passed, 0 failed — 2026-10-18T03:48:16
