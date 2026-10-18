@@ -47,7 +47,7 @@ REG_FILE=.build/test-obj/RegisterAll.swift
 TEST_SOURCES+=("$REG_FILE" Tests/main.swift)
 
 C_SOURCES=(
-  Sources/C/TouchEvents.c
+  Tests/C/TouchEvents.c
   Sources/C/SafePredicate.m
 )
 
@@ -63,10 +63,10 @@ C_SOURCES=(
 # arg files change inside one invocation — every test run was rebuilding
 # the .o files and swiftc would catch them mid-compile otherwise.
 mkdir -p .build/test-obj
-if [[ Sources/C/TouchEvents.c -nt .build/test-obj/TouchEvents.o ]]; then
+if [[ Tests/C/TouchEvents.c -nt .build/test-obj/TouchEvents.o ]]; then
   clang -c -Wno-zero-length-array -fobjc-arc \
     -target arm64-apple-macos13.0 \
-    -o .build/test-obj/TouchEvents.o Sources/C/TouchEvents.c
+    -o .build/test-obj/TouchEvents.o Tests/C/TouchEvents.c
 fi
 if [[ Sources/C/SafePredicate.m -nt .build/test-obj/SafePredicate.o ]]; then
   clang -c -Wno-zero-length-array -fobjc-arc \
@@ -86,7 +86,7 @@ swiftc -j "$(sysctl -n hw.ncpu)" \
   -o .build/stackd-tests \
   "${SWIFT_SOURCES[@]}" "${TEST_SOURCES[@]}" \
   .build/test-obj/TouchEvents.o .build/test-obj/SafePredicate.o \
-  -import-objc-header Sources/C/StackdBridge.h \
+  -import-objc-header Tests/C/TestBridge.h \
   -Xcc -Wno-zero-length-array \
   -Xlinker -sectcreate \
   -Xlinker __TEXT \

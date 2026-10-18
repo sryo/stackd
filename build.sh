@@ -15,7 +15,6 @@ while IFS= read -r f; do
 done < <(find Sources -name '*.swift' | LC_ALL=C sort)
 
 C_SOURCES=(
-  Sources/C/TouchEvents.c
   Sources/C/SafePredicate.m
 )
 
