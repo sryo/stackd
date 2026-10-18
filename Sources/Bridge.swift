@@ -577,6 +577,7 @@ final class Bridge: NSObject, WKScriptMessageHandler {
 
     private func flushOutbox() {
         guard let script = outbox.take(), let webView = webView else { return }
+        WindowDebug.log("focus-trace: flush \(script.contains("\"focusedChanged\"") ? "focusedChanged " : "")bytes=\(script.utf8.count)")
         eval(script, in: webView)
     }
 
