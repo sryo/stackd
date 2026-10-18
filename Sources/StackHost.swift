@@ -192,10 +192,15 @@ final class StackHost {
     // Stacks with no matching display right now (e.g. pinned to an external
     // that's unplugged) — loaded again when a display change brings it back.
     private var awaitingDisplay: Set<String> = []
+    // The displays a stack's `display` spec resolves against, in
+    // NSScreen.screens order.
+    private let screens: () -> [NSScreen]
 
-    init(rootPath: String, runtimePath: String) {
+    init(rootPath: String, runtimePath: String,
+         screens: @escaping () -> [NSScreen] = { NSScreen.screens }) {
         self.rootPath = rootPath
         self.schemeHandler = StackdSchemeHandler(runtimePath: runtimePath)
+        self.screens = screens
     }
 
     private func loadDefaults() {
@@ -239,7 +244,7 @@ final class StackHost {
         // resources (observer subscriptions, hotkeys, eventtaps, menubar
         // suppressions, future AX observers). Belt-and-suspenders menubar
         // reset covers the rare case where every stack crashed mid-suppress.
-        for id in Array(bridges.keys) { unloadStack(id: id) }
+        for key in Array(bridges.keys) { unloadInstance(key) }
         sources.removeAll()
         awaitingDisplay.removeAll()
         schemeHandler.clearRegistrations()
@@ -326,7 +331,7 @@ final class StackHost {
     /// exists, load it. Returns a human-readable result line for the CLI.
     func toggle(id: String) -> String {
         if windows[id] != nil {
-            unloadStack(id: id)
+            unloadInstance(id)
             return "disabled \(id)\n"
         }
         let prefix = id + "@"
@@ -345,8 +350,10 @@ final class StackHost {
         return "enabled \(id)\n"
     }
 
-    private func unloadStack(id: String) {
-        if let win = windows[id] {
+    /// Tear down one instance (`<id>` or `<id>@<N>`). The stack's sd://
+    /// registration goes with its last instance.
+    private func unloadInstance(_ key: String) {
+        if let win = windows.removeValue(forKey: key) {
             // Tell JS to clean up DOM state before the WebView is torn down.
             // sd.bind doesn't strictly need this (subscriptions die with the
             // WebView), but stacks can listen for `stackd:unload` to save
@@ -357,31 +364,23 @@ final class StackHost {
             )
             win.orderOut(nil)
             win.close()
-            windows.removeValue(forKey: id)
         }
-        instanceDisplays.removeValue(forKey: id)
+        instanceDisplays.removeValue(forKey: key)
         // Drain native resources (observer subs, hotkeys, eventtaps, menubar
         // suppressions) BEFORE dropping the Bridge — the Token cancel closures
         // reference back into shared registries, not into Bridge itself.
-        bridges[id]?.scope.drain()
-        bridges.removeValue(forKey: id)
-        schemeHandler.unregister(stackId: id)
+        bridges[key]?.scope.drain()
+        bridges.removeValue(forKey: key)
+        let base = StackHost.baseId(key)
+        if !windows.keys.contains(where: { StackHost.baseId($0) == base }) {
+            schemeHandler.unregister(stackId: base)
+        }
     }
 
+    /// Unload every instance of `baseId`, and drop its sd:// registration
+    /// even when none is loaded (a stack waiting for its display).
     private func unloadAllInstances(baseId: String) {
-        let keys = windows.keys.filter { $0 == baseId || $0.hasPrefix(baseId + "@") }
-        for k in keys {
-            windows[k]?.webView.sdEvaluate(
-                "window.dispatchEvent(new Event('stackd:unload'))",
-                completionHandler: nil
-            )
-            windows[k]?.orderOut(nil)
-            windows[k]?.close()
-            windows.removeValue(forKey: k)
-            instanceDisplays.removeValue(forKey: k)
-            bridges[k]?.scope.drain()
-            bridges.removeValue(forKey: k)
-        }
+        for key in windows.keys.filter({ StackHost.baseId($0) == baseId }) { unloadInstance(key) }
         schemeHandler.unregister(stackId: baseId)
     }
 
@@ -467,7 +466,7 @@ final class StackHost {
         schemeHandler.register(stackId: manifest.id, rootURL: source.rootURL)
         sources[manifest.id] = source
 
-        let targets = StackHost.screensFor(displaySpec: manifest.display ?? "primary")
+        let targets = screensFor(displaySpec: manifest.display ?? "primary")
         guard !targets.isEmpty else {
             log("stack \(manifest.id) — no matching displays for spec=\(manifest.display ?? "primary")")
             awaitingDisplay.insert(manifest.id)
@@ -539,7 +538,7 @@ final class StackHost {
         loadedIds.formUnion(awaitingDisplay)
         for id in loadedIds.sorted() {
             guard let source = sources[id] else { continue }
-            let targets = StackHost.screensFor(displaySpec: source.manifest.display ?? "primary")
+            let targets = screensFor(displaySpec: source.manifest.display ?? "primary")
             let instances = instanceDisplays.filter { StackHost.baseId($0.key) == id }
             let plan = ScreenReconcile.plan(
                 id: id, instances: instances,
@@ -692,8 +691,8 @@ final class StackHost {
         return NSWindow.Level(rawValue: 950)
     }
 
-    private static func screensFor(displaySpec: String) -> [(Int, NSScreen)] {
-        let all = NSScreen.screens
+    private func screensFor(displaySpec: String) -> [(Int, NSScreen)] {
+        let all = screens()
         switch displaySpec {
         case "primary":
             return all.first.map { [(0, $0)] } ?? []
