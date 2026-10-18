@@ -231,58 +231,28 @@ final class StackWindow: NSPanel, WKNavigationDelegate {
         webView.sdEvaluate(js, completionHandler: nil)
     }
 
-    /// Build the backing material view (NSVisualEffectView for `.vibrancy`,
-    /// NSGlassEffectView for `.glass` on macOS 26+; NSVisualEffectView with
-    /// `.hudWindow` fallback on older OSes). Returns nil for `.none` — caller
-    /// handles the no-backing case.
+    /// The NSVisualEffectView behind the webview in `.siblingInContainer`:
+    /// the manifest's vibrancy, or `.hudWindow` (the closest public
+    /// material) for glass on a macOS without Liquid Glass — glass on macOS
+    /// 26+ is `.embeddedInGlass`. nil for `.none`.
     private static func makeEffectView(material: StackMaterial, frame: NSRect, cornerRadius: Double?) -> NSView? {
+        let effect: NSVisualEffectView.Material
         switch material {
-        case .none:
-            return nil
-        case .vibrancy(let m):
-            let v = NSVisualEffectView(frame: frame)
-            v.autoresizingMask = [.width, .height]
-            v.blendingMode = .behindWindow
-            v.state = .active
-            v.material = m
-            if let r = cornerRadius, r > 0 {
-                v.wantsLayer = true
-                v.layer?.cornerRadius = CGFloat(r)
-                v.layer?.masksToBounds = true
-            }
-            return v
-        case .glass(let variant):
-            if #available(macOS 26.0, *) {
-                let g = NSGlassEffectView(frame: frame)
-                g.autoresizingMask = [.width, .height]
-                switch variant {
-                case .regular:
-                    g.style = .regular
-                case .clear:
-                    g.style = .clear
-                case .tinted(let color):
-                    g.style = .regular
-                    g.tintColor = color
-                }
-                if let r = cornerRadius, r > 0 {
-                    g.cornerRadius = CGFloat(r)
-                }
-                return g
-            } else {
-                // Pre-Tahoe fallback: hudWindow is the closest public material.
-                let v = NSVisualEffectView(frame: frame)
-                v.autoresizingMask = [.width, .height]
-                v.blendingMode = .behindWindow
-                v.state = .active
-                v.material = .hudWindow
-                if let r = cornerRadius, r > 0 {
-                    v.wantsLayer = true
-                    v.layer?.cornerRadius = CGFloat(r)
-                    v.layer?.masksToBounds = true
-                }
-                return v
-            }
+        case .none: return nil
+        case .vibrancy(let m): effect = m
+        case .glass: effect = .hudWindow
         }
+        let v = NSVisualEffectView(frame: frame)
+        v.autoresizingMask = [.width, .height]
+        v.blendingMode = .behindWindow
+        v.state = .active
+        v.material = effect
+        if let r = cornerRadius, r > 0 {
+            v.wantsLayer = true
+            v.layer?.cornerRadius = CGFloat(r)
+            v.layer?.masksToBounds = true
+        }
+        return v
     }
 
     override var canBecomeKey: Bool { invocable }

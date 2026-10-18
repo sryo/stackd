@@ -5,8 +5,8 @@ import Foundation
 /// `StackCornerRadius.parse`), `StackShape`, `StackPadding` and the
 /// `MaterialAttachment` view-hierarchy decision. All pure — no AppKit state
 /// touched beyond constructing `NSVisualEffectView.Material` / `NSColor`
-/// values. The installation side (NSGlassEffectView vs NSVisualEffectView)
-/// is impure and stays untested here.
+/// values. The views StackWindow installs for each mode are covered in
+/// StackWindowContentTests.
 func registerMaterialTests() {
 
     // MARK: StackMaterial.parse
