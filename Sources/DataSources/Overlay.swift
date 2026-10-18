@@ -121,6 +121,8 @@ final class OverlayHandle: NSObject, WKNavigationDelegate {
     // True after a window-server move AppKit didn't see: `panel.frame` still
     // holds the old origin until syncAppKitFrame() tells it.
     private var appKitStale: Bool = false
+    /// When the panel last moved at the window server without AppKit.
+    private var lastServerMoveAt: Double = 0
     private var released: Bool = false
     // Target size the panel was last fitted to; read by the event-follow
     // entry to tell a pure move from a resize.
@@ -398,7 +400,8 @@ final class OverlayHandle: NSObject, WKNavigationDelegate {
         var alreadyMoved = false
         switch frameOp {
         case .none:
-            if OverlayTickPlan.needsAppKitSync(frameOp: frameOp, appKitStale: appKitStale) {
+            if OverlayTickPlan.needsAppKitSync(frameOp: frameOp, appKitStale: appKitStale,
+                                               sinceLastServerMove: now - lastServerMoveAt) {
                 syncAppKitFrame()
             }
         case .move(let origin):
@@ -406,6 +409,7 @@ final class OverlayHandle: NSObject, WKNavigationDelegate {
                 // The event path already moved the panel there (z-order
                 // untouched: a pure target move leaves it above).
                 appKitStale = true
+                lastServerMoveAt = now
                 alreadyMoved = true
                 trace.note("event-moved")
             } else if moveAndOrderAboveTarget(cgsOrigin: panelFrame.origin) {
@@ -414,6 +418,7 @@ final class OverlayHandle: NSObject, WKNavigationDelegate {
                 // transaction: no AppKit round-trip, and no frame where the
                 // panel has moved but sits below its target.
                 appKitStale = true
+                lastServerMoveAt = now
                 reordered = true
             } else {
                 trace.note("setFrameOrigin")
@@ -752,12 +757,20 @@ enum OverlayTickPlan {
         return .reshape(next)
     }
 
+    /// How long the panel must have gone without a window-server move before
+    /// AppKit's cached origin is resynced. Shorter than OverlayTickArm.idle
+    /// so the armed tick is still running when it passes.
+    static let appKitSyncSettle: Double = 0.05
+
     /// After window-server moves, AppKit's cached origin is resynced on the
-    /// first tick with no frame change — never mid-motion, where it would
-    /// put the AppKit round-trip back on the hot path. A reshape goes
-    /// through setFrame, which resyncs by itself.
-    static func needsAppKitSync(frameOp: OverlayFrameOp, appKitStale: Bool) -> Bool {
-        appKitStale && frameOp == .none
+    /// first tick with no frame change once the panel has been still for
+    /// `appKitSyncSettle` — never mid-motion, where it would put the AppKit
+    /// round-trip back on the hot path. A drag reports moves at about 50 Hz
+    /// against a 60 Hz vsync, so one quiet tick is routine inside a drag. A
+    /// reshape goes through setFrame, which resyncs by itself.
+    static func needsAppKitSync(frameOp: OverlayFrameOp, appKitStale: Bool,
+                                sinceLastServerMove: Double = .infinity) -> Bool {
+        appKitStale && frameOp == .none && sinceLastServerMove >= appKitSyncSettle
     }
 
     /// True when the window-server event path already moved the panel to

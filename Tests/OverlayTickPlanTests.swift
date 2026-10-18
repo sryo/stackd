@@ -70,6 +70,21 @@ func registerOverlayTickPlanTests() {
                    "a reshape goes through setFrame, which resyncs by itself")
     }
 
+    test("OverlayTickPlan.needsAppKitSync waits for motion to settle") {
+        // A drag reports moves at about 50 Hz against a 60 Hz vsync, so a
+        // single quiet tick is common mid-drag; the AppKit round trip must
+        // not land on it.
+        let settle = OverlayTickPlan.appKitSyncSettle
+        try expect(!OverlayTickPlan.needsAppKitSync(frameOp: .none, appKitStale: true,
+                                                    sinceLastServerMove: 1.0 / 60))
+        try expect(!OverlayTickPlan.needsAppKitSync(frameOp: .none, appKitStale: true,
+                                                    sinceLastServerMove: settle - 0.001))
+        try expect(OverlayTickPlan.needsAppKitSync(frameOp: .none, appKitStale: true,
+                                                   sinceLastServerMove: settle))
+        try expect(settle < OverlayTickArm.idle,
+                   "the armed tick must still be running when the settle time passes")
+    }
+
     test("OverlayTickPlan.holdsHeadroom while the motion engine animates the target") {
         try expect(OverlayTickPlan.holdsHeadroom(liveResize: false, commanded: true))
         try expect(OverlayTickPlan.holdsHeadroom(liveResize: true, commanded: false))
