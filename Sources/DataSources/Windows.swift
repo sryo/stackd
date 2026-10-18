@@ -67,7 +67,9 @@ enum MainStallWatch {
 
 enum WindowTransaction {
     typealias CreateFn          = @convention(c) (Int32) -> Unmanaged<CFTypeRef>?
-    typealias CommitFn          = @convention(c) (CFTypeRef, Int32) -> Int32
+    // SLSTransactionCommit returns nothing: the register it leaves behind is
+    // not a status code, so a commit is never judged by its result.
+    typealias CommitFn          = @convention(c) (CFTypeRef, Int32) -> Void
     typealias OrderWindowFn     = @convention(c) (CFTypeRef, UInt32, Int32, UInt32) -> Int32
     // (tx, wid, origin) — origin in CGS global top-left coordinates, no
     // AppKit flip. "WithGroup" moves attached child windows along; our
