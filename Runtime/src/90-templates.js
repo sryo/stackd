@@ -445,10 +445,12 @@ function __sdProcessEachElement(el) {
     for (const n of active) n.remove();
     active = [];
     activeKeys = [];
+    let cursor = anchor;
     for (let i = 0; i < arr.length; i++) {
       const item = arr[i];
       const clone = applyTemplateOps(el.cloneNode(true), item, i);
-      anchor.parentNode.insertBefore(clone, anchor.nextSibling);
+      anchor.parentNode.insertBefore(clone, cursor.nextSibling);
+      cursor = clone;
       active.push(clone);
     }
   }

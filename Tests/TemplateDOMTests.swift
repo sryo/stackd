@@ -165,9 +165,7 @@ func registerTemplateDOMTests() {
 
     // ── sd-each, unkeyed ──────────────────────────────────────────────────
 
-    test("template DOM: unkeyed sd-each replaces its element with an anchor and renders the items last-first") {
-        // Each clone is inserted directly after the anchor, so the DOM holds
-        // the array reversed; the keyed path renders in array order.
+    test("template DOM: unkeyed sd-each replaces its element with an anchor and renders the items in array order") {
         let page = try TemplatePage()
         let got = page.run("""
         const r = mount('<ul><li sd-each="sd.sensors.fans" class="{{ item.kind }}">{{ item.name }}#{{ index }}</li></ul>');
@@ -176,7 +174,7 @@ func registerTemplateDOMTests() {
         push('sensors', { fans: [{ name: 'a', kind: 'x' }, { name: 'b', kind: 'y' }, { name: 'c', kind: 'z' }] });
         return empty + '|' + ul.innerHTML;
         """)
-        try expectEqual(got, "<!-- sd-each:sd.sensors.fans -->|<!-- sd-each:sd.sensors.fans --><li class=\"z\">c#2</li><li class=\"y\">b#1</li><li class=\"x\">a#0</li>")
+        try expectEqual(got, "<!-- sd-each:sd.sensors.fans -->|<!-- sd-each:sd.sensors.fans --><li class=\"x\">a#0</li><li class=\"y\">b#1</li><li class=\"z\">c#2</li>")
     }
 
     test("template DOM: unkeyed sd-each re-creates every clone on each push") {
@@ -270,7 +268,7 @@ func registerTemplateDOMTests() {
         try expectEqual(got, "2,true,true,false")
     }
 
-    test("template DOM: a non-primitive sd-key falls back to the unkeyed (last-first) render") {
+    test("template DOM: a non-primitive sd-key falls back to the unkeyed render") {
         let page = try TemplatePage()
         let got = page.run("""
         const r = mount('<ul><li sd-each="sd.sensors.fans" sd-key="item">{{ item.name }}</li></ul>');
@@ -280,7 +278,7 @@ func registerTemplateDOMTests() {
         const second = Array.from(r.querySelectorAll('li'));
         return second.map(n => n.textContent).join('') + '|' + second.some(n => first.includes(n));
         """)
-        try expectEqual(got, "ba|false")
+        try expectEqual(got, "ab|false")
     }
 
     // ── sd-if ─────────────────────────────────────────────────────────────
