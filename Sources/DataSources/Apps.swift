@@ -472,15 +472,10 @@ enum Icons {
         icon.size = NSSize(width: size, height: size)
         // Re-rasterize at the requested point size — Apple's icon may be a
         // multi-rep TIFF and we want a single PNG sized to taste.
-        let target = NSImage(size: NSSize(width: size, height: size))
-        target.lockFocus()
-        icon.draw(in: NSRect(x: 0, y: 0, width: size, height: size),
-                  from: .zero, operation: .copy, fraction: 1.0)
-        target.unlockFocus()
-        guard let tiff = target.tiffRepresentation,
-              let rep  = NSBitmapImageRep(data: tiff),
-              let png  = rep.representation(using: .png, properties: [:]) else { return nil }
-        return "data:image/png;base64," + png.base64EncodedString()
+        return ImageEncoding.pngDataURL(size: NSSize(width: size, height: size)) {
+            icon.draw(in: NSRect(x: 0, y: 0, width: size, height: size),
+                      from: .zero, operation: .copy, fraction: 1.0)
+        }
     }
 }
 

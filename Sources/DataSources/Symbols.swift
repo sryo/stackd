@@ -2,8 +2,8 @@ import AppKit
 
 // SF Symbol → template PNG → base64 data-URL, for stacks that render in a
 // WKWebView (the bar, HUDs) and can't reach SF Symbols the way a native
-// NSButton can (Menubar.swift's IconSpec.sfSymbol path). Mirrors the
-// Icons.dataURL rasterize tail in Apps.swift; the difference is the source
+// NSButton can (Menubar.swift's IconSpec.sfSymbol path). Rasterizes through
+// the same ImageEncoding.pngDataURL as app icons; the difference is the source
 // image (a configured system symbol, drawn as a template so its alpha shape
 // can be used as a CSS mask and tinted by the consumer's currentColor).
 enum Symbols {
@@ -32,16 +32,11 @@ enum Symbols {
         guard pts.width > 0, pts.height > 0 else { return nil }
         let px = NSSize(width: pts.width * 3, height: pts.height * 3)
 
-        let target = NSImage(size: px)
-        target.lockFocus()
-        img.draw(in: NSRect(origin: .zero, size: px), from: .zero, operation: .sourceOver, fraction: 1.0)
-        target.unlockFocus()
-
-        guard let tiff = target.tiffRepresentation,
-              let rep  = NSBitmapImageRep(data: tiff),
-              let png  = rep.representation(using: .png, properties: [:]) else { return nil }
+        guard let dataURL = ImageEncoding.pngDataURL(size: px, draw: {
+            img.draw(in: NSRect(origin: .zero, size: px), from: .zero, operation: .sourceOver, fraction: 1.0)
+        }) else { return nil }
         return [
-            "dataURL": "data:image/png;base64," + png.base64EncodedString(),
+            "dataURL": dataURL,
             "width":   Int(pts.width.rounded()),
             "height":  Int(pts.height.rounded())
         ]

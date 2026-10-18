@@ -115,35 +115,15 @@ enum Thumbnails {
         }
     }
 
-    /// CGImage → dataURL via CGImageDestination. Mirrors Vision.pngDataURL
-    /// but lets jpeg through too — file previews are usually photos and
-    /// pay for the size reduction.
+    /// CGImage → `{ dataURL, width, height, type }`. Lets jpeg through too —
+    /// file previews are usually photos and pay for the size reduction.
     private static func encode(cgImage: CGImage,
                                format: String,
                                quality: Double,
                                type: String) -> [String: Any]? {
-        let (utType, mime, props): (CFString, String, [CFString: Any]?)
-        if format == "jpeg" || format == "jpg" {
-            utType = "public.jpeg" as CFString
-            mime   = "image/jpeg"
-            props  = [kCGImageDestinationLossyCompressionQuality: max(0, min(1, quality))]
-        } else {
-            utType = "public.png" as CFString
-            mime   = "image/png"
-            props  = nil
-        }
-        let data = NSMutableData()
-        guard let dest = CGImageDestinationCreateWithData(
-            data as CFMutableData, utType, 1, nil
-        ) else { return nil }
-        CGImageDestinationAddImage(dest, cgImage, props as CFDictionary?)
-        guard CGImageDestinationFinalize(dest) else { return nil }
-        let base64 = (data as Data).base64EncodedString()
-        return [
-            "dataURL":      "data:\(mime);base64,\(base64)",
-            "width":        cgImage.width,
-            "height":       cgImage.height,
-            "type":         type
-        ]
+        let imageFormat: ImageEncoding.Format = (format == "jpeg" || format == "jpg") ? .jpeg : .png
+        guard var payload = ImageEncoding.payload(cgImage, format: imageFormat, quality: quality) else { return nil }
+        payload["type"] = type
+        return payload
     }
 }

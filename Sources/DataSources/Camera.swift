@@ -172,37 +172,16 @@ extension Camera {
         }
     }
 
-    /// Shared CVPixelBuffer → dataURL helper. Mirrors the one-shot path's
-    /// encoding exactly (same CGImageDestination call, same key shape) so
-    /// stacks can swap `.frame()` ↔ `.stream()` without changing how they
-    /// consume the result. Extracted here so future encoding tweaks
-    /// (HEIC support, embedded EXIF) land in one place.
-    fileprivate static func encodeFrame(pixelBuffer: CVPixelBuffer,
-                                        format: String,
-                                        quality: Double) -> [String: Any]? {
-        let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
-        let ciContext = CIContext()
-        guard let cgImage = ciContext.createCGImage(ciImage, from: ciImage.extent) else {
-            return nil
-        }
-        let isPNG = (format == "png")
-        let utType = (isPNG ? "public.png" : "public.jpeg") as CFString
-        let data = NSMutableData()
-        guard let dest = CGImageDestinationCreateWithData(
-            data as CFMutableData, utType, 1, nil
-        ) else { return nil }
-        let props: [CFString: Any] = isPNG ? [:] : [
-            kCGImageDestinationLossyCompressionQuality: max(0, min(1, quality))
-        ]
-        CGImageDestinationAddImage(dest, cgImage, props as CFDictionary)
-        guard CGImageDestinationFinalize(dest) else { return nil }
-        let base64 = (data as Data).base64EncodedString()
-        let mime = isPNG ? "image/png" : "image/jpeg"
-        return [
-            "dataURL": "data:\(mime);base64,\(base64)",
-            "width":   cgImage.width,
-            "height":  cgImage.height
-        ]
+    /// Shared CVPixelBuffer → dataURL helper for the stream and the one-shot
+    /// `frame()`, so stacks can swap `.frame()` ↔ `.stream()` without changing
+    /// how they consume the result. "png" is lossless; any other format is
+    /// jpeg, the cheaper default.
+    static func encodeFrame(pixelBuffer: CVPixelBuffer,
+                            format: String,
+                            quality: Double) -> [String: Any]? {
+        ImageEncoding.payload(pixelBuffer: pixelBuffer,
+                              format: format == "png" ? .png : .jpeg,
+                              quality: quality)
     }
 
     /// Open a stream for `deviceId` (matches `sd.camera` channel entries;

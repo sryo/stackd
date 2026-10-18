@@ -535,22 +535,7 @@ enum DisplaySnapshot {
 
     private static func encodeAsDataURL(_ image: CGImage, format: String, quality: Double) -> [String: Any]? {
         let isJPEG = format.lowercased() == "jpeg" || format.lowercased() == "jpg"
-        let utType: CFString = isJPEG ? UTType.jpeg.identifier as CFString : UTType.png.identifier as CFString
-        let mime = isJPEG ? "image/jpeg" : "image/png"
-        let mutable = NSMutableData()
-        guard let dest = CGImageDestinationCreateWithData(mutable as CFMutableData, utType, 1, nil) else { return nil }
-        var props: [CFString: Any] = [:]
-        if isJPEG {
-            props[kCGImageDestinationLossyCompressionQuality] = max(0, min(1, quality))
-        }
-        CGImageDestinationAddImage(dest, image, props as CFDictionary)
-        guard CGImageDestinationFinalize(dest) else { return nil }
-        let base64 = (mutable as Data).base64EncodedString()
-        return [
-            "dataURL": "data:\(mime);base64,\(base64)",
-            "width":   image.width,
-            "height":  image.height
-        ]
+        return ImageEncoding.payload(image, format: isJPEG ? .jpeg : .png, quality: quality)
     }
 }
 

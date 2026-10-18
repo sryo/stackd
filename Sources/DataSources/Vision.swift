@@ -276,29 +276,9 @@ enum Vision {
 
     // MARK: - Per-request decoder helpers
 
-    /// CVPixelBuffer (RGBA, premultiplied) → PNG dataURL via CoreImage +
-    /// CGImageDestination. CIContext is cheap to construct here (per call)
-    /// since the request itself is already an expensive ML hop; if a hot path
-    /// emerges, hoist into a `static let ciContext` next to this.
+    /// CVPixelBuffer (RGBA, premultiplied) → PNG `{ dataURL, width, height }`.
     private static func pngDataURL(from buffer: CVPixelBuffer) -> [String: Any]? {
-        let ciImage = CIImage(cvPixelBuffer: buffer)
-        let ciContext = CIContext()
-        guard let cgImage = ciContext.createCGImage(ciImage, from: ciImage.extent) else {
-            return nil
-        }
-        let data = NSMutableData()
-        guard let dest = CGImageDestinationCreateWithData(
-            data as CFMutableData, "public.png" as CFString, 1, nil
-        ) else { return nil }
-        CGImageDestinationAddImage(dest, cgImage, nil)
-        guard CGImageDestinationFinalize(dest) else { return nil }
-
-        let base64 = (data as Data).base64EncodedString()
-        return [
-            "dataURL": "data:image/png;base64,\(base64)",
-            "width":   cgImage.width,
-            "height":  cgImage.height
-        ]
+        ImageEncoding.payload(pixelBuffer: buffer, format: .png, quality: 1)
     }
 
     private static func elementTypeName(_ t: VNElementType) -> String {

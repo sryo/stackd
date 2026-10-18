@@ -453,8 +453,8 @@ private final class OneShotGrabber: NSObject, AVCaptureVideoDataOutputSampleBuff
         guard !fired,
               let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer)
         else { return }
-        let payload = encode(pixelBuffer: pixelBuffer,
-                             format: format, quality: quality)
+        let payload = Camera.encodeFrame(pixelBuffer: pixelBuffer,
+                                         format: format, quality: quality)
         finish(payload)
     }
 
@@ -468,34 +468,6 @@ private final class OneShotGrabber: NSObject, AVCaptureVideoDataOutputSampleBuff
         }
     }
 
-    /// CVPixelBuffer → CGImage → dataURL. CoreImage handles the pixel
-    /// format conversion; CGImageDestination does the actual encode.
-    private func encode(pixelBuffer: CVPixelBuffer,
-                        format: String, quality: Double) -> [String: Any]? {
-        let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
-        let ciContext = CIContext()
-        guard let cgImage = ciContext.createCGImage(ciImage, from: ciImage.extent) else {
-            return nil
-        }
-        let isPNG = (format == "png")
-        let utType = (isPNG ? "public.png" : "public.jpeg") as CFString
-        let data = NSMutableData()
-        guard let dest = CGImageDestinationCreateWithData(
-            data as CFMutableData, utType, 1, nil
-        ) else { return nil }
-        let props: [CFString: Any] = isPNG ? [:] : [
-            kCGImageDestinationLossyCompressionQuality: max(0, min(1, quality))
-        ]
-        CGImageDestinationAddImage(dest, cgImage, props as CFDictionary)
-        guard CGImageDestinationFinalize(dest) else { return nil }
-        let base64 = (data as Data).base64EncodedString()
-        let mime = isPNG ? "image/png" : "image/jpeg"
-        return [
-            "dataURL": "data:\(mime);base64,\(base64)",
-            "width":   cgImage.width,
-            "height":  cgImage.height
-        ]
-    }
 }
 
 // MARK: - Disks (mount / unmount lifecycle + snapshot)
