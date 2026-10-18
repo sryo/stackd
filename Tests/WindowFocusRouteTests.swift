@@ -18,10 +18,13 @@ func registerWindowFocusRouteTests() {
         try expectEqual(records[1][0x08], 0x02)
     }
 
-    test("KeyWindowEventRecord: 0xf8-byte record declaring its length") {
+    test("KeyWindowEventRecord: declares 0xf8 bytes inside a zero-padded 0x100 buffer") {
+        // The encoder reads past the declared record; padding keeps that
+        // read inside the allocation.
         for r in KeyWindowEventRecord.pressAndRelease(windowID: 1) {
-            try expectEqual(r.count, 0xF8)
+            try expectEqual(r.count, 0x100)
             try expectEqual(r[0x04], 0xF8)
+            for i in 0xF8..<0x100 { try expectEqual(r[i], 0, "padding byte \(i)") }
         }
     }
 

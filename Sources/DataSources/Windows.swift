@@ -1011,7 +1011,8 @@ enum WindowFocusRoute: Equatable {
 /// required: a press with no release leaves some apps (Ghostty) holding a
 /// button down and stalling their event loop.
 ///
-/// Layout (0xf8 bytes, all other bytes zero):
+/// Layout (0xf8 declared bytes in a zero-padded 0x100 buffer, all other bytes
+/// zero; the record encoder reads past the declared length):
 ///   0x04       declared record length (0xf8)
 ///   0x08       event type: 0x01 press, 0x02 release
 ///   0x20..0x2f location, filled with 0xff
@@ -1019,13 +1020,14 @@ enum WindowFocusRoute: Equatable {
 ///   0x3c..0x3f target window id, little-endian
 enum KeyWindowEventRecord {
     static let length = 0xF8
+    static let bufferSize = 0x100
 
     static func pressAndRelease(windowID: CGWindowID) -> [[UInt8]] {
         [record(windowID: windowID, type: 0x01), record(windowID: windowID, type: 0x02)]
     }
 
     private static func record(windowID: CGWindowID, type: UInt8) -> [UInt8] {
-        var b = [UInt8](repeating: 0, count: length)
+        var b = [UInt8](repeating: 0, count: bufferSize)
         b[0x04] = UInt8(length)
         b[0x08] = type
         for i in 0x20..<0x30 { b[i] = 0xFF }
