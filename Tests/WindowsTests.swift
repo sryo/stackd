@@ -455,6 +455,39 @@ func registerWindowsTests() {
         try expectEqual(sibling.isStandard, true, "sibling window's verdict must survive")
     }
 
+    test("WindowAddressabilityCache.invalidate(pid:) drops that app's verdicts only") {
+        // App quit: every window of the pid goes, including its grace clock;
+        // another app keeps its verdicts even when its pid starts with the
+        // same digits.
+        let pid: pid_t = 777_771
+        let longer: pid_t = 7_777_710
+        defer {
+            WindowAddressabilityCache.invalidate(pid: pid)
+            WindowAddressabilityCache.invalidate(pid: longer)
+        }
+        WindowAddressabilityCache.confirm(pid: pid, windowID: 1, isStandard: true, isMinimized: false, now: 1000.0)
+        WindowAddressabilityCache.confirm(pid: longer, windowID: 1, isStandard: true, isMinimized: false, now: 1000.0)
+        WindowAddressabilityCache.confirm(pid: longer, windowID: 10, isStandard: true, isMinimized: false, now: 1000.0)
+        WindowAddressabilityCache.invalidate(pid: pid)
+        try expectEqual(verdictNow(pid: pid, windowID: 1, now: 1000.1).isStandard, false,
+                        "the quit app's window is unknown again")
+        try expectEqual(verdictNow(pid: longer, windowID: 1, now: 1000.1).isStandard, true)
+        try expectEqual(verdictNow(pid: longer, windowID: 10, now: 1000.1).isStandard, true)
+    }
+
+    test("WindowAddressabilityCache keeps the same window id of two apps apart") {
+        let a: pid_t = 7_777_722
+        let b: pid_t = 7_777_723
+        defer {
+            WindowAddressabilityCache.invalidate(pid: a)
+            WindowAddressabilityCache.invalidate(pid: b)
+        }
+        WindowAddressabilityCache.confirm(pid: a, windowID: 5, isStandard: true, isMinimized: false, now: 1000.0)
+        try expectEqual(verdictNow(pid: b, windowID: 5, now: 1000.1).isStandard, false)
+        WindowAddressabilityCache.setMinimized(pid: b, windowID: 5, true)
+        try expectEqual(verdictNow(pid: a, windowID: 5, now: 1000.1).isMinimized, false)
+    }
+
     test("WindowAddressabilityCache.standardVerdict — minimized ⇒ standard regardless of subrole reading") {
         // Some apps (Terminal) report AXSubrole == AXDialog for a minimized
         // window; a window first probed while in the Dock must still count

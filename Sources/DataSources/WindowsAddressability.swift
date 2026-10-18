@@ -81,7 +81,11 @@ enum WindowAddressabilityCache {
         /// nil until a read of the live element has taken them.
         var traits: WindowTraits? = nil
     }
-    private static var cache: [String: Probe] = [:]
+    struct Key: Hashable {
+        let pid: pid_t
+        let windowID: CGWindowID
+    }
+    private static var cache: [Key: Probe] = [:]
     /// Live (uncached) probes since the last `takeLiveProbeCount()`, for the
     /// debug timing line in Windows.all().
     private static var liveProbes = 0
@@ -90,7 +94,7 @@ enum WindowAddressabilityCache {
     // addressable=true (instead of false). Avoids the boot-burst race
     // where AX is slammed and Terminal's first 5+ probes time out in
     // milliseconds. Once the grace expires, real misses mark false.
-    private static var firstSeenAt: [String: TimeInterval] = [:]
+    private static var firstSeenAt: [Key: TimeInterval] = [:]
     private static let optimisticGraceMs: TimeInterval = 5.0
     private static let lock = NSLock()
     // Positive probes (addressable AND standard) are cached PERMANENTLY
@@ -184,7 +188,7 @@ enum WindowAddressabilityCache {
     }
 
     static func lookup(pid: pid_t, windowID: CGWindowID, now: TimeInterval) -> Lookup {
-        let key = cacheKey(pid, windowID)
+        let key = Key(pid: pid, windowID: windowID)
         lock.lock(); defer { lock.unlock() }
         guard let p = cache[key] else {
             // Grace runs from first sight: the read that settles this
@@ -201,7 +205,7 @@ enum WindowAddressabilityCache {
     @discardableResult
     static func record(pid: pid_t, windowID: CGWindowID, reading: Reading?,
                        now: TimeInterval) -> (probe: Probe, changed: Bool) {
-        let key = cacheKey(pid, windowID)
+        let key = Key(pid: pid, windowID: windowID)
         lock.lock()
         let existing = cache[key]
         let before = existing ?? pending(now: now)
@@ -286,15 +290,9 @@ enum WindowAddressabilityCache {
         return nil
     }
 
-    struct Key: Hashable {
-        let pid: pid_t
-        let windowID: CGWindowID
-    }
     /// Main thread only.
     private static var reads = AddressabilityReads<Key>()
     private static var pumpScheduled = false
-
-    private static func cacheKey(_ pid: pid_t, _ windowID: CGWindowID) -> String { "\(pid)|\(windowID)" }
 
     private static func onMain(_ body: @escaping () -> Void) {
         if Thread.isMainThread { body() } else { DispatchQueue.main.async(execute: body) }
@@ -364,9 +362,7 @@ enum WindowAddressabilityCache {
             lock.lock()
             let snapshot = cache
             lock.unlock()
-            reads.markStale { key in
-                snapshot[cacheKey(key.pid, key.windowID)].map(affected) ?? true
-            }
+            reads.markStale { key in snapshot[key].map(affected) ?? true }
         }
     }
 
@@ -390,10 +386,9 @@ enum WindowAddressabilityCache {
 
     /// Also forgets in-flight reads for the pid: their results are dropped.
     static func invalidate(pid: pid_t) {
-        let prefix = "\(pid)|"
         lock.lock()
-        cache = cache.filter { !$0.key.hasPrefix(prefix) }
-        firstSeenAt = firstSeenAt.filter { !$0.key.hasPrefix(prefix) }
+        cache = cache.filter { $0.key.pid != pid }
+        firstSeenAt = firstSeenAt.filter { $0.key.pid != pid }
         lock.unlock()
         onMain { reads.purge { $0.pid == pid } }
     }
@@ -408,12 +403,12 @@ enum WindowAddressabilityCache {
     /// A falsely-reported destroy self-heals — the next probe re-establishes
     /// sticky success.
     static func invalidate(pid: pid_t, windowID: CGWindowID) {
-        let key = cacheKey(pid, windowID)
+        let key = Key(pid: pid, windowID: windowID)
         lock.lock()
         cache.removeValue(forKey: key)
         firstSeenAt.removeValue(forKey: key)
         lock.unlock()
-        onMain { reads.purge { $0 == Key(pid: pid, windowID: windowID) } }
+        onMain { reads.purge { $0 == key } }
     }
 
     /// AX-confirmed verdict, bypassing the probe machinery. WindowsAXObserver
@@ -428,7 +423,7 @@ enum WindowAddressabilityCache {
     static func confirm(pid: pid_t, windowID: CGWindowID, isStandard: Bool, isMinimized: Bool,
                         traits: WindowTraits? = nil,
                         now: TimeInterval = Date().timeIntervalSince1970) {
-        let key = "\(pid)|\(windowID)"
+        let key = Key(pid: pid, windowID: windowID)
         lock.lock(); defer { lock.unlock() }
         // A standard window's traits don't change; keep any a list read took.
         let kept = isStandard ? (traits ?? cache[key]?.traits) : traits
@@ -447,7 +442,7 @@ enum WindowAddressabilityCache {
     /// transitions that produce bogus negative verdicts — re-stamping here
     /// would let minimize churn push the heal deadline out indefinitely.
     static func setMinimized(pid: pid_t, windowID: CGWindowID, _ value: Bool) {
-        let key = "\(pid)|\(windowID)"
+        let key = Key(pid: pid, windowID: windowID)
         lock.lock(); defer { lock.unlock() }
         guard let p = cache[key], p.addressable else { return }
         cache[key] = Probe(addressable: true, isStandard: p.isStandard, isMinimized: value, ts: p.ts,
