@@ -691,12 +691,32 @@ struct MotionWriteMailbox {
         return batch
     }
 
+    /// The batch a deferred drain starts with. Nil when a drain is already
+    /// running (it asks again at its finish) or nothing is waiting.
+    mutating func takeIfIdle() -> [Entry]? {
+        guard !draining, !pending.isEmpty else { return nil }
+        return take()
+    }
+
     /// The in-flight batch landed. True when newer entries are waiting: the
     /// caller takes them and drains again.
     mutating func finish() -> Bool {
         inFlight = []
         draining = false
         return !pending.isEmpty
+    }
+}
+
+/// The apps whose mailboxes a tick's posts asked a drain for. The tick posts
+/// every window's write first and drains each of these once afterwards, so
+/// an app's windows leave as one batch rather than the first alone while the
+/// rest wait out its AX round trip.
+struct MotionDrainRound {
+    private(set) var pids: [pid_t] = []
+
+    /// Record that a post to `pid`'s mailbox asked for a drain.
+    mutating func noteStartsDrain(pid: pid_t) {
+        if !pids.contains(pid) { pids.append(pid) }
     }
 }
 
@@ -1055,14 +1075,21 @@ final class WindowMotionEngine {
         for done in out.finished {
             if done.settled { settles[done.windowID] = done } else { resolve(done) }
         }
+        var round = MotionDrainRound()
         for write in out.writes {
             let settle = write.isFinal ? settles.removeValue(forKey: write.windowID) : nil
-            apply(write, settle: settle)
+            apply(write, settle: settle, round: &round)
         }
         for done in settles.values { resolve(done) }
+        for pid in round.pids {
+            if let writer = writers[pid], let batch = writer.mailbox.takeIfIdle() {
+                drain(writer, batch)
+            }
+        }
     }
 
-    private func apply(_ planned: MotionPlanner.FrameWrite, settle: MotionPlanner.Finished?) {
+    private func apply(_ planned: MotionPlanner.FrameWrite, settle: MotionPlanner.Finished?,
+                       round: inout MotionDrainRound) {
         let wid = planned.windowID
         let enforced = enforcedSizes[wid]
         if planned.isFinal { enforcedSizes[wid] = nil }
@@ -1087,11 +1114,15 @@ final class WindowMotionEngine {
                     w: write.frame.size.width, h: write.frame.size.height))
                 return
             }
-            post(write, element: element, writer: writer, generation: generation, callback: done)
+            if enqueue(write, element: element, writer: writer, generation: generation, callback: done) {
+                round.noteStartsDrain(pid: writer.pid)
+            }
             return
         }
         guard let el = elements[wid], let writer = writer(for: el) else { return }
-        post(write, element: el, writer: writer, generation: generation, callback: nil)
+        if enqueue(write, element: el, writer: writer, generation: generation, callback: nil) {
+            round.noteStartsDrain(pid: writer.pid)
+        }
     }
 
     private func writer(for element: AXUIElement, create: Bool = true) -> AppFrameWriter? {
@@ -1104,9 +1135,20 @@ final class WindowMotionEngine {
         return w
     }
 
+    /// Queue `write` and start the app's drain now when it is idle.
     private func post(_ write: MotionPlanner.FrameWrite, element: AXUIElement,
                       writer: AppFrameWriter, generation: UInt64,
                       callback: ((Bool) -> Void)?) {
+        if enqueue(write, element: element, writer: writer, generation: generation, callback: callback) {
+            drain(writer)
+        }
+    }
+
+    /// Queue `write` on the app's mailbox. True when the app has no drain
+    /// running: the caller drains it, now or after the rest of its batch.
+    private func enqueue(_ write: MotionPlanner.FrameWrite, element: AXUIElement,
+                         writer: AppFrameWriter, generation: UInt64,
+                         callback: ((Bool) -> Void)?) -> Bool {
         var ids: [UInt64] = []
         if let cb = callback {
             let id = nextCallbackID
@@ -1115,10 +1157,8 @@ final class WindowMotionEngine {
             ids = [id]
         }
         writer.elements[write.windowID] = element
-        if writer.mailbox.post(MotionWriteMailbox.Entry(write: write, generation: generation,
-                                                         callbacks: ids)) {
-            drain(writer)
-        }
+        return writer.mailbox.post(MotionWriteMailbox.Entry(write: write, generation: generation,
+                                                            callbacks: ids))
     }
 
     private struct WriteResult {
@@ -1128,7 +1168,10 @@ final class WindowMotionEngine {
     }
 
     private func drain(_ writer: AppFrameWriter) {
-        let batch = writer.mailbox.take()
+        drain(writer, writer.mailbox.take())
+    }
+
+    private func drain(_ writer: AppFrameWriter, _ batch: [MotionWriteMailbox.Entry]) {
         let jobs = batch.map { ($0, writer.elements[$0.write.windowID]) }
         writer.queue.async { [weak self] in
             // A batch this slow means the app kept its main thread busy
