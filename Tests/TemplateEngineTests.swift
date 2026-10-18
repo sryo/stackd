@@ -56,6 +56,28 @@ func registerTemplateEngineTests() {
         try expectEqual(probe, "1|true")
     }
 
+    test("template compile: deps list each matching channel once, longest path first") {
+        let probe = JSHarness.evalString("""
+        (function() {
+          const deps = __sdCompilePlaceholder(
+            'sd.usb.length + sd.windows.all.length + sd.windows.focused.title + sd.usb[0] + sd.windows.focusedChanged'
+          ).deps;
+          const want = ['windows.focusedChanged', 'windows.focused', 'windows.all', 'usb'].map(p => __sdSignalPaths[p]);
+          return deps.length + '|' + want.every((s, i) => s !== undefined && deps[i] === s);
+        })()
+        """)
+        try expectEqual(probe, "4|true")
+    }
+
+    test("template compile: a channel path matches between JS word boundaries") {
+        // `\b` treats `$` and `.` as non-word characters on either side.
+        let probe = JSHarness.evalString("""
+        ['x.sd.usb', '$sd.usb', 'sd.usb$', '(sd.usb)', 'xsd.usb', 'sd.usbx', '_sd.usb', 'sd.us', 'sd .usb']
+          .map(e => __sdCompilePlaceholder(e).deps.length).join(',')
+        """)
+        try expectEqual(probe, "1,1,1,1,0,0,0,0,0")
+    }
+
     test("template compile: pure expression with no sd.* refs has empty deps") {
         let depCount = JSHarness.evalString("__sdCompilePlaceholder('1 + 2').deps.length")
         try expectEqual(depCount, "0")

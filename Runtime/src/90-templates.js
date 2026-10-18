@@ -172,6 +172,24 @@ const __sdSignalPaths = (() => {
 const __sdSignalPathsSorted = Object.keys(__sdSignalPaths)
   .sort((a, b) => b.length - a.length);
 
+// One word-bounded `sd.<path>` matcher per path, built once: every
+// placeholder runs them, and an expression that never mentions `sd.` can't
+// match any of them.
+const __sdSignalMatchers = __sdSignalPathsSorted.map((path) => ({
+  re: new RegExp("\\bsd\\." + path.replace(/\./g, "\\.") + "\\b"),
+  sig: __sdSignalPaths[path],
+}));
+
+function __sdDepsOf(expr) {
+  const src = String(expr);
+  if (src.indexOf("sd.") === -1) return [];
+  const deps = new Set();
+  for (const m of __sdSignalMatchers) {
+    if (m.re.test(src)) deps.add(m.sig);
+  }
+  return [...deps];
+}
+
 function __sdCompilePlaceholder(expr) {
   // Compile with (sd, item, index) signature. Non-loop placeholders just
   // don't reference item/index — bound to undefined when called outside a
@@ -183,12 +201,7 @@ function __sdCompilePlaceholder(expr) {
     console.error("[stackd] template parse error in {{", expr.trim(), "}}:", String(e));
     fn = () => "";
   }
-  const deps = new Set();
-  for (const path of __sdSignalPathsSorted) {
-    const re = new RegExp("\\bsd\\." + path.replace(/\./g, "\\.") + "\\b");
-    if (re.test(expr)) deps.add(__sdSignalPaths[path]);
-  }
-  return { fn, deps: [...deps] };
+  return { fn, deps: __sdDepsOf(expr) };
 }
 
 function __sdEvalWithScope(compiled, item, index) {
