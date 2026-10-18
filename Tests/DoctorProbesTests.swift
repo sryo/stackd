@@ -34,6 +34,10 @@ private final class FakeDoctorBackend: DoctorProbeBackend {
         if let override = serverBoundsOverride { return override(id, serverReads) }
         return windows.first { $0.id == id }?.bounds
     }
+
+    var spaceCounts: [Int] = [2]
+
+    func spaceCountsByDisplay() -> [Int] { spaceCounts }
 }
 
 private func listed(_ id: CGWindowID, pid: pid_t = 500, owner: String = "Safari", layer: Int = 0,
@@ -220,15 +224,52 @@ func registerDoctorProbesTests() {
         try expectEqual(backend.listings, 2)
     }
 
+    // MARK: - Spaces
+
+    test("spaces probe works when a display lists spaces") {
+        let backend = FakeDoctorBackend()
+        backend.spaceCounts = [3, 2]
+        guard case .works(let detail) = DoctorProbes.spaces(backend) else {
+            throw Expectation(message: "expected works")
+        }
+        try expect(detail.contains("2 display") && detail.contains("5 space"), detail)
+    }
+
+    test("spaces probe works as long as one display has a space") {
+        let backend = FakeDoctorBackend()
+        backend.spaceCounts = [0, 1]
+        guard case .works = DoctorProbes.spaces(backend) else {
+            throw Expectation(message: "expected works")
+        }
+    }
+
+    test("spaces probe fails when SLSCopyManagedDisplaySpaces lists no display") {
+        let backend = FakeDoctorBackend()
+        backend.spaceCounts = []
+        guard case .failed(let detail) = DoctorProbes.spaces(backend) else {
+            throw Expectation(message: "expected failed")
+        }
+        try expect(detail.contains("SLSCopyManagedDisplaySpaces"), detail)
+    }
+
+    test("spaces probe fails when displays are listed but none has a space") {
+        let backend = FakeDoctorBackend()
+        backend.spaceCounts = [0, 0]
+        guard case .failed(let detail) = DoctorProbes.spaces(backend) else {
+            throw Expectation(message: "expected failed")
+        }
+        try expect(detail.contains("2 display"), detail)
+    }
+
     // MARK: - Runner
 
     test("doctor probes: run reports every probe once, in order") {
         let results = DoctorProbes.run(FakeDoctorBackend())
-        try expectEqual(results.map(\.name), ["windowserver", "window-bounds"])
+        try expectEqual(results.map(\.name), ["windowserver", "window-bounds", "spaces"])
     }
 
     test("doctor probes: the live backend completes every probe without trapping") {
         let results = DoctorProbes.run(LiveDoctorBackend())
-        try expectEqual(results.map(\.name), ["windowserver", "window-bounds"])
+        try expectEqual(results.map(\.name), ["windowserver", "window-bounds", "spaces"])
     }
 }

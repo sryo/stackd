@@ -68,7 +68,13 @@ protocol WindowBoundsReading {
     func serverBounds(of id: CGWindowID) -> CGRect?
 }
 
-typealias DoctorProbeBackend = WindowServerConnectionReading & WindowBoundsReading
+/// The managed display and space list behind `sd.spaces`.
+protocol SpacesReading {
+    /// The number of spaces on each display SLSCopyManagedDisplaySpaces lists.
+    func spaceCountsByDisplay() -> [Int]
+}
+
+typealias DoctorProbeBackend = WindowServerConnectionReading & WindowBoundsReading & SpacesReading
 
 enum DoctorProbes {
     /// Every probe, in report order.
@@ -76,6 +82,7 @@ enum DoctorProbes {
         [
             ProbeResult(name: "windowserver", verdict: windowServerConnection(backend)),
             ProbeResult(name: "window-bounds", verdict: windowBounds(backend)),
+            ProbeResult(name: "spaces", verdict: spaces(backend)),
         ]
     }
 
@@ -182,6 +189,21 @@ extension DoctorProbes {
     }
 }
 
+extension DoctorProbes {
+    /// SLSCopyManagedDisplaySpaces must list a display that has a space.
+    static func spaces(_ backend: SpacesReading) -> ProbeVerdict {
+        let counts = backend.spaceCountsByDisplay()
+        guard !counts.isEmpty else {
+            return .failed("SLSCopyManagedDisplaySpaces returned no displays")
+        }
+        let total = counts.reduce(0, +)
+        guard total > 0 else {
+            return .failed("SLSCopyManagedDisplaySpaces listed \(counts.count) display(s) but no space")
+        }
+        return .works("\(counts.count) display(s), \(total) space(s)")
+    }
+}
+
 /// The readers `stackd doctor` probes with: the same paths the daemon uses.
 struct LiveDoctorBackend: DoctorProbeBackend {
     var connectionID: Int32 { SkyLight.cid }
@@ -215,4 +237,8 @@ struct LiveDoctorBackend: DoctorProbeBackend {
     }
 
     func serverBounds(of id: CGWindowID) -> CGRect? { Overlay.bounds(of: id) }
+
+    func spaceCountsByDisplay() -> [Int] {
+        Spaces.all().values.map { (($0 as? [String: Any])?["spaces"] as? [Any])?.count ?? 0 }
+    }
 }
