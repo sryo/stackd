@@ -271,6 +271,7 @@ extension Bridge {
             guard let self = self, let json = WorkspaceFanout.focusedJSON() else { return }
             if json == self.lastState["focusedChanged"] { return }
             self.lastState["focusedChanged"] = json
+            WindowDebug.log("focus-trace: focusedChanged pushed \(json.prefix(60))")
             self.push(channel: "focusedChanged", json: json)
         }
         let pushTitleChanged: () -> Void = { [weak self] in

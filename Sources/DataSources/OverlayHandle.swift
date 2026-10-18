@@ -314,6 +314,7 @@ final class OverlayHandle: NSObject, WKNavigationDelegate {
             retargetFrom = nil
             let repaints = OverlayScreens.retargetRepaints(from: from, to: appKitFrame,
                                                             screens: NSScreen.screens.map(\.frame))
+            WindowDebug.log("focus-trace: retarget tick wid=\(targetWID) repaints=\(repaints)")
             if reveal.retargeted(repaints: repaints) { hideUntilPainted() }
         }
 
@@ -409,7 +410,10 @@ final class OverlayHandle: NSObject, WKNavigationDelegate {
             arguments: [:], in: nil, in: .page
         ) { [weak self] _ in
             guard let self = self, !self.released else { return }
-            if self.reveal.confirmed(generation: gen) { self.panel.alphaValue = 1 }
+            if self.reveal.confirmed(generation: gen) {
+                WindowDebug.log("focus-trace: revealed wid=\(self.targetWID)")
+                self.panel.alphaValue = 1
+            }
         }
     }
 

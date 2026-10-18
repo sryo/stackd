@@ -94,6 +94,7 @@ extension Bridge {
                 guard let id = body["id"] as? Int,
                       let wid = body["targetId"] as? Int,
                       let handle = b.overlayHandles[id] else { return false }
+                WindowDebug.log("focus-trace: overlay.setTarget wid=\(wid)")
                 if Thread.isMainThread {
                     handle.setTarget(CGWindowID(wid))
                 } else {
