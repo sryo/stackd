@@ -296,4 +296,20 @@ func registerRefCountedObserverTests() {
         drainMainQueue()
         try expectEqual(fires, 2, "50 same-hash calls collapse to a single fire")
     }
+
+    // MARK: - Per-observer teardown delays
+
+    test("RefCountedObserver: base class keeps the 5s hot-reload debounce") {
+        final class PlainObserver: RefCountedObserver {
+            override func install() -> Token? { nil }
+        }
+        try expectEqual(PlainObserver().teardownDelay, 5.0)
+    }
+
+    test("DisplayLinkObserver: stops the CVDisplayLink 0.5s after the last subscriber, not the 5s default") {
+        // The link wakes main on every vsync while installed, so a long
+        // idle tail after the last overlay or motion subscriber leaves is
+        // pure cost; 0.5s still spans a hot-reload's off/on cycle.
+        try expectEqual(DisplayLinkObserver.shared.teardownDelay, 0.5)
+    }
 }

@@ -300,6 +300,11 @@ final class DisplayLinkObserver: RefCountedObserver {
         return o
     }
 
+    /// A running link wakes main on every vsync, so the idle tail after the
+    /// last subscriber leaves is pure cost. 0.5s is long enough to absorb a
+    /// stack hot-reload or back-to-back animations without a relink.
+    override var teardownDelay: TimeInterval { 0.5 }
+
     private let displayID: CGDirectDisplayID?
 
     private init(displayID: CGDirectDisplayID?) {
