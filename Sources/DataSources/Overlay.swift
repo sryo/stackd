@@ -577,7 +577,7 @@ final class OverlayHandle: NSObject, WKNavigationDelegate {
         guard let txRef = create(cid)?.takeRetainedValue() else { return }
         let panelWID = UInt32(panel.windowNumber)
         _ = order(txRef, panelWID, 1, UInt32(targetWID))
-        commit(txRef, 0)
+        _ = commit(txRef, 0)
     }
 
     /// Width and height from `cgsPoint` to the right and bottom edges of the
@@ -1468,7 +1468,7 @@ enum Overlay {
               let txRef = create(cid)?.takeRetainedValue() else { return }
         // Order 0 = out; the relative window is ignored.
         _ = order(txRef, UInt32(panel.windowNumber), 0, 0)
-        commit(txRef, 0)
+        _ = commit(txRef, 0)
     }
 
     /// Move the panel at the window server in one transaction, optionally
@@ -1478,6 +1478,10 @@ enum Overlay {
     /// panel has no window-server window yet; the caller falls back to
     /// setFrameOrigin.
     static func serverMove(_ panel: NSPanel, cgsOrigin: CGPoint, above: CGWindowID? = nil) -> Bool {
+        guard let create = WindowTransaction.create,
+              let move   = WindowTransaction.moveWithGroup,
+              let order  = WindowTransaction.orderWindow,
+              let commit = WindowTransaction.commit else { return false }
         guard panel.windowNumber > 0 else { return false }
         return serverMove(panelWID: UInt32(panel.windowNumber), cgsOrigin: cgsOrigin, above: above)
     }
@@ -1496,8 +1500,7 @@ enum Overlay {
         if let above = above {
             _ = order(txRef, panelWID, 1, UInt32(above))
         }
-        commit(txRef, 0)
-        return true
+        return commit(txRef, 0) == 0
     }
 
     /// Shared NSPanel recipe for attach() and region(): borderless,

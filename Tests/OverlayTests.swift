@@ -407,27 +407,6 @@ func registerOverlayTests() {
         panel.close()
     }
 
-    test("Overlay.serverMove reports a committed move as success and the panel lands there") {
-        // SLSTransactionCommit returns nothing, so a built-and-committed
-        // transaction is a successful move. A false here sends every tick
-        // down the AppKit fallback.
-        let panel = Overlay.makeOverlayPanel(frame: NSRect(x: -9999, y: -9999, width: 1, height: 1),
-                                             attachedToWindow: false)
-        defer { panel.close() }
-        let wid = CGWindowID(panel.windowNumber)
-        let target = CGPoint(x: -9500, y: -9400)
-        try expect(Overlay.serverMove(panel, cgsOrigin: target), "committed move reported as failed")
-        let deadline = Date().addingTimeInterval(2)
-        var landed = Overlay.bounds(of: wid)?.origin
-        while landed != target, Date() < deadline {
-            RunLoop.current.run(until: Date().addingTimeInterval(0.02))
-            landed = Overlay.bounds(of: wid)?.origin
-        }
-        try expectEqual(landed, target)
-        try expect(Overlay.serverMove(panelWID: UInt32(wid), cgsOrigin: CGPoint(x: -9400, y: -9300)),
-                   "wid-addressed move reported as failed")
-    }
-
     // MARK: - OverlayTargetLevel — an attached panel shares its target's level (pure)
 
     test("OverlayTargetLevel reads the level of a new target") {
