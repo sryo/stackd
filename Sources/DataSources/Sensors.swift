@@ -63,11 +63,70 @@ private let kIOHIDEventTypePowerValue: Int64 = 25
 private let kIOHIDEventFieldTemperatureLevelValue: Int32 = Int32(15 << 16) + 0
 private let kIOHIDEventFieldPowerMeasurementValue: Int32 = Int32(25 << 16) + 0
 
-enum Sensors {
-    /// Snapshot used by Bridge.startSensors to push the channel.
-    /// Returns four parallel arrays. Empty arrays on Intel (different SMC
-    /// surface entirely) or when the SPI returns no matches for a usage.
-    static func snapshot() -> [String: Any] {
+/// The calls the sensor reader makes into the HID system, split out so the
+/// reader's caching can be exercised without the private SPI.
+protocol SensorBackend {
+    /// An opaque client handle; nil when the HID system is unavailable.
+    func makeClient() -> AnyObject?
+    /// The services matching an Apple vendor-page usage.
+    func services(client: AnyObject, usage: Int) -> CFArray?
+    func productName(service: AnyObject) -> String
+    /// nil when the service has no event of that type right now.
+    func value(service: AnyObject, eventType: Int64, field: Int32) -> Double?
+}
+
+private struct HIDSensorBackend: SensorBackend {
+    func makeClient() -> AnyObject? {
+        IOHIDEventSystemClientCreate(kCFAllocatorDefault)?.takeRetainedValue()
+    }
+
+    func services(client: AnyObject, usage: Int) -> CFArray? {
+        let matching: [String: Any] = [
+            "PrimaryUsagePage": kAppleVendorHIDPage,
+            "PrimaryUsage":     usage
+        ]
+        IOHIDEventSystemClientSetMatching(client, matching as CFDictionary)
+        return IOHIDEventSystemClientCopyServices(client)?.takeRetainedValue()
+    }
+
+    func productName(service: AnyObject) -> String {
+        guard let prop = IOHIDServiceClientCopyProperty(service, "Product" as CFString)?.takeRetainedValue() else {
+            return "Unknown"
+        }
+        return (prop as? String) ?? "Unknown"
+    }
+
+    func value(service: AnyObject, eventType: Int64, field: Int32) -> Double? {
+        guard let event = IOHIDServiceClientCopyEvent(service, eventType, 0, 0)?.takeRetainedValue() else { return nil }
+        return IOHIDEventGetFloatValue(event, field)
+    }
+}
+
+/// Reads the sensor snapshot. The HID client, the services each usage matches
+/// and their product names are looked up once and kept until `reset()`; every
+/// snapshot then only reads the current values.
+final class SensorReader {
+    private struct Probes {
+        /// Keeps the service handles alive; they are read by index below.
+        let services: CFArray
+        let names: [String]
+    }
+
+    private let backend: SensorBackend
+    private var client: AnyObject?
+    private var probesByUsage: [Int: Probes] = [:]
+
+    init(backend: SensorBackend) {
+        self.backend = backend
+    }
+
+    /// Four parallel arrays, empty when the HID system is unavailable (Intel
+    /// Macs read these through SMC instead) or no service matches a usage.
+    func snapshot() -> [String: Any] {
+        guard ensureClient() else {
+            return ["temperatures": [[String: Any]](), "voltages": [[String: Any]](),
+                    "currents": [[String: Any]](), "fans": [[String: Any]]()]
+        }
         return [
             "temperatures": query(usage: kAppleVendorUsageTemperature,
                                   eventType: kIOHIDEventTypeTemperatureValue,
@@ -85,16 +144,26 @@ enum Sensors {
         ]
     }
 
-    private static func query(usage: Int, eventType: Int64, field: Int32, unit: String) -> [[String: Any]] {
+    /// Drops the client and everything looked up through it.
+    func reset() {
+        probesByUsage = [:]
+        client = nil
+    }
+
+    private func ensureClient() -> Bool {
+        if client == nil { client = backend.makeClient() }
+        return client != nil
+    }
+
+    private func query(usage: Int, eventType: Int64, field: Int32, unit: String) -> [[String: Any]] {
         var out: [[String: Any]] = []
-        forEachService(usage: usage) { service in
-            guard let event = IOHIDServiceClientCopyEvent(service, eventType, 0, 0)?.takeRetainedValue() else { return }
-            let value = IOHIDEventGetFloatValue(event, field)
+        forEachService(usage: usage) { service, name in
+            guard let value = backend.value(service: service, eventType: eventType, field: field) else { return }
             // Filter NaN/Inf — the SPI returns garbage for sensors that
             // aren't currently powered (e.g. unused power rails).
             guard value.isFinite else { return }
             out.append([
-                "name":  productName(of: service),
+                "name":  name,
                 "value": (value * 100).rounded() / 100,
                 "unit":  unit
             ])
@@ -102,19 +171,20 @@ enum Sensors {
         return out
     }
 
-    private static func queryFans() -> [[String: Any]] {
+    private func queryFans() -> [[String: Any]] {
         var out: [[String: Any]] = []
-        forEachService(usage: kAppleVendorUsageFan) { service in
+        forEachService(usage: kAppleVendorUsageFan) { service, name in
             // Fan probes on Apple silicon respond to temperature-shaped reads
             // (the SPI surfaces RPM as a "level" measurement on the same path).
             // Fanless Macs still expose unrelated HID services on usage 0xb
             // (e.g. internal keyboard / trackpad) — those return nil events
             // and naturally drop out here.
-            guard let event = IOHIDServiceClientCopyEvent(service, kIOHIDEventTypeTemperatureValue, 0, 0)?.takeRetainedValue() else { return }
-            let rpm = IOHIDEventGetFloatValue(event, kIOHIDEventFieldTemperatureLevelValue)
+            guard let rpm = backend.value(service: service,
+                                          eventType: kIOHIDEventTypeTemperatureValue,
+                                          field: kIOHIDEventFieldTemperatureLevelValue) else { return }
             guard rpm.isFinite, rpm > 0 else { return }
             out.append([
-                "name": productName(of: service),
+                "name": name,
                 "rpm":  Int(rpm.rounded())
             ])
         }
@@ -125,30 +195,46 @@ enum Sensors {
     // IOHIDServiceClient handles are CF-only (no NSObject metadata) so a
     // Swift array cast triggers a SIGSEGV the moment ARC peeks at the slot.
     // CFArrayGetValueAtIndex + Unmanaged.fromOpaque is the safe path.
-    private static func forEachService(usage: Int, _ body: (AnyObject) -> Void) {
-        guard let clientRef = IOHIDEventSystemClientCreate(kCFAllocatorDefault) else { return }
-        let client = clientRef.takeRetainedValue()
-        let matching: [String: Any] = [
-            "PrimaryUsagePage": kAppleVendorHIDPage,
-            "PrimaryUsage":     usage
-        ]
-        IOHIDEventSystemClientSetMatching(client, matching as CFDictionary)
-        guard let arrayRef = IOHIDEventSystemClientCopyServices(client) else { return }
-        let array = arrayRef.takeRetainedValue()
-        let count = CFArrayGetCount(array)
-        for i in 0..<count {
-            guard let raw = CFArrayGetValueAtIndex(array, i) else { continue }
-            let service = Unmanaged<AnyObject>.fromOpaque(raw).takeUnretainedValue()
-            body(service)
+    private func forEachService(usage: Int, _ body: (AnyObject, String) -> Void) {
+        guard let probes = probes(usage: usage) else { return }
+        for i in 0..<CFArrayGetCount(probes.services) {
+            guard let raw = CFArrayGetValueAtIndex(probes.services, i) else { continue }
+            body(Unmanaged<AnyObject>.fromOpaque(raw).takeUnretainedValue(), probes.names[i])
         }
-        _ = client  // keep client alive across the loop
     }
 
-    private static func productName(of service: AnyObject) -> String {
-        guard let prop = IOHIDServiceClientCopyProperty(service, "Product" as CFString)?.takeRetainedValue() else {
-            return "Unknown"
+    private func probes(usage: Int) -> Probes? {
+        if let cached = probesByUsage[usage] { return cached }
+        guard let client = client else { return nil }
+        let services = backend.services(client: client, usage: usage) ?? ([] as NSArray as CFArray)
+        var names: [String] = []
+        for i in 0..<CFArrayGetCount(services) {
+            guard let raw = CFArrayGetValueAtIndex(services, i) else {
+                names.append("Unknown")
+                continue
+            }
+            names.append(backend.productName(service: Unmanaged<AnyObject>.fromOpaque(raw).takeUnretainedValue()))
         }
-        return (prop as? String) ?? "Unknown"
+        let built = Probes(services: services, names: names)
+        probesByUsage[usage] = built
+        return built
+    }
+}
+
+enum Sensors {
+    private static let reader = SensorReader(backend: HIDSensorBackend())
+
+    /// Snapshot used by Bridge.startSensors to push the channel.
+    /// Returns four parallel arrays. Empty arrays on Intel (different SMC
+    /// surface entirely) or when the SPI returns no matches for a usage.
+    static func snapshot() -> [String: Any] {
+        reader.snapshot()
+    }
+
+    /// Forget the HID client and the sensors found through it, so the next
+    /// snapshot looks them up again.
+    static func reset() {
+        reader.reset()
     }
 }
 
@@ -166,7 +252,11 @@ final class SensorsObserver: RefCountedObserver {
     override func install() -> Token {
         // No native event source for temps/fans; poll at 2s. Lazy fire skips
         // the per-stack push when an idle system hashes the same each tick
-        // (temps/fans are rounded to 2 decimals at query time, Sensors.swift:98).
-        return installPollingTimer(key: "sensors") { Sensors.snapshot() }
+        // (temps are rounded to 2 decimals at query time, fans to whole RPM).
+        let polling = installPollingTimer(key: "sensors") { Sensors.snapshot() }
+        return Token {
+            polling.cancel()
+            Sensors.reset()
+        }
     }
 }
