@@ -15,9 +15,9 @@ import Foundation
 // Mission Control" or for the show-front-windows / show-desktop variants.
 // Reference: yabai's src/mission_control.c (mission_control_observe).
 //
-// Enter is handled separately in Sources/DataSources/Spaces.swift, where
-// the CGS event 1204 callback already runs and now also fires
-// `sd.missionControl.entered`. That keeps the Spaces subscription path
+// Enter is handled separately in Sources/DataSources/Spaces.swift, whose
+// CGS event 1204 callback fires `sd.missionControl.entered` (through
+// WindowServerIntake). That keeps the Spaces subscription path
 // authoritative for spaces, and lets this file focus on the AX side.
 //
 // Bangs surfaced (declared in a stack's `handles` array):

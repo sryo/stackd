@@ -13,7 +13,7 @@ import CoreGraphics
 /// begins (the left mouse button) and `release` ends every active drag (a
 /// left mouse-up). The window-drag CGS codes 1411/1412 would fit either
 /// role but don't fire on macOS 27 (see the probe-only codes in
-/// Windows.swift). `expireQuiet` is the fallback when the release is missed.
+/// WindowEvents.swift). `expireQuiet` is the fallback when the release is missed.
 ///
 /// - begin: the first size change of a window, relative to the last frame
 ///   seen for it, while interacting and not an echo of a daemon write.

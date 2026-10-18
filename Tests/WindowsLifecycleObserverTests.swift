@@ -196,7 +196,7 @@ func registerWindowsLifecycleObserverTests() {
     //
     // The gates rightly suppress duplicate BANGS, but the wid still just
     // entered the poll snapshot — full heal-path story in the
-    // pollCreateActions doc comment (Windows.swift).
+    // pollCreateActions doc comment (WindowsLifecycle.swift).
 
     test("pollCreateActions: nothing suppressed → announce all, no pump nudge") {
         let created = [snap(id: 1, title: "A"), snap(id: 2, title: "B")]

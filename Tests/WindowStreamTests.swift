@@ -2,7 +2,7 @@ import Foundation
 import CoreGraphics
 import JavaScriptCore
 
-// Tests for `WindowStream` in Sources/DataSources/Windows.swift.
+// Tests for `WindowStream` in Sources/DataSources/WindowCapture.swift.
 //
 // The stream's capture source is injected, so the frame pipeline (downscale,
 // encode, unchanged-frame skip, stop) runs on synthetic CGImages driven by

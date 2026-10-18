@@ -3,21 +3,6 @@ import ApplicationServices
 import CoreGraphics
 import Foundation
 
-// SLSTransaction* — atomic batch of window geometry/order mutations committed
-// to WindowServer in one round-trip. Consumed by Overlay.swift's per-tick
-// reshape+order. (sd.windows.batch does not use it: the batch path queues
-// full frames and applies them all-AX at commit — see the batchSink doc
-// comment in WindowsByID for the channel-split race that rules out the
-// SLS-position/AX-size split.)
-//
-// Lives here (not in Sources/Private/SkyLight.swift) because the primary
-// domain is windows; Overlay imports as `Windows.Transaction.*`. Mirrors
-// Hammerspoon's per-extension SPI ownership.
-//
-// Signatures verified against yabai/src/misc/extern.h and JankyBorders/
-// src/misc/extern.h (SLSTransactionMoveWindowWithGroup: (CFTypeRef, uint32_t,
-// CGPoint), point = absolute CGS top-left global origin — same space as
-// AX/CG, no flip).
 // Permanent diagnostic switch for window lifecycle plumbing.
 // STACKD_WIN_DEBUG=1 turns on stderr logs at every gate in the
 // source → bang → JS fan-out chain so a "events never arrived" symptom
@@ -35,6 +20,20 @@ enum WindowDebug {
     }
 }
 
+// SLSTransaction* — atomic batch of window geometry/order mutations committed
+// to WindowServer in one round-trip. Consumed by the overlay tick's
+// reshape+order (Overlay, OverlayHandle). sd.windows.batch does not use it:
+// the batch path queues full frames and applies them all-AX at commit — see
+// the batchSink doc comment in WindowsByID for the channel-split race that
+// rules out the SLS-position/AX-size split.
+//
+// Lives here (not in Sources/Private/SkyLight.swift) because the primary
+// domain is windows. Mirrors Hammerspoon's per-extension SPI ownership.
+//
+// Signatures verified against yabai/src/misc/extern.h and JankyBorders/
+// src/misc/extern.h (SLSTransactionMoveWindowWithGroup: (CFTypeRef, uint32_t,
+// CGPoint), point = absolute CGS top-left global origin — same space as
+// AX/CG, no flip).
 enum WindowTransaction {
     typealias CreateFn          = @convention(c) (Int32) -> Unmanaged<CFTypeRef>?
     // SLSTransactionCommit returns nothing: the register it leaves behind is
@@ -87,7 +86,7 @@ enum WindowServerProperty {
     }
 }
 
-// Everything window-related, by source-of-truth:
+// Window primitives, by source-of-truth:
 //
 //   Windows                  — CGWindowList enumeration (.all), AX-focused
 //                              window of the frontmost app (.focused), plus
@@ -98,20 +97,20 @@ enum WindowServerProperty {
 //                              that maps an AXUIElement back to its CGWindowID.
 //                              Loaded once via dlsym(RTLD_DEFAULT).
 //
+//   WindowAXRead             — several attributes of one window in one AX
+//                              round trip.
+//
 //   WindowsByID              — per-window actions targeting a specific
 //                              CGWindowID via the AXShim lookup; per-pid
 //                              ID→AX cache so consecutive calls skip the
 //                              app-windows traversal.
 //
-//   WindowsLifecycleObserver — 10s CGWindowList-diff safety backstop behind
-//                              WindowsAXObserver (the primary). Fires
-//                              create/destroy/title-change callbacks only
-//                              for events AX did not cover (missed-by-ax
-//                              drift sensor). Always-on at startup.
-//
-//   FrontmostWindowObserver  — event-driven AX notification fan-out for the
-//                              focused app's focus / title changes. Rebinds
-//                              its per-pid AXAppObserver on app activation.
+// The rest of the window layer lives beside this file: lifecycle events in
+// WindowsAXObserver.swift (primary), WindowEvents.swift (CGS) and
+// WindowsLifecycle.swift (the safety poll and create fan-out); the
+// addressability verdicts behind Windows.all() in
+// WindowsAddressability.swift; frontmost focus in WindowsFocus.swift;
+// animated writes in WindowMotion.swift.
 
 // MARK: - Windows: CGWindowList + focused-window AX
 
@@ -233,17 +232,10 @@ enum Windows {
         return AXUIElementPerformAction(win, kAXRaiseAction as CFString) == .success
     }
 
-    // All normal windows known to WindowServer, including minimized / other-space
-    // / offscreen. Prefers SLSCopyWindowsWithOptionsAndTags (yabai's route) for
-    // authority + completeness; falls back to CGWindowListCopyWindowInfo(.optionAll)
-    // if the SPI symbol fails to resolve. Each entry carries `onscreen: Bool` so
-    // consumers that want only visible windows can filter without losing the
-    // option to see the full inventory.
     /// Own-pid cache — stackd's own panels show up in CGWindowList alongside
-    /// real user windows and pollute every consumer that iterates them
+    /// real user windows and would pollute every consumer that iterates them
     /// (windowscape tiling, framemaster border-drawing, custom switchers,
-    /// etc.). Exclude them by default; stacks that genuinely need to enumerate
-    /// stackd's own panels can opt in.
+    /// etc.), so Windows.all() leaves them out.
     private static let ownPid: Int = Int(ProcessInfo.processInfo.processIdentifier)
 
     /// Window-server levels an app's own document windows live at: normal,
@@ -260,7 +252,11 @@ enum Windows {
         appWindowLevels.contains(layer)
     }
 
-    static func all(includeOwn: Bool = false, includeNonStandard: Bool = false) -> [[String: Any]] {
+    /// The app windows WindowServer knows of, including minimized, other-space
+    /// and offscreen ones; each row carries `onscreen` so consumers that want
+    /// only visible windows can filter. Standard windows only, stackd's own
+    /// panels excluded.
+    static func all() -> [[String: Any]] {
         // SLSCopyWindowsWithOptionsAndTags is the yabai-style "authoritative"
         // path but crashes inside SkyLight on macOS 26 (Tahoe) — repro: any
         // stack with `windows` permission segfaults at startWorkspace's
@@ -269,13 +265,11 @@ enum Windows {
         guard let raw = CGWindowListCopyWindowInfo(
             [.optionAll, .excludeDesktopElements],
             kCGNullWindowID
-        ) else { return [] }
-        guard WindowDebug.enabled else {
-            return decode(raw as! [[String: Any]], includeOwn: includeOwn, includeNonStandard: includeNonStandard)
-        }
+        ) as? [[String: Any]] else { return [] }
+        guard WindowDebug.enabled else { return decode(raw) }
         let began = CFAbsoluteTimeGetCurrent()
         _ = WindowAddressabilityCache.takeLiveProbeCount()
-        let out = decode(raw as! [[String: Any]], includeOwn: includeOwn, includeNonStandard: includeNonStandard)
+        let out = decode(raw)
         let ms = Int((CFAbsoluteTimeGetCurrent() - began) * 1000)
         if ms >= 10 {
             WindowDebug.log("windows.all: \(ms)ms, \(WindowAddressabilityCache.takeLiveProbeCount()) live AX probes")
@@ -283,7 +277,14 @@ enum Windows {
         return out
     }
 
-    private static func decode(_ list: [[String: Any]], includeOwn: Bool, includeNonStandard: Bool = false) -> [[String: Any]] {
+    /// CGWindowList rows → Windows.all() rows. `probe` gives each window's
+    /// AX verdict (the addressability cache in production).
+    static func decode(
+        _ list: [[String: Any]],
+        probe: (pid_t, CGWindowID) -> WindowAddressabilityCache.Probe = {
+            WindowAddressabilityCache.probe(pid: $0, windowID: $1)
+        }
+    ) -> [[String: Any]] {
         var bundleIds: [Int: String?] = [:]
         func bundleId(_ pid: Int) -> String? {
             if let hit = bundleIds[pid] { return hit }
@@ -299,7 +300,7 @@ enum Windows {
                   let pid   = info[kCGWindowOwnerPID  as String] as? Int,
                   let bounds = info[kCGWindowBounds as String]   as? [String: CGFloat]
             else { return nil }
-            if !includeOwn && pid == ownPid { return nil }
+            if pid == ownPid { return nil }
             let onscreen = (info[kCGWindowIsOnscreen as String] as? Int) ?? 0
             // Enrich with AX-derived fields the stack would otherwise have
             // to probe per-pass:
@@ -308,14 +309,12 @@ enum Windows {
             //                Inspector / preferences / helper windows)
             // Both cached per (pid, id) with a TTL so a 50-window
             // CGWindowList push doesn't fan out 50+50 AX RPCs every time.
-            let probe = WindowAddressabilityCache.probe(pid: pid_t(pid), windowID: CGWindowID(num))
+            let verdict = probe(pid_t(pid), CGWindowID(num))
             // Skip non-standard windows (Notification Center banners,
-            // Spotlight overlays, popovers, sheets, system HUDs) by
-            // default. Matches Hammerspoon's `hs.window.allWindows()` and
-            // yabai's `window_manager_find_windows_on_storage`. Stacks
-            // that genuinely need the full set pass `includeNonStandard:
-            // true`.
-            if !includeNonStandard && !probe.isStandard { return nil }
+            // Spotlight overlays, popovers, sheets, system HUDs). Matches
+            // Hammerspoon's `hs.window.allWindows()` and yabai's
+            // `window_manager_find_windows_on_storage`.
+            if !verdict.isStandard { return nil }
             let originX = Int(bounds["X"] ?? 0)
             let originY = Int(bounds["Y"] ?? 0)
             // Mirror Windows.focused()'s display enrichment for every entry
@@ -331,9 +330,9 @@ enum Windows {
                 "pid": pid,
                 "title": info[kCGWindowName as String] as? String ?? "",
                 "onscreen": onscreen != 0,
-                "addressable": probe.addressable,
-                "isStandard":  probe.isStandard,
-                "isMinimized": probe.isMinimized,
+                "addressable": verdict.addressable,
+                "isStandard":  verdict.isStandard,
+                "isMinimized": verdict.isMinimized,
                 "level": layer,
                 "frame": [
                     "x": originX,
@@ -346,7 +345,7 @@ enum Windows {
             if let d = Display.forPoint(CGPoint(x: originX, y: originY)) {
                 out["display"] = d
             }
-            if let t = probe.traits { out.merge(t.fields) { $1 } }
+            if let t = verdict.traits { out.merge(t.fields) { $1 } }
             return out
         }
     }
@@ -520,6 +519,16 @@ struct WindowElementIndex<Element> {
     }
 }
 
+/// Pure resolution order for a window's owning pid: the AX element cache's
+/// owner map first, then `query`, the single-window CGWindowList fallback.
+enum WindowOwnerLookup {
+    static func pid<Element>(for windowID: CGWindowID,
+                             cached: WindowElementIndex<Element>,
+                             query: (CGWindowID) -> pid_t?) -> pid_t? {
+        cached.pid(for: windowID) ?? query(windowID)
+    }
+}
+
 /// When a failed attribute read on a cached element means "re-resolve the
 /// element and read again" rather than a real answer about the window.
 enum StaleElementRetry {
@@ -545,9 +554,8 @@ enum WindowsByID {
     // committed SLS position, stacking windows at old origins / offscreen.
     // Queueing full frames and applying them all on the single AX channel
     // can't hit that race, and it drops the SkyLight symbol dependency that
-    // made begin fail outright on some daemon states.
-    // WindowTransaction (the SLS enum above) stays: Overlay.swift's per-tick
-    // reshape+order still consumes it.
+    // made begin fail outright on some daemon states. WindowTransaction
+    // serves the overlay tick's reshape+order, not the batch.
     static var batchSink: ((CGWindowID, CGRect) -> Void)?
 
     // Pending frames for the open batch. Last-write-wins per window id,
@@ -690,20 +698,14 @@ enum WindowsByID {
             return true
         }
         guard let el = elementFor(windowID: windowID) else { return false }
-        return setFrame(element: el, windowID: windowID, frame: CGRect(x: x, y: y, width: w, height: h))
-    }
-
-    /// The write itself, on an already-resolved element (the motion engine's
-    /// settle frame reuses the element it animated through). Bypasses the
-    /// batch sink — callers check it first.
-    static func setFrame(element el: AXUIElement, windowID: CGWindowID, frame: CGRect) -> Bool {
+        let frame = CGRect(x: x, y: y, width: w, height: h)
         let ok = writeFrameAX(element: el, frame: frame)
         if ok { FrameLedger.shared.recordWrite(windowID: windowID, frame: frame) }
         return ok
     }
 
-    /// The size→position→size write alone, with no main-thread bookkeeping,
-    /// so an app's AX writer queue can run it.
+    /// The size→position→size write, synchronous on the caller's thread, so
+    /// an instant setFrame or a batch commit has landed when it returns.
     static func writeFrameAX(element el: AXUIElement, frame: CGRect) -> Bool {
         let x = frame.origin.x, y = frame.origin.y, w = frame.size.width, h = frame.size.height
         var pos = CGPoint(x: x, y: y)
@@ -757,17 +759,6 @@ enum WindowsByID {
         return timedOut
     }
 
-    /// The motion engine's settle frame: two setters in `order`, then a
-    /// size read-back, and a third size set only when the app reports a
-    /// size other than the one written.
-    ///
-    /// Diverges from hs.window:setFrame (and `writeFrameAX`), which always
-    /// sets size, position, size. The blind third set exists because a size
-    /// set can be clamped against the old position; ordering by grow vs.
-    /// shrink (see FrameWriteOrder) already avoids that clamp in the common
-    /// case, and the read-back catches the rest. Skipping the third set
-    /// saves one AX round trip and one extra app layout pass per settle.
-    /// Thread-agnostic.
     /// The lift step of FrameWriteSteps: a window overhanging the display
     /// its target is on moves fully inside at its current size before the
     /// size writes, which AppKit otherwise refuses. Thread-agnostic.
@@ -795,6 +786,18 @@ enum WindowsByID {
         return displays.first(where: { $0.id == id })?.bounds
     }
 
+    /// The motion engine's settle frame: the lift step, two setters in
+    /// `order`, then a size read-back, and a third size set (with the
+    /// keep-inside step) only when the app reports a size other than the
+    /// one written.
+    ///
+    /// Diverges from hs.window:setFrame (and `writeFrameAX`), which always
+    /// sets size, position, size. The blind third set exists because a size
+    /// set can be clamped against the old position; ordering by grow vs.
+    /// shrink (see FrameWriteOrder) already avoids that clamp in the common
+    /// case, and the read-back catches the rest. Skipping the third set
+    /// saves one AX round trip and one extra app layout pass per settle.
+    /// Thread-agnostic.
     static func settleFrameAX(element el: AXUIElement, frame: CGRect, order: FrameWriteOrder) -> Bool {
         var pos = frame.origin
         var sz = frame.size

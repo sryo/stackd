@@ -98,8 +98,8 @@ enum WindowAddressabilityCache {
     private static let optimisticGraceMs: TimeInterval = 5.0
     private static let lock = NSLock()
     // Positive probes (addressable AND standard) are cached PERMANENTLY
-    // (until pid death — see the NSWorkspace.didTerminateApplication
-    // observer in install()). Reasoning: AX's 100ms messaging timeout drops
+    // (until pid death — AppDelegate's NSWorkspace.didTerminateApplication
+    // observer drops the pid). Reasoning: AX's 100ms messaging timeout drops
     // queries under load (spotlight indexing, brightness poll, rapid tile
     // passes); a once-addressable standard window doesn't randomly stop
     // being one while its pid is alive. Re-probing on TTL expiry would let

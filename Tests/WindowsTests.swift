@@ -2,26 +2,35 @@ import Foundation
 import AppKit
 import CoreGraphics
 
-// Tests for `Sources/DataSources/Windows.swift`: the pure helpers
-// (lifecycle bang detail, addressability-cache verdict rules, create-announce
-// dedup, batch frame ledger), the `Windows.all()` shape contract, and the
-// negative branch of every `WindowsByID` reader for a window id that names
-// no window. Live AX mutations (setFrame / minimize / raise / focus on a real
-// window) are not exercised: they would move whatever the user has open.
+// Tests for the window primitives in `Sources/DataSources/Windows*.swift`:
+// the pure helpers (lifecycle bang detail, addressability-cache verdict
+// rules, create-announce dedup, batch frame ledger), the `Windows.all()` row
+// shape, and the negative branch of every `WindowsByID` reader for a window
+// id that names no window. Live AX mutations (setFrame / minimize / raise /
+// focus on a real window) are not exercised: they would move whatever the
+// user has open.
 
-// Whether raw CGWindowList carries at least one row decode promises to keep
-// under includeNonStandard: true — same field requirements as decode's
-// guard-let chain, minus the own-pid exclusion it applies. The default
-// Windows.all() additionally filters on the AX isStandard probe, and that
-// depends on third-party processes' live AX state (headless CI sessions
-// resolve none, even with AXIsProcessTrusted() granted) — so the default
-// list's count is a fact about the environment, not about decode, and is
-// never asserted. Same capability-gate pattern as bluetoothTCCGranted in
-// DevicesTests: assert hard where the environment can deliver, skip where
-// it can't.
+private func rawWindowList() -> [[String: Any]] {
+    CGWindowListCopyWindowInfo([.optionAll, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
+}
+
+/// Every window reads as an addressable standard window, so decode keeps
+/// every row its field rules allow.
+private func allStandard(_: pid_t, _: CGWindowID) -> WindowAddressabilityCache.Probe {
+    WindowAddressabilityCache.Probe(addressable: true, isStandard: true, isMinimized: false, ts: 0)
+}
+
+// Whether raw CGWindowList carries at least one row decode keeps when every
+// probe reads standard — same field requirements as decode's guard-let
+// chain, minus the own-pid exclusion it applies. Windows.all() itself also
+// filters on the live AX isStandard probe, and that depends on third-party
+// processes' AX state (headless CI sessions resolve none, even with
+// AXIsProcessTrusted() granted) — so its count is a fact about the
+// environment, not about decode, and is never asserted. Same
+// capability-gate pattern as bluetoothTCCGranted in DevicesTests: assert
+// hard where the environment can deliver, skip where it can't.
 private var rawWindowCandidatesExist: Bool {
-    guard let raw = CGWindowListCopyWindowInfo([.optionAll, .excludeDesktopElements], kCGNullWindowID)
-            as? [[String: Any]] else { return false }
+    let raw = rawWindowList()
     let ownPid = Int(ProcessInfo.processInfo.processIdentifier)
     return raw.contains { info in
         info[kCGWindowNumber as String] is Int &&
@@ -116,13 +125,13 @@ func registerWindowsTests() {
 
     // MARK: - Windows.all() — public CGWindowList shape contract
 
-    test("Windows.all rows (includeNonStandard) carry the documented keys and an Int x/y/w/h frame") {
-        // includeNonStandard: true keeps every normal-layer non-own CGWindow,
-        // so with raw candidates present, emptiness means decode's field
-        // extraction broke. The default Windows.all() additionally filters
-        // on the AX isStandard probe, whose result depends on other apps'
-        // AX state — its count is never asserted (see rawWindowCandidatesExist).
-        let entries = Windows.all(includeNonStandard: true)
+    test("Windows.all rows carry the documented keys and an Int x/y/w/h frame") {
+        // With every probe standard, decode keeps every normal-layer non-own
+        // CGWindow, so with raw candidates present, emptiness means decode's
+        // field extraction broke. Windows.all() additionally filters on the
+        // live AX isStandard probe, whose result depends on other apps' AX
+        // state — its count is never asserted (see rawWindowCandidatesExist).
+        let entries = Windows.decode(rawWindowList(), probe: allStandard)
         if entries.isEmpty {
             try expect(!rawWindowCandidatesExist,
                        "raw CGWindowList has normal-layer candidates but decode produced 0 rows")
@@ -143,7 +152,7 @@ func registerWindowsTests() {
     test("Windows.all rows carry the owning app's bundleId, like sd.windows.focused") {
         // Stacks key per-app rules (exclude lists, deny entries) on bundleId;
         // without it on list rows they fall back to the localized app name.
-        let entries = Windows.all(includeNonStandard: true)
+        let entries = Windows.decode(rawWindowList(), probe: allStandard)
         try expect(!entries.isEmpty || !rawWindowCandidatesExist, "no rows to check")
         for entry in entries {
             guard let pid = entry["pid"] as? Int,
@@ -156,8 +165,24 @@ func registerWindowsTests() {
     test("Windows.all ids are unique (one row per CGWindowID)") {
         // Tilers and switchers dedupe by id; a repeated row would double-count
         // a window.
-        let ids = Windows.all(includeNonStandard: true).compactMap { $0["id"] as? Int }
+        let ids = Windows.decode(rawWindowList(), probe: allStandard).compactMap { $0["id"] as? Int }
         try expectEqual(Set(ids).count, ids.count)
+    }
+
+    test("Windows.all leaves out stackd's own windows, non-app levels and non-standard windows") {
+        func row(_ id: Int, pid: Int, layer: Int = 0) -> [String: Any] {
+            [kCGWindowNumber as String: id, kCGWindowLayer as String: layer,
+             kCGWindowOwnerName as String: "App", kCGWindowOwnerPID as String: pid,
+             kCGWindowBounds as String: ["X": CGFloat(0), "Y": CGFloat(0), "Width": CGFloat(10), "Height": CGFloat(10)]]
+        }
+        let other = 7_777_730
+        let own = Int(ProcessInfo.processInfo.processIdentifier)
+        let list = [row(1, pid: other), row(2, pid: own),
+                    row(3, pid: other, layer: Int(CGWindowLevelForKey(.statusWindow))), row(4, pid: other)]
+        let rows = Windows.decode(list) { pid, wid in
+            WindowAddressabilityCache.Probe(addressable: true, isStandard: wid != 4, isMinimized: false, ts: 0)
+        }
+        try expectEqual(rows.compactMap { $0["id"] as? Int }, [1])
     }
 
     // MARK: - WindowsByID readers — negative branch for invalid CGWindowID

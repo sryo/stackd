@@ -35,7 +35,7 @@ import Foundation
 // A list narrowed to a few windows is what made 808 look silenced by
 // 806/807: raises of unlisted windows post nothing. With the full list,
 // 808 fires for raises again and overlays follow at window-server time
-// (OverlayEventFollow in Overlay.swift). OverlayRepinPolicy's cadence
+// (OverlayEventFollow.swift). OverlayRepinPolicy's cadence
 // stays the z-order backstop for any window the list misses. The same
 // 806/807 of AX-tracked windows feed sd.window.resizing
 // (WindowResizeObserver in WindowResizing.swift).
@@ -185,11 +185,6 @@ enum CGSWindowEventDecoder {
     }
 }
 
-// The shared callback. SkyLight invokes us off the main thread; we count
-// the fire (the "does this code actually fire on this macOS?" sensor the
-// poll tick logs), decode, then post to WindowServerIntake, whose one drain
-// per burst dispatches on main before touching AppDelegate.shared / host
-// so bang dispatch stays on the runloop it was built on.
 /// The per-window interest list for the overlay-events path: every
 /// AX-tracked window plus every overlay target (a target AX can't observe
 /// still needs its frame events), as one sorted, duplicate-free list.
@@ -202,6 +197,11 @@ enum WindowFrameInterest {
     }
 }
 
+// The shared callback. SkyLight invokes us off the main thread; we count
+// the fire (the "does this code actually fire on this macOS?" sensor the
+// poll tick logs), decode, then post to WindowServerIntake, whose one drain
+// per burst dispatches on main before touching AppDelegate.shared / host
+// so bang dispatch stays on the runloop it was built on.
 private let windowEventsCallback: SkyLightWindowEvents.CGSConnectionCallback = { eventType, data, dataLen, _, _ in
     WindowEvents.countFire(eventType)
     let event = CGSWindowEventDecoder.decode(

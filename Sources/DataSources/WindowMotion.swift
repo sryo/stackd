@@ -5,7 +5,7 @@ import AppKit
 
 // Window motion engine — daemon-side animated setFrame.
 //
-// Split from Windows.swift so the scheduling core stays pure and headless-
+// Apart from Windows.swift so the scheduling core stays pure and headless-
 // testable (precedent: Display.swift / DisplayDDC.swift). Three layers:
 //
 //   MotionMath    — easing curves + a critically-damped spring, pure math.
@@ -837,10 +837,10 @@ final class WindowMotionEngine {
     private var clockOf: [CGWindowID: CGDirectDisplayID] = [:]
     private var screenObserver: NSObjectProtocol?
     private var completions: [UInt64: (Bool) -> Void] = [:]
-    // AX element resolved once per animation — WindowsByID.elementFor walks
-    // the CGWindowList, far too expensive per tick. A stale element mid-
-    // animation makes the intermediate writes no-op (-25204 tolerated
-    // everywhere else in Windows.swift); the final write re-resolves.
+    // AX element resolved once per animation — WindowsByID.elementFor can
+    // walk the app's AX window list, far too expensive per tick. A stale
+    // element mid-animation makes the intermediate writes no-op (-25204,
+    // tolerated as everywhere in WindowsByID); the final write re-resolves.
     private var elements: [CGWindowID: AXUIElement] = [:]
     private var writers: [pid_t: AppFrameWriter] = [:]
     // Size the app enforced last time it refused this animation's target

@@ -3,16 +3,6 @@ import ApplicationServices
 import CoreGraphics
 import Foundation
 
-/// Pure resolution order for a window's owning pid: the AX element cache's
-/// owner map first, then `query`, the single-window CGWindowList fallback.
-enum WindowOwnerLookup {
-    static func pid<Element>(for windowID: CGWindowID,
-                             cached: WindowElementIndex<Element>,
-                             query: (CGWindowID) -> pid_t?) -> pid_t? {
-        cached.pid(for: windowID) ?? query(windowID)
-    }
-}
-
 /// Which focus path WindowsByID.focus takes, and when its AX raise runs.
 enum WindowFocusRoute: Equatable {
     /// NSRunningApplication activation + synchronous AX on main.
