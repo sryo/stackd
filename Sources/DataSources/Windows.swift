@@ -471,7 +471,13 @@ enum WindowSubroleVerdict: Equatable {
     case standard, nonStandard, unknown
 
     init(_ slot: WindowAXRead.Slot) {
-        guard case .value(let v) = slot, let s = v as? String else { self = .unknown; return }
+        guard case .value(let v) = slot else { self = .unknown; return }
+        self.init(subrole: v as? String)
+    }
+
+    /// nil is an unreadable subrole.
+    init(subrole: String?) {
+        guard let s = subrole else { self = .unknown; return }
         self = WindowsByID.isStandardSubrole(s) ? .standard : .nonStandard
     }
 }
@@ -630,15 +636,21 @@ enum WindowsByID {
     /// Resolves a CGWindowID → AXUIElement by walking the app's window list.
     /// Uses a per-pid cache to amortize the AX traversal across calls.
     static func elementFor(windowID: CGWindowID, pid: pid_t) -> AXUIElement? {
-        guard let getWindow = AXShim.getWindow else { return nil }
-
         cacheLock.lock()
         if let cached = axCache.element(windowID: windowID, pid: pid) {
             cacheLock.unlock()
             return cached
         }
         cacheLock.unlock()
+        return freshElement(windowID: windowID, pid: pid)
+    }
 
+    /// The window's element as AX vends it right now, never a cached one:
+    /// walks the app's window list and merges every element it finds into
+    /// the cache. nil when the walk doesn't list the window (the cache keeps
+    /// whatever it held for it).
+    static func freshElement(windowID: CGWindowID, pid: pid_t) -> AXUIElement? {
+        guard let getWindow = AXShim.getWindow else { return nil }
         let appEl = AXUIElementCreateApplication(pid)
         AXUIElementSetMessagingTimeout(appEl, 0.1)
         var ref: AnyObject?
@@ -663,9 +675,8 @@ enum WindowsByID {
         // Stale AXUIElements raise -25204 when actioned, which we already
         // tolerate (the per-window invalidate path drops them on destroy).
         axCache.merge(pid: pid, map)
-        let el = axCache.element(windowID: windowID, pid: pid)
         cacheLock.unlock()
-        return el
+        return map[windowID]
     }
 
     // Look up by CGWindowID alone — recover the pid, then dispatch via

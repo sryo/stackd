@@ -519,34 +519,28 @@ final class WindowsAXObserver {
     /// never fires for a window that already existed, and an entry stored
     /// for an element that went dead (sleep/wake) would otherwise block
     /// re-installation — leaving the window with no moved/resized events.
-    func ensurePerWindow(pid: pid_t, wid: CGWindowID) {
-        guard let observer = appObservers[pid] else {
+    ///
+    /// Returns the subrole verdict the install read; `.unknown` when AX
+    /// doesn't list the window yet; nil when the app isn't observed yet or
+    /// the window's observers are already live.
+    @discardableResult
+    func ensurePerWindow(pid: pid_t, wid: CGWindowID) -> WindowSubroleVerdict? {
+        guard appObservers[pid] != nil else {
             ensureInstalled(pid: pid)
-            return
+            return nil
         }
-        let fresh = WindowsAXObserver.freshElement(appElement: observer.appElement, wid: wid)
+        // One walk of the app's windows: it also refreshes WindowsByID's
+        // cached element, which may have died with the observers.
+        guard let window = WindowsByID.freshElement(windowID: wid, pid: pid) else { return .unknown }
         let decision = PerWindowInstallDecision.decide(
-            existing: windows[pid]?[wid]?.element, fresh: fresh, same: { CFEqual($0, $1) })
-        guard decision != .keep, let window = fresh else { return }
+            existing: windows[pid]?[wid]?.element, fresh: window, same: { CFEqual($0, $1) })
+        guard decision != .keep else { return nil }
         if decision == .replace {
             windows[pid]?.removeValue(forKey: wid)?.tokens.forEach { $0.cancel() }
         }
-        WindowsByID.invalidateCache(pid: pid, windowID: wid)
         let app = NSRunningApplication(processIdentifier: pid)?.localizedName ?? ""
         log("ax: per-window observers \(decision == .replace ? "replaced" : "attached") pid=\(pid) wid=\(wid) (\(app))")
-        installPerWindow(pid: pid, app: app, window: window, firing: false)
-    }
-
-    /// The window's element as AX vends it right now — not the cached one.
-    private static func freshElement(appElement: AXUIElement, wid: CGWindowID) -> AXUIElement? {
-        guard let getWindow = AXShim.getWindow else { return nil }
-        var ref: AnyObject?
-        guard AXUIElementCopyAttributeValue(appElement, kAXWindowsAttribute as CFString, &ref) == .success,
-              let arr = ref as? [AXUIElement] else { return nil }
-        return arr.first { el in
-            var w: CGWindowID = 0
-            return getWindow(el, &w) == .success && w == wid
-        }
+        return installPerWindow(pid: pid, app: app, window: window, firing: false)
     }
 
     /// A window appeared (CGS 1325) for an app we hold no AX observer on —
@@ -690,13 +684,17 @@ final class WindowsAXObserver {
     // permanently invisible to the AX path until the 10s poll rescued it.
     static let subroleRetryDelays: [TimeInterval] = [0.25, 1.0]
 
+    /// Returns the subrole verdict read for the window, nil when it was not
+    /// read (app not observed, no window id, observers already attached).
+    @discardableResult
     private func installPerWindow(pid: pid_t, app: String, window: AXUIElement, firing: Bool,
-                                  subroleRetries: [TimeInterval] = WindowsAXObserver.subroleRetryDelays) {
-        guard let observer = appObservers[pid] else { return }
+                                  subroleRetries: [TimeInterval] = WindowsAXObserver.subroleRetryDelays)
+        -> WindowSubroleVerdict? {
+        guard let observer = appObservers[pid] else { return nil }
         var w: CGWindowID = 0
-        guard let getWindow = AXShim.getWindow, getWindow(window, &w) == .success, w != 0 else { return }
+        guard let getWindow = AXShim.getWindow, getWindow(window, &w) == .success, w != 0 else { return nil }
         let wid = w
-        if windows[pid]?[wid] != nil { return }
+        if windows[pid]?[wid] != nil { return nil }
 
         // Skip non-standard windows (Spotlight overlay, notification banners,
         // popover/sheet helpers, system HUDs). kAXSubrole == kAXStandardWindowSubrole
@@ -745,7 +743,7 @@ final class WindowsAXObserver {
             } else {
                 WindowDebug.log("ax: subrole stayed \(reading) pid=\(pid) wid=\(wid) — dropped after rechecks (10s poll is the backstop)")
             }
-            return
+            return verdict
         }
 
         // Seed the addressability cache with the AX-confirmed verdict.
@@ -802,6 +800,7 @@ final class WindowsAXObserver {
             // a CGS 1325 that beat this AX create dedups at the funnel.
             WindowsLifecycleObserver.shared.onCreate?(snap)
         }
+        return verdict
     }
 
     private func onWindowDestroyed(pid: pid_t, wid: CGWindowID, app: String) {

@@ -423,12 +423,14 @@ enum WindowEvents {
 
     /// Positive-verdict standard-window gate for the fast-create path —
     /// the SAME rule installPerWindow's three-way subrole gate enforces
-    /// for AX creates. nil (unreadable: app still constructing its AX
+    /// for AX creates. Unknown (unreadable: app still constructing its AX
     /// tree, timeout under load) is NOT announceable: announcing unknowns
     /// would tile non-window hints (Arc's tab-creation hint). Unreadable
     /// windows defer to the AX create path, which retries and gates properly.
-    static func fastCreateAnnounceable(subrole: String?) -> Bool {
-        WindowsByID.isStandardSubrole(subrole)
+    /// `installed` is the verdict the per-window install read moments ago;
+    /// only without one does the gate `read` the subrole itself.
+    static func fastCreateAnnounceable(installed: WindowSubroleVerdict?, read: () -> String?) -> Bool {
+        (installed ?? WindowSubroleVerdict(subrole: read())) == .standard
     }
 
     /// 1325 wears two hats: for a window we already track it's a space
@@ -452,15 +454,18 @@ enum WindowEvents {
               (info[kCGWindowLayer as String] as? Int).map(Windows.isAppWindowLevel) == true,
               let pid = info[kCGWindowOwnerPID as String] as? Int
         else { return }
-        // Before the subrole gate below, which needs AX for this app.
-        WindowsAXObserver.shared.ensurePerWindow(pid: pid_t(pid), wid: cgWid)
+        // Attaching the per-window observers reads the window's subrole;
+        // the gate below decides on that reading.
+        let installed = WindowsAXObserver.shared.ensurePerWindow(pid: pid_t(pid), wid: cgWid)
         // Standard-window gate (positive verdict only): the level gate alone
         // admits app helper windows — Arc's tab-creation hint, Chromium
         // bubbles, tooltips-with-a-layer. Non-standard or not-yet-readable
         // subroles fall back to the AX create path and its retry ladder.
         // pid-hinted subrole: the id-only form would re-walk the full
         // CGWindowList just to recover the pid this dict already carries.
-        guard fastCreateAnnounceable(subrole: WindowsByID.subrole(windowID: cgWid, pid: pid_t(pid))) else {
+        guard fastCreateAnnounceable(installed: installed, read: {
+            WindowsByID.subrole(windowID: cgWid, pid: pid_t(pid))
+        }) else {
             WindowDebug.log("cgs 1325: wid=\(wid) subrole not confirmably standard — deferring to AX create path")
             return
         }

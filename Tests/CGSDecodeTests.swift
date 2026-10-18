@@ -82,10 +82,26 @@ func registerCGSDecodeTests() {
         // Layer 0 alone admits app helper windows (Arc's tab-creation
         // hint). nil = AX not readable yet — must defer to the AX create
         // path, not announce optimistically.
-        try expect(WindowEvents.fastCreateAnnounceable(subrole: "AXStandardWindow"))
-        try expect(!WindowEvents.fastCreateAnnounceable(subrole: nil), "unreadable must defer")
-        try expect(!WindowEvents.fastCreateAnnounceable(subrole: "AXDialog"))
-        try expect(!WindowEvents.fastCreateAnnounceable(subrole: "AXSystemDialog"))
-        try expect(!WindowEvents.fastCreateAnnounceable(subrole: "AXUnknown"))
+        func gate(_ subrole: String?) -> Bool {
+            WindowEvents.fastCreateAnnounceable(installed: nil, read: { subrole })
+        }
+        try expect(gate("AXStandardWindow"))
+        try expect(!gate(nil), "unreadable must defer")
+        try expect(!gate("AXDialog"))
+        try expect(!gate("AXSystemDialog"))
+        try expect(!gate("AXUnknown"))
+    }
+
+    test("fast-create gate decides on the subrole the per-window install just read, without reading it again") {
+        var reads = 0
+        let read: () -> String? = { reads += 1; return "AXStandardWindow" }
+        try expect(WindowEvents.fastCreateAnnounceable(installed: .standard, read: read))
+        try expect(!WindowEvents.fastCreateAnnounceable(installed: .nonStandard, read: read))
+        try expect(!WindowEvents.fastCreateAnnounceable(installed: .unknown, read: read),
+                   "an unreadable install read defers to the AX create path")
+        try expectEqual(reads, 0, "the install's reading is the gate's reading")
+        try expect(WindowEvents.fastCreateAnnounceable(installed: nil, read: read),
+                   "with no install read, the gate reads once itself")
+        try expectEqual(reads, 1)
     }
 }
