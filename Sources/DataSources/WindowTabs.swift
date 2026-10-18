@@ -55,6 +55,28 @@ enum WindowTabs {
         return siblings
     }
 
+    /// `rows` without the hidden tabs in `siblings`. A visible tab whose own
+    /// traits (resizable, fullscreen button) have not been read yet takes
+    /// them from a hidden tab of the same app and size: the tabs are one
+    /// window, and a tab with no traits is not tiled until they arrive, so
+    /// the swap would leave a gap in the layout for as long as that read takes.
+    static func inheritTraits(rows: [[String: Any]], siblings: Set<Int>) -> [[String: Any]] {
+        guard !siblings.isEmpty else { return rows }
+        let hidden = rows.filter { siblings.contains(($0["id"] as? Int) ?? -1) && $0["isResizable"] != nil }
+        return rows.compactMap { r -> [String: Any]? in
+            guard let id = r["id"] as? Int else { return r }
+            if siblings.contains(id) { return nil }
+            guard r["isResizable"] == nil, let pid = r["pid"] as? Int, let sz = size(of: r),
+                  let donor = hidden.first(where: { h in
+                      (h["pid"] as? Int) == pid
+                          && size(of: h).map({ abs($0.w - sz.w) <= sizeTolerance && abs($0.h - sz.h) <= sizeTolerance }) == true
+                  }) else { return r }
+            var out = r
+            for key in ["isResizable", "canFullscreen"] where donor[key] != nil { out[key] = donor[key] }
+            return out
+        }
+    }
+
     /// Windows that share a size with another window of their app, with the
     /// fields the tab decision reads (for STACKD_WIN_DEBUG).
     static func debugSummary(_ rows: [[String: Any]], siblings: Set<Int>) -> String {
@@ -68,6 +90,19 @@ enum WindowTabs {
             parts.append("\(id)[pid=\(pid) on=\(r["onscreen"] ?? "?") addr=\(r["addressable"] ?? "?") min=\(r["isMinimized"] ?? "?") \(siblings.contains(id) ? "TAB" : "kept")]")
         }
         return parts.isEmpty ? "-" : parts.joined(separator: " ")
+    }
+
+    /// Each app's listed window ids with on-screen and readable flags, for
+    /// STACKD_WIN_DEBUG, logged only when it differs from the last call.
+    private static var lastList = ""
+    static func debugList(_ rows: [[String: Any]]) -> String {
+        let parts = rows.compactMap { r -> String? in
+            guard let id = r["id"] as? Int, let app = r["app"] as? String, app == "Finder" else { return nil }
+            return "\(id)(\((r["onscreen"] as? Bool) == true ? "on" : "off")\((r["addressable"] as? Bool) == true ? "" : ",unread"))"
+        }
+        let line = parts.sorted().joined(separator: " ")
+        defer { lastList = line }
+        return line == lastList ? "=" : line
     }
 
     private static func size(of row: [String: Any]) -> (w: Int, h: Int)? {

@@ -90,6 +90,42 @@ func registerWindowTabsTests() {
         try expectEqual(WindowTabs.siblingIDs(in: rows, spacesOf: spaces, axWindowIDs: selectedOnly), [2])
     }
 
+    test("WindowTabs: a new visible tab takes its hidden sibling's traits until its own are read") {
+        var visible = row(1, onscreen: true, addressable: true)
+        var hidden = row(2, onscreen: false, addressable: true)
+        hidden["isResizable"] = true
+        hidden["canFullscreen"] = false
+        visible["title"] = "new tab"
+        let out = WindowTabs.inheritTraits(rows: [visible, hidden], siblings: [2])
+        let merged = out.first { ($0["id"] as? Int) == 1 }
+        try expectEqual(merged?["isResizable"] as? Bool, true)
+        try expectEqual(merged?["canFullscreen"] as? Bool, false)
+        try expectEqual(merged?["title"] as? String, "new tab")
+    }
+
+    test("WindowTabs: a visible tab that has its own traits keeps them") {
+        var visible = row(1, onscreen: true, addressable: true)
+        visible["isResizable"] = false
+        visible["canFullscreen"] = false
+        var hidden = row(2, onscreen: false, addressable: true)
+        hidden["isResizable"] = true
+        hidden["canFullscreen"] = true
+        let out = WindowTabs.inheritTraits(rows: [visible, hidden], siblings: [2])
+        let kept = out.first { ($0["id"] as? Int) == 1 }
+        try expectEqual(kept?["isResizable"] as? Bool, false)
+    }
+
+    test("WindowTabs: traits are not taken from another app's or another size's window") {
+        let visible = row(1, onscreen: true, addressable: true)
+        var otherApp = row(2, pid: 11, onscreen: false, addressable: true)
+        otherApp["isResizable"] = true
+        var otherSize = row(3, onscreen: false, addressable: true, w: 900)
+        otherSize["isResizable"] = true
+        let out = WindowTabs.inheritTraits(rows: [visible, otherApp, otherSize], siblings: [2, 3])
+        let same = out.first { ($0["id"] as? Int) == 1 }
+        try expect(same?["isResizable"] == nil, "no sibling of this window to copy from")
+    }
+
     test("Windows.decode leaves a hidden tab out of the list") {
         func cg(_ n: Int, onscreen: Int) -> [String: Any] {
             [kCGWindowNumber as String: n, kCGWindowLayer as String: 0,

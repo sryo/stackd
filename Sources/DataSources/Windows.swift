@@ -354,7 +354,8 @@ enum Windows {
         }
         let tabs = WindowTabs.siblingIDs(in: rows, spacesOf: { spaces(CGWindowID($0)) }, axWindowIDs: axWindowIDs)
         WindowDebug.log("tabs: \(WindowTabs.debugSummary(rows, siblings: tabs))")
-        return tabs.isEmpty ? rows : rows.filter { !tabs.contains(($0["id"] as? Int) ?? -1) }
+        WindowDebug.log("list: \(WindowTabs.debugList(rows.filter { !tabs.contains(($0["id"] as? Int) ?? -1) }))")
+        return WindowTabs.inheritTraits(rows: rows, siblings: tabs)
     }
 }
 
