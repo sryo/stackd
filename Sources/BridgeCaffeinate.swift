@@ -14,11 +14,9 @@ import IOKit.pwr_mgt  // IOPMAssertionID — used by sd.caffeinate.assert / .rel
 ///
 ///   - `caffeinate.release` — releases one held assertion by handle id.
 ///
-/// `caffeinateAssertions` and `nextCaffeinateId` were widened from
-/// fileprivate to internal in Bridge.swift so this file's `.custom` /
-/// `.syncBridge` closures can mint and release `IOPMAssertionID`s. Scope
-/// drain on stack unload (end of Bridge.swift) releases every outstanding
-/// assertion so a forgotten wake-lock can't outlive the stack.
+/// Assertions live in the Bridge's `caffeinateAssertions` table; the scope
+/// drain on stack unload releases every outstanding one so a forgotten
+/// wake-lock can't outlive the stack.
 extension Bridge {
     /// Caffeinate primitives — concatenated into `Bridge.primitives`
     /// alongside the rest of the inline registrations. Pure builder; no
@@ -40,14 +38,12 @@ extension Bridge {
                 guard let assertionId = Caffeinate.assert(type: kind, reason: reason) else {
                     bridge.respond(requestId: requestId, value: NSNull()); return
                 }
-                let id = bridge.nextCaffeinateId
-                bridge.nextCaffeinateId += 1
-                bridge.caffeinateAssertions[id] = assertionId
+                let id = bridge.caffeinateAssertions.insert(assertionId)
                 bridge.respond(requestId: requestId, value: id)
             },
             .syncBridge("caffeinate.release", permission: "caffeinate", denyValue: false) { b, body in
                 guard let id = body["id"] as? Int,
-                      let assertionId = b.caffeinateAssertions.removeValue(forKey: id) else { return false }
+                      let assertionId = b.caffeinateAssertions.remove(id) else { return false }
                 return Caffeinate.release(id: assertionId)
             },
         ]

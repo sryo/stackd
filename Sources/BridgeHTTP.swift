@@ -22,13 +22,11 @@ import Foundation
 ///     respond side too, which is friction the API doesn't need.
 ///     `bodyEncoding: "base64"` opts into binary; anything else is UTF-8.
 ///
-/// `httpServerTokens`, `pendingHttpResponses` and `nextHttpId` were
-/// widened from fileprivate to internal in Bridge.swift so this file's
-/// `.custom` / `.syncBridge` closures can mint listener handles and look
-/// up pending response closures. Scope drain on stack unload stops every
-/// listener owned by this stack and resolves any in-flight requests with
-/// 503 so the connection's send-then-cancel path doesn't leak the
-/// NWConnection.
+/// Listeners and in-flight requests live in the Bridge's `httpServerTokens`
+/// / `pendingHttpResponses` tables (one id space). The scope drain on stack
+/// unload stops every listener owned by this stack and resolves any
+/// in-flight requests with 503 so the connection's send-then-cancel path
+/// doesn't leak the NWConnection.
 extension Bridge {
     /// HTTP server primitives — concatenated into `Bridge.primitives`
     /// alongside the rest of the inline registrations. Pure builder; no
@@ -48,8 +46,7 @@ extension Bridge {
                 let bonjourType: String? = (body["bonjour"] as? [String: Any])?["type"] as? String
                 let bonjourName: String? = (body["bonjour"] as? [String: Any])?["name"] as? String
 
-                let serverId = bridge.nextHttpId
-                bridge.nextHttpId += 1
+                let serverId = bridge.httpServerTokens.mintId()
                 do {
                     let server = try HTTPServer(
                         port: port,
@@ -61,9 +58,7 @@ extension Bridge {
                             complete(HTTPResponse(status: 503)); return
                         }
                         DispatchQueue.main.async {
-                            let reqId = bridge.nextHttpId
-                            bridge.nextHttpId += 1
-                            bridge.pendingHttpResponses[reqId] = complete
+                            let reqId = bridge.pendingHttpResponses.insert(complete)
                             let payload: [String: Any] = [
                                 "method":  req.method,
                                 "path":    req.path,
@@ -88,10 +83,8 @@ extension Bridge {
                 }
             },
             .syncBridge("httpserver.stop", permission: "httpserver", denyValue: false) { b, body in
-                guard let id = body["id"] as? Int,
-                      let token = b.httpServerTokens.removeValue(forKey: id) else { return false }
-                token.cancel()
-                return true
+                guard let id = body["id"] as? Int else { return false }
+                return b.httpServerTokens.cancel(id)
             },
             // No permission gate on respond — sending a reply to an in-flight
             // request the stack already accepted is always safe. Without this
@@ -99,7 +92,7 @@ extension Bridge {
             // on the respond side too, which is friction the API doesn't need.
             .syncBridge("httpserver.respond", permission: nil, denyValue: false) { b, body in
                 guard let reqId = body["reqId"] as? Int,
-                      let complete = b.pendingHttpResponses.removeValue(forKey: reqId) else {
+                      let complete = b.pendingHttpResponses.remove(reqId) else {
                     return false
                 }
                 var response = HTTPResponse()

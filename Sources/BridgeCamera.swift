@@ -14,11 +14,9 @@ import Foundation
 ///     scope-drain pattern as bonjour.browse. JS `sd.camera.stream()`
 ///     wraps the returned id as `{ id, subscribe, stop }`.
 ///
-/// `cameraStreamHandles` and `nextCameraStreamId` were widened from
-/// fileprivate to internal in Bridge.swift so this file's `.custom` /
-/// `.syncBridge` closures can mint and release stream handles. Scope
-/// drain on stack unload (end of Bridge.swift) stops every surviving
-/// stream so a reload doesn't strand the camera LED on.
+/// Streams live in the Bridge's `cameraStreamHandles` table; the scope
+/// drain on stack unload stops every surviving stream so a reload doesn't
+/// strand the camera LED on.
 extension Bridge {
     /// Camera primitives — concatenated into `Bridge.primitives` alongside
     /// the rest of the inline registrations. Pure builder; no side effects.
@@ -52,8 +50,7 @@ extension Bridge {
                 let format   = CameraStream.normalizedFormat(body["format"] as? String)
                 let quality  = CameraStream.clampedQuality(body["quality"] as? Double)
                 let fps      = CameraStream.clampedFps(body["fps"] as? Double)
-                let id = bridge.nextCameraStreamId
-                bridge.nextCameraStreamId += 1
+                let id = bridge.cameraStreamHandles.mintId()
                 let channel = "camera:stream:\(id)"
                 let stream = Camera.openStream(
                     deviceId: deviceId,
@@ -72,10 +69,8 @@ extension Bridge {
                 bridge.respond(requestId: requestId, value: id)
             },
             .syncBridge("camera.stream.stop", permission: "camera", denyValue: false) { b, body in
-                guard let id = body["id"] as? Int,
-                      let t  = b.cameraStreamHandles.removeValue(forKey: id) else { return false }
-                t.cancel()
-                return true
+                guard let id = body["id"] as? Int else { return false }
+                return b.cameraStreamHandles.cancel(id)
             },
         ]
     }

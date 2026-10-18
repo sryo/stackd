@@ -19,11 +19,9 @@ import Foundation
 ///     can be expressed. Mode is a single string shared across stacks,
 ///     matching skhd's "the keyboard is one resource" model.
 ///
-/// `hotkeyTokens` and `nextHotkeyId` were widened from fileprivate to
-/// internal in Bridge.swift so this file's `.custom` / `.syncBridge`
-/// closures can mint and release Carbon registrations. Scope drain on
-/// stack unload (end of Bridge.swift) cancels every still-bound chord
-/// so reload doesn't leak duplicate registrations.
+/// Bindings live in the Bridge's `hotkeyTokens` table; the scope drain on
+/// stack unload cancels every still-bound chord so reload doesn't leak
+/// duplicate registrations.
 ///
 /// NOTE: only the JS-bound runtime API lives here. Static manifest-driven
 /// hotkey wiring (StackManifest → HotkeyRegistry at stack load) stays in
@@ -50,8 +48,7 @@ extension Bridge {
                 let mode = body["mode"] as? String
                 let apps = body["apps"] as? [String]
                 let excludeApps = body["excludeApps"] as? [String]
-                let id = bridge.nextHotkeyId
-                bridge.nextHotkeyId += 1
+                let id = bridge.hotkeyTokens.mintId()
                 let token = HotkeyRegistry.shared.bind(
                     spec: spec, mode: mode, apps: apps, excludeApps: excludeApps
                 ) { [weak bridge] in
@@ -71,10 +68,8 @@ extension Bridge {
                 bridge.respond(requestId: requestId, value: id)
             },
             .syncBridge("hotkey.unbind", permission: "hotkey", denyValue: false) { b, body in
-                guard let id = body["id"] as? Int,
-                      let token = b.hotkeyTokens.removeValue(forKey: id) else { return false }
-                token.cancel()
-                return true
+                guard let id = body["id"] as? Int else { return false }
+                return b.hotkeyTokens.cancel(id)
             },
 
             // Modal keymaps (skhd). Entering a mode suppresses every binding

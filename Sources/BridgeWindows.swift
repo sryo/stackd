@@ -261,8 +261,7 @@ extension Bridge {
                 let windowID = CGWindowID((body["windowId"] as? Int) ?? 0)
                 let width = (body["width"] as? Int).flatMap { $0 > 0 ? $0 : nil }
                 let quality = max(0, min(1, (body["quality"] as? Double) ?? 0.7))
-                let id = bridge.nextWindowStreamId
-                bridge.nextWindowStreamId += 1
+                let id = bridge.windowStreamHandles.mintId()
                 let channel = "windows:stream:\(id)"
                 let stream = WindowStream.forWindow(
                     windowID, fps: WindowStream.clampedFps(body["fps"] as? Double),
@@ -275,10 +274,8 @@ extension Bridge {
                 return id
             },
             .syncBridge("windows.stream.stop", permission: "windows", denyValue: false) { b, body in
-                guard let id = body["id"] as? Int,
-                      let t = b.windowStreamHandles.removeValue(forKey: id) else { return false }
-                t.cancel()
-                return true
+                guard let id = body["id"] as? Int else { return false }
+                return b.windowStreamHandles.cancel(id)
             },
 
             // Multi-window frame batch. begin installs the WindowsByID.batchSink

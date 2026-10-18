@@ -25,10 +25,9 @@ import Foundation
 ///     Recognition.
 ///   - `speech.listen.stop` / `speech.listen.cancel` — release one or all.
 ///
-/// `spotlightLiveHandles`, `nextSpotlightLiveId`, `speechListenHandles`,
-/// `nextSpeechListenId`, `respond`, and `push` were widened from
-/// fileprivate/private to internal in Bridge.swift to keep these handles
-/// pluggable from out-of-file extensions.
+/// Live queries and listeners live in the Bridge's `spotlightLiveHandles` /
+/// `speechListenHandles` tables; the scope drain on stack unload stops any
+/// still running.
 extension Bridge {
     /// Spotlight primitives.
     static func spotlightPrimitives() -> [Primitive] {
@@ -64,8 +63,7 @@ extension Bridge {
                 let scopes     = body["scopes"]     as? [String]
                 let attributes = body["attributes"] as? [String]
                 let limit      = body["limit"]      as? Int
-                let id = bridge.nextSpotlightLiveId
-                bridge.nextSpotlightLiveId += 1
+                let id = bridge.spotlightLiveHandles.mintId()
                 let channel = "spotlight:subscribe:\(id)"
                 let live = Spotlight.LiveQuery(
                     predicate: predicate,
@@ -90,10 +88,8 @@ extension Bridge {
                 bridge.respond(requestId: requestId, value: id)
             },
             .syncBridge("spotlight.subscribe.stop", permission: "spotlight", denyValue: false) { b, body in
-                guard let id = body["id"] as? Int,
-                      let t  = b.spotlightLiveHandles.removeValue(forKey: id) else { return false }
-                t.cancel()
-                return true
+                guard let id = body["id"] as? Int else { return false }
+                return b.spotlightLiveHandles.cancel(id)
             },
         ]
     }
@@ -134,8 +130,7 @@ extension Bridge {
             .custom("speech.listen.start", permission: "speech") { bridge, body, requestId in
                 let locale = body["locale"] as? String
                 let requireOnDevice = (body["requireOnDevice"] as? Bool) ?? false
-                let id = bridge.nextSpeechListenId
-                bridge.nextSpeechListenId += 1
+                let id = bridge.speechListenHandles.mintId()
                 let channel = "speech:listen:\(id)"
                 // Capture id strongly inside the closures — the listener may
                 // outlive the immediate respond() because TCC prompts are
@@ -153,7 +148,7 @@ extension Bridge {
                         // is a no-op (the listener already tore itself down
                         // inside its result callback).
                         if (envelope["isFinal"] as? Bool) == true {
-                            bridge.speechListenHandles.removeValue(forKey: id)
+                            bridge.speechListenHandles.remove(id)
                         }
                     },
                     onError: { [weak bridge] message in
@@ -166,7 +161,7 @@ extension Bridge {
                         ]
                         let json = Bridge.jsonify(envelope)
                         bridge.push(channel: channel, json: json)
-                        bridge.speechListenHandles.removeValue(forKey: id)
+                        bridge.speechListenHandles.remove(id)
                     }
                 )
                 bridge.speechListenHandles[id] = Token { listener.stop() }
@@ -174,18 +169,15 @@ extension Bridge {
                 bridge.respond(requestId: requestId, value: id)
             },
             .syncBridge("speech.listen.stop", permission: "speech", denyValue: false) { b, body in
-                guard let id = body["id"] as? Int,
-                      let t  = b.speechListenHandles.removeValue(forKey: id) else { return false }
-                t.cancel()
-                return true
+                guard let id = body["id"] as? Int else { return false }
+                return b.speechListenHandles.cancel(id)
             },
             // Convenience — stop every active listener owned by this stack.
             // Equivalent to calling stop() on each handle returned from
             // listen(), but useful for a "panic stop" UI affordance or page
             // teardown shortcut.
             .syncBridge("speech.listen.cancel", permission: "speech", denyValue: false) { b, _ in
-                for (_, t) in b.speechListenHandles { t.cancel() }
-                b.speechListenHandles.removeAll()
+                b.speechListenHandles.cancelAll()
                 return true
             },
         ]

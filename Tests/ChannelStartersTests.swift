@@ -47,10 +47,7 @@ func registerChannelStartersTests() {
 
     test("start(manifest:) primes the channels its permissions grant, and only those") {
         let page = try BridgedPage()
-        let manifest = try JSONDecoder().decode(StackManifest.self, from: Data(#"""
-        {"id":"stackd-tests-starters","name":"t","size":{"w":1,"h":1},"permissions":["appearance"]}
-        """#.utf8))
-        page.bridge.start(manifest: manifest)
+        try page.start(permissions: ["appearance"])
         defer { page.bridge.scope.drain() }
         let pushed = page.pushed("appearance")
         try expect(pushed != nil && pushed != "null", "appearance never primed: \(String(describing: pushed))")

@@ -31,10 +31,9 @@ import Foundation
 ///     gone — a follow-up attach in the same turn would otherwise produce
 ///     two visible overlays.
 ///
-/// `overlayHandles`, `overlayTokens`, `overlayInFlight` and
-/// `nextOverlayId` were widened from fileprivate to internal in
-/// Bridge.swift so this file's `.custom` / `.syncBridge` closures can mint
-/// and release `OverlayHandle`s. Scope drain on stack unload cancels every
+/// Overlays live in the Bridge's `overlayHandles` / `regionOverlayHandles`
+/// tables (one id space) with their driving tokens in `overlayTokens` /
+/// `regionFollowTokens`. The scope drain on stack unload cancels every
 /// per-overlay displayLink subscription, then sync-hops to main to detach
 /// each handle so a hot-reload doesn't strand the panels.
 extension Bridge {
@@ -68,8 +67,7 @@ extension Bridge {
                     // every side (0 = legacy exact pin). Lets a border stack
                     // draw its ring AROUND the window instead of over it.
                     let outset = (body["outset"] as? NSNumber)?.doubleValue ?? 0
-                    let id = bridge.nextOverlayId
-                    bridge.nextOverlayId += 1
+                    let id = bridge.overlayHandles.mintId()
                     guard let handle = Overlay.attach(
                         targetID: CGWindowID(wid), id: id,
                         html: html, css: css, js: js,
@@ -141,8 +139,8 @@ extension Bridge {
             // overlay NSPanel. Detaching does NOT touch the target window.
             .syncBridge("overlay.detach", permission: "overlay", denyValue: false) { b, body in
                 guard let id = body["id"] as? Int else { return false }
-                if let token = b.overlayTokens.removeValue(forKey: id) { token.cancel() }
-                if let handle = b.overlayHandles.removeValue(forKey: id) {
+                b.overlayTokens.cancel(id)
+                if let handle = b.overlayHandles.remove(id) {
                     // Synchronous teardown — the JS-side await must not resolve
                     // until the NSPanel is actually gone. If it resolved while
                     // the panel was still onscreen, a follow-up attach (focus
@@ -185,8 +183,7 @@ extension Bridge {
                     }
                     let html = body["html"] as? String ?? ""
                     let css  = body["css"]  as? String ?? ""
-                    let id = bridge.nextOverlayId
-                    bridge.nextOverlayId += 1
+                    let id = bridge.regionOverlayHandles.mintId()
                     guard let handle = Overlay.region(
                         id: id, rect: CGRect(x: x, y: y, width: w, height: h),
                         html: html, css: css,
@@ -243,7 +240,7 @@ extension Bridge {
                 // the NSPanel (setFrame) — same reason attach subscribes
                 // inside its main-async block.
                 let subscribe = {
-                    b.regionFollowTokens.removeValue(forKey: id)?.cancel()
+                    b.regionFollowTokens.cancel(id)
                     let offset = CGPoint(x: dx, y: dy)
                     var lastCursor: CGPoint?
                     let token = DisplayLinkObserver.shared.subscribe { [weak b] in
@@ -276,7 +273,7 @@ extension Bridge {
             // end state ("panel not following") already holds.
             .syncBridge("overlay.region.unfollow", permission: "overlay", denyValue: false) { b, body in
                 guard let id = body["id"] as? Int else { return false }
-                b.regionFollowTokens.removeValue(forKey: id)?.cancel()
+                b.regionFollowTokens.cancel(id)
                 if let h = b.regionOverlayHandles[id] {
                     if Thread.isMainThread { h.syncAppKitFrame() }
                     else { DispatchQueue.main.sync { h.syncAppKitFrame() } }
@@ -287,8 +284,8 @@ extension Bridge {
             // synchronously (sync-hop to main if needed).
             .syncBridge("overlay.region.remove", permission: "overlay", denyValue: false) { b, body in
                 guard let id = body["id"] as? Int else { return false }
-                b.regionFollowTokens.removeValue(forKey: id)?.cancel()
-                guard let handle = b.regionOverlayHandles.removeValue(forKey: id) else { return false }
+                b.regionFollowTokens.cancel(id)
+                guard let handle = b.regionOverlayHandles.remove(id) else { return false }
                 if Thread.isMainThread { handle.remove() }
                 else { DispatchQueue.main.sync { handle.remove() } }
                 return true

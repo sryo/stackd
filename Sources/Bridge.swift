@@ -80,147 +80,64 @@ final class Bridge: NSObject, WKScriptMessageHandler {
     // Outstanding sd.desktop.hideIcons() holds (LIFO), popped by showIcons()
     // and drained by scope at unload, same shape as menubarSuppressions.
     var desktopIconHolds: [Token] = []
-    // NSStatusItem handles owned by this stack, keyed by mint id. Scope adopts
-    // a drain entry at start(); unload removes every item from NSStatusBar.
-    // Widened from fileprivate to internal so BridgeMenubar.swift's
-    // menubar.addItem / .item.* closures can mint and release handles.
-    var statusItems: [Int: StatusItemHandle] = [:]
-    var nextStatusItemId: Int = 1
-    // JS-bound Carbon hotkeys: id → Token. Each Token's cancel removes the
-    // Carbon registration; scope drains them on unload too. The JS side keeps
-    // its own map keyed by the same id so __sd_hotkey_fire can find the callback.
-    // Widened from fileprivate to internal so BridgeHotkey.swift's
-    // hotkey.bind / .unbind closures can mint and release Carbon registrations.
-    var hotkeyTokens: [Int: Token] = [:]
-    var nextHotkeyId: Int = 1
-    // JS-bound DN observers: id → Token. Scope drains them on unload.
-    // Widened from fileprivate to internal so BridgeBroadcasts.swift's
-    // broadcasts.observe / .unobserve closures can mint and release DN observers.
-    var broadcastTokens: [Int: Token] = [:]
-    var nextBroadcastId: Int = 1
-    // JS-bound URL-scheme handlers: id → Token. Each Token removes this
-    // stack's subscriber from the per-scheme SchemeRouter bucket; scope
-    // drains them on unload so reloading a stack doesn't accumulate
-    // duplicate handlers for the same scheme.
-    // Widened from fileprivate to internal so BridgeURLHandler.swift's
-    // urlhandler.register / .unregister closures can mint and release
-    // per-scheme subscribers.
-    var urlHandlerTokens: [Int: Token] = [:]
-    var nextURLHandlerId: Int = 1
-    // sd.overlay handles: id → (handle, displayLink subscription token).
-    // Each handle owns a borderless NSPanel + WKWebView pinned to a foreign
-    // target wid and drives its own reposition + sd.target push (vsync while
-    // armed, backstop timer otherwise); the token stops that driving. Scope
-    // drains both on unload (detach closes the panel, token cancel stops
-    // the ticks).
-    // Widened from fileprivate to internal so BridgeOverlay.swift's
-    // overlay.attach / .setTarget / .eval / .detach closures can mint and
-    // release OverlayHandles.
     // Ordering for eval(_:in:) — see EvalOrderGate.
     private var evalGate = EvalOrderGate()
     private let evalGateLock = NSLock()
-    var overlayHandles: [Int: OverlayHandle] = [:]
-    var overlayTokens: [Int: Token] = [:]
-    var nextOverlayId: Int = 1
+
+    // Native handles JS primitives mint for this stack, keyed by the id JS
+    // gets back. The scope drain releases whatever is still held at unload
+    // (see start(manifest:)), so a reload never leaks registrations.
+    //
+    // NSStatusItems (sd.menubar.addItem); unload removes them from the bar.
+    let statusItems = HandleTable<StatusItemHandle>()
+    // Carbon hotkeys (sd.hotkey.bind). The JS side keeps its own map keyed
+    // by the same id so __sd_hotkey_fire can find the callback.
+    let hotkeyTokens = HandleTable<Token>()
+    // DistributedNotificationCenter observers (sd.broadcasts.observe).
+    let broadcastTokens = HandleTable<Token>()
+    // Per-scheme SchemeRouter subscribers (sd.urlhandler.register).
+    let urlHandlerTokens = HandleTable<Token>()
+    // Window-tracked overlays (sd.overlay.attach) and free-region overlays
+    // (sd.overlay.region) share ids so they never collide. Each tracked
+    // overlay owns a borderless NSPanel + WKWebView and an overlayTokens
+    // entry under the same id that stops its reposition driving;
+    // regionFollowTokens holds a region's cursor-follow vsync subscription.
+    let overlayHandles: HandleTable<OverlayHandle>
+    let regionOverlayHandles: HandleTable<RegionOverlayHandle>
+    let overlayTokens = HandleTable<Token>()
+    let regionFollowTokens = HandleTable<Token>()
     // Reserved for backpressure if a future overlay tick path becomes async
     // (e.g. snapshot-driven reposition). Currently the tick is synchronous —
     // setFrame + an evaluateJavaScript fire-and-forget — so this stays empty.
     var overlayInFlight: Set<Int> = []
-    // Free-region overlays (sd.overlay.region) — fixed global rect, any
-    // display, no window tracking. Shares nextOverlayId with the window-
-    // tracked overlays so ids never collide.
-    var regionOverlayHandles: [Int: RegionOverlayHandle] = [:]
-    // Live cursor-follow subscriptions (overlay.region.follow): region id →
-    // DisplayLinkObserver token. Mirrors overlayTokens — follow mints,
-    // unfollow / region.remove / scope drain cancel, so a stack unload never
-    // strands a vsync subscription moving a closed panel.
-    var regionFollowTokens: [Int: Token] = [:]
-    // Owned HTTP servers: serverId → Token (cancel = server.stop()).
-    // Pending route requests waiting for sd.httpserver.respond() — keyed
-    // by mint id, value is the NWConnection-side completion closure.
-    // Widened from fileprivate to internal so BridgeHTTP.swift's
-    // httpserver.serve / .stop / .respond closures can mint and release
-    // NWListener handles and look up pending response completions.
-    var httpServerTokens: [Int: Token] = [:]
-    var pendingHttpResponses: [Int: (HTTPResponse) -> Void] = [:]
-    var nextHttpId: Int = 1
-    // Bonjour publish + browse handles. Both are long-lived Network.framework
-    // primitives; the publish side owns an NWListener, the browse side an
-    // NWBrowser. Stack unload drains both via scope (mirrors httpServerTokens).
-    // Per-handle channel push for browse uses the synthesized name
-    // "bonjour:browse:<id>" — JS sd.bonjour.browse() builds the same name
-    // from the returned handle id and subscribes via the standard channel()
-    // signal machinery.
-    // Widened from fileprivate to internal so BridgeBonjour.swift's
-    // bonjour.publish / .publish.stop / .browse.start / .browse.stop closures
-    // can mint and release listener / browser handles.
-    var bonjourPublishHandles: [Int: Token] = [:]
-    var bonjourBrowseHandles: [Int: Token] = [:]
-    var nextBonjourId: Int = 1
-    // Spotlight live-query handles. Each entry owns a Spotlight.LiveQuery
-    // (long-lived NSMetadataQuery in continuous-update mode); cancel calls
-    // LiveQuery.stop() which tears down the query + its NSNotificationCenter
-    // observers. Per-handle channel push uses the synthesized name
-    // "spotlight:subscribe:<id>" — JS sd.spotlight.subscribe() builds the
-    // same name from the returned handle id and subscribes via the standard
-    // channel() signal machinery. Stack unload drains via scope (mirrors
-    // bonjourBrowseHandles).
-    // Widened from fileprivate to internal so BridgeSearch.swift's
-    // spotlight.subscribe / spotlight.subscribe.stop closures can mint and
-    // release LiveQuery handles.
-    var spotlightLiveHandles: [Int: Token] = [:]
-    var nextSpotlightLiveId: Int = 1
-    // Long-lived sd.camera.stream() handles. Each entry owns a Camera.Stream
-    // (AVCaptureSession + sample-buffer delegate) and a Token whose cancel
-    // calls stream.stop() — same shape as bonjourBrowseHandles. Per-handle
-    // channel push name is "camera:stream:<id>"; JS sd.camera.stream() builds
-    // the same name from the returned handle id. Scope drain on stack unload
-    // stops every active capture so reload doesn't strand the camera LED on.
-    // Widened from fileprivate to internal so BridgeCamera.swift's
-    // camera.stream.start / .stop closures can mint and release stream handles.
-    var cameraStreamHandles: [Int: Token] = [:]
-    var nextCameraStreamId: Int = 1
-    // sd.windows.stream() handles — one WindowStream timer per entry, pushed
-    // on "windows:stream:<id>". Drained on stack unload like camera streams.
-    var windowStreamHandles: [Int: Token] = [:]
-    var nextWindowStreamId: Int = 1
-    // sd.speech.listen handles — one Listener per active listen() call. The
-    // Listener owns the SFSpeechRecognizer task + AVAudioEngine + tap, so the
-    // Token's cancel calls listener.stop() (which removes the tap, cancels
-    // the task, ends the request). Per-handle channel push uses the
-    // synthesized name "speech:listen:<id>" — JS sd.speech.listen() builds
-    // the same name from the returned handle id and subscribes via the
-    // standard channel() signal machinery (mirrors bonjour.browse).
-    // Widened from fileprivate to internal so BridgeSearch.swift's
-    // speech.listen.start / .stop / .cancel closures can mint and release
-    // Listener handles.
-    var speechListenHandles: [Int: Token] = [:]
-    var nextSpeechListenId: Int = 1
-    // SQLite handles minted via sd.sqlite.open(). Tracked per-Bridge so the
-    // scope drain on stack unload closes every connection — the underlying
-    // SQLite.HandleStore is process-wide but the *ownership* is stack-scoped.
-    // Widened from fileprivate to internal so BridgeSQLite.swift's
-    // sqlite.open / .close closures can mint and release SQLite handles.
+    // HTTP servers (sd.httpserver.serve) and the requests waiting for
+    // sd.httpserver.respond(), whose value is the connection's completion.
+    // One id space, so a server id never equals a request id.
+    let httpServerTokens: HandleTable<Token>
+    let pendingHttpResponses: HandleTable<(HTTPResponse) -> Void>
+    // Bonjour advertisements (NWListener) and browsers (NWBrowser), one id
+    // space. A browser pushes on "bonjour:browse:<id>".
+    let bonjourPublishHandles: HandleTable<Token>
+    let bonjourBrowseHandles: HandleTable<Token>
+    // Continuous Spotlight queries, pushed on "spotlight:subscribe:<id>".
+    let spotlightLiveHandles = HandleTable<Token>()
+    // Camera captures, pushed on "camera:stream:<id>"; unload stops them so
+    // a reload doesn't leave the camera LED on.
+    let cameraStreamHandles = HandleTable<Token>()
+    // sd.windows.stream() timers, pushed on "windows:stream:<id>".
+    let windowStreamHandles = HandleTable<Token>()
+    // Speech recognizers + their audio taps, pushed on "speech:listen:<id>";
+    // unload stops them so a reload doesn't strand the microphone.
+    let speechListenHandles = HandleTable<Token>()
+    // SQLite connections this stack opened. The ids come from the
+    // process-wide SQLite.HandleStore; the ownership is stack-scoped.
     var sqliteHandles: Set<Int> = []
-    // Streamed proc invocations minted via sd.proc.stream(). cancel() sends
-    // SIGTERM; the wrapped Process strongly retains the underlying task so
-    // the terminationHandler still fires after unload. Scope drain SIGTERMs
-    // any still-running child so stack reload doesn't strand subprocesses.
-    // Widened from fileprivate to internal so BridgeProc.swift's
-    // proc.stream.start / .cancel closures can mint and release child handles.
-    var procStreamHandles: [Int: ProcStreamHandle] = [:]
-    var nextProcStreamId: Int = 1
-    // Active IOPMAssertion handles minted by sd.caffeinate.assert(). Keyed
-    // by a per-bridge counter (the id we hand back to JS); value is the raw
-    // IOPMAssertionID returned by IOPMAssertionCreateWithName. Released
-    // explicitly via sd.caffeinate.release(handleId) — or in bulk by the
-    // scope drain on stack unload (so a forgotten wake-lock doesn't outlive
-    // the stack that took it).
-    // Widened from fileprivate to internal so BridgeCaffeinate.swift's
-    // caffeinate.assert / .release closures can mint and release IOPMAssertion
-    // handles.
-    var caffeinateAssertions: [Int: IOPMAssertionID] = [:]
-    var nextCaffeinateId: Int = 1
+    // Streamed subprocesses (sd.proc.stream); unload SIGTERMs any still
+    // running. The terminationHandler still fires after unload.
+    let procStreamHandles = HandleTable<ProcStreamHandle>()
+    // IOPMAssertions (sd.caffeinate.assert), so a forgotten wake-lock
+    // doesn't outlive the stack that took it.
+    let caffeinateAssertions = HandleTable<IOPMAssertionID>()
     // Per-channel JS-requested fanout cadence (seconds). Set via the
     // sd.channel.setInterval IPC when a stack calls e.g.
     // `sd.sensors.subscribe(fn, { interval: 5 })`. Channels not listed here
@@ -307,6 +224,15 @@ final class Bridge: NSObject, WKScriptMessageHandler {
 
     init(webView: WKWebView, screen: NSScreen? = nil, screenIndex: Int = 0, padding: Double = 0, injectReset: Bool = true) {
         self.webView = webView
+        let overlayIds = HandleIds()
+        overlayHandles = HandleTable(ids: overlayIds)
+        regionOverlayHandles = HandleTable(ids: overlayIds)
+        let httpIds = HandleIds()
+        httpServerTokens = HandleTable(ids: httpIds)
+        pendingHttpResponses = HandleTable(ids: httpIds)
+        let bonjourIds = HandleIds()
+        bonjourPublishHandles = HandleTable(ids: bonjourIds)
+        bonjourBrowseHandles = HandleTable(ids: bonjourIds)
         super.init()
         let ucc = webView.configuration.userContentController
         ucc.add(self, name: "sd")
@@ -492,118 +418,36 @@ final class Bridge: NSObject, WKScriptMessageHandler {
             for t in self.desktopIconHolds { t.cancel() }
             self.desktopIconHolds.removeAll()
         })
-        // Same shape for NSStatusItems: stack unload removes every item this
-        // stack added (no orphan icons sitting in the menu bar forever).
+        // Release every handle a primitive minted and JS didn't release, so a
+        // reload doesn't leak registrations: SIGTERM streamed subprocesses,
+        // close SQLite connections, stop recognizers / captures / queries /
+        // browsers / servers (answering in-flight HTTP requests 503 so their
+        // NWConnection is freed), release wake-locks, and drop URL-scheme
+        // subscribers, DN observers, Carbon hotkeys and status items.
         scope.adopt(Token { [weak self] in
             guard let self = self else { return }
-            for (_, h) in self.statusItems { h.remove() }
-            self.statusItems.removeAll()
-        })
-        // Same shape for JS-bound hotkeys: stack unload cancels every Carbon
-        // registration so reload-then-rebind doesn't leak duplicate bindings.
-        scope.adopt(Token { [weak self] in
-            guard let self = self else { return }
-            for (_, t) in self.hotkeyTokens { t.cancel() }
-            self.hotkeyTokens.removeAll()
-        })
-        // Same shape for JS-bound DN observers — drop every NSObject observer
-        // this stack registered with DistributedNotificationCenter on unload.
-        scope.adopt(Token { [weak self] in
-            guard let self = self else { return }
-            for (_, t) in self.broadcastTokens { t.cancel() }
-            self.broadcastTokens.removeAll()
-        })
-        // Same shape for JS-bound URL-scheme handlers — drop every per-scheme
-        // subscriber this stack added to the process-global SchemeRouter so
-        // reload-then-register doesn't leak handlers (the NSAppleEventManager
-        // slot itself is install-once and stays — SkyLight-style — but the
-        // per-scheme fan-out bucket only keeps entries with live subscribers).
-        scope.adopt(Token { [weak self] in
-            guard let self = self else { return }
-            for (_, t) in self.urlHandlerTokens { t.cancel() }
-            self.urlHandlerTokens.removeAll()
-        })
-        // Caffeinate assertions — IOPMAssertionRelease every wake-lock this
-        // stack took. Stacks that forget to release on unload (or crash
-        // mid-task) would otherwise hold the assertion until the daemon
-        // process exits, which means a forgotten "exporting video" assert
-        // can pin the display awake forever.
-        scope.adopt(Token { [weak self] in
-            guard let self = self else { return }
-            for (_, id) in self.caffeinateAssertions { Caffeinate.release(id: id) }
-            self.caffeinateAssertions.removeAll()
-        })
-        // HTTP servers — stop every listener owned by this stack and resolve
-        // any in-flight requests with 503 so the connection's send-then-cancel
-        // path doesn't leak the NWConnection.
-        scope.adopt(Token { [weak self] in
-            guard let self = self else { return }
-            for (_, t) in self.httpServerTokens { t.cancel() }
-            self.httpServerTokens.removeAll()
-            for (_, complete) in self.pendingHttpResponses {
-                complete(HTTPResponse(status: 503, headers: [:], body: "stack unloaded"))
-            }
-            self.pendingHttpResponses.removeAll()
-        })
-        // Bonjour — stop every NWListener / NWBrowser owned by this stack
-        // so reload doesn't leak advertisements or browse sockets.
-        scope.adopt(Token { [weak self] in
-            guard let self = self else { return }
-            for (_, t) in self.bonjourPublishHandles { t.cancel() }
-            self.bonjourPublishHandles.removeAll()
-            for (_, t) in self.bonjourBrowseHandles { t.cancel() }
-            self.bonjourBrowseHandles.removeAll()
-        })
-        // Spotlight live queries — stop every continuous-update
-        // NSMetadataQuery owned by this stack so reload doesn't leak the
-        // backing query objects or their NSNotificationCenter observers.
-        scope.adopt(Token { [weak self] in
-            guard let self = self else { return }
-            for (_, t) in self.spotlightLiveHandles { t.cancel() }
-            self.spotlightLiveHandles.removeAll()
-        })
-        // Camera streams — stop every AVCaptureSession owned by this stack
-        // so reload doesn't leave the camera LED on / hold the device.
-        scope.adopt(Token { [weak self] in
-            guard let self = self else { return }
-            for (_, t) in self.cameraStreamHandles { t.cancel() }
-            self.cameraStreamHandles.removeAll()
-        })
-        scope.adopt(Token { [weak self] in
-            guard let self = self else { return }
-            for (_, t) in self.windowStreamHandles { t.cancel() }
-            self.windowStreamHandles.removeAll()
-        })
-        // Speech listeners — stop every active SFSpeechRecognizer task +
-        // audio tap owned by this stack. Without this, a stack that hot-
-        // reloads while listening would strand the recognizer holding the
-        // microphone (and the recording-indicator dot) until the daemon
-        // process exits.
-        scope.adopt(Token { [weak self] in
-            guard let self = self else { return }
-            for (_, t) in self.speechListenHandles { t.cancel() }
-            self.speechListenHandles.removeAll()
-        })
-        // SQLite — sqlite3_close_v2 every connection minted by this stack.
-        // No-ops if the JS code already called db.close() explicitly.
-        scope.adopt(Token { [weak self] in
-            guard let self = self else { return }
+            for h in self.procStreamHandles.drain() { h.cancel() }
             for h in self.sqliteHandles { SQLite.close(handle: h) }
             self.sqliteHandles.removeAll()
-        })
-        // Streamed proc children — SIGTERM any still-running subprocess so
-        // stack unload / reload doesn't strand them. The terminationHandler
-        // still fires for in-flight cancels; JS callbacks just won't be there
-        // to receive the exit event (the bridge is being torn down).
-        scope.adopt(Token { [weak self] in
-            guard let self = self else { return }
-            for (_, h) in self.procStreamHandles { h.cancel() }
-            self.procStreamHandles.removeAll()
+            self.speechListenHandles.cancelAll()
+            self.windowStreamHandles.cancelAll()
+            self.cameraStreamHandles.cancelAll()
+            self.spotlightLiveHandles.cancelAll()
+            self.bonjourPublishHandles.cancelAll()
+            self.bonjourBrowseHandles.cancelAll()
+            self.httpServerTokens.cancelAll()
+            for complete in self.pendingHttpResponses.drain() {
+                complete(HTTPResponse(status: 503, headers: [:], body: "stack unloaded"))
+            }
+            for id in self.caffeinateAssertions.drain() { Caffeinate.release(id: id) }
+            self.urlHandlerTokens.cancelAll()
+            self.broadcastTokens.cancelAll()
+            self.hotkeyTokens.cancelAll()
+            for h in self.statusItems.drain() { h.remove() }
         })
         // Overlays — cancel each per-overlay displayLink subscription, then
-        // detach each handle (closes the overlay NSPanel). Mirrors the
-        // statusItems / hotkeyTokens drain shape so a hot-reload doesn't
-        // leak panels. NSPanel.close must run on main; we sync-hop
+        // detach each handle (closes the overlay NSPanel) so a hot-reload
+        // doesn't leak panels. NSPanel.close must run on main; we sync-hop
         // (matching the per-call overlay.detach path) so the panels are
         // actually torn down before the new stack instance has a chance
         // to attach its own — otherwise a hot-reload of overlay-border
@@ -611,15 +455,11 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         // running the async block.
         scope.adopt(Token { [weak self] in
             guard let self = self else { return }
-            for (_, t) in self.overlayTokens { t.cancel() }
-            self.overlayTokens.removeAll()
-            for (_, t) in self.regionFollowTokens { t.cancel() }
-            self.regionFollowTokens.removeAll()
-            let handles = Array(self.overlayHandles.values)
-            self.overlayHandles.removeAll()
+            self.overlayTokens.cancelAll()
+            self.regionFollowTokens.cancelAll()
+            let handles = self.overlayHandles.drain()
             self.overlayInFlight.removeAll()
-            let regionHandles = Array(self.regionOverlayHandles.values)
-            self.regionOverlayHandles.removeAll()
+            let regionHandles = self.regionOverlayHandles.drain()
             if Thread.isMainThread {
                 for h in handles { h.detach() }
                 for h in regionHandles { h.remove() }

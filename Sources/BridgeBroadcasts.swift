@@ -14,11 +14,9 @@ import Foundation
 ///     and drops the id from `broadcastTokens`. Idempotent: a second
 ///     unobserve on the same id reports false.
 ///
-/// `broadcastTokens` and `nextBroadcastId` were widened from fileprivate
-/// to internal in Bridge.swift so this file's `.custom` / `.syncBridge`
-/// closures can mint and release DN observers. Scope drain on stack
-/// unload (end of Bridge.swift) drops every observer this stack
-/// registered with DistributedNotificationCenter.
+/// Observers live in the Bridge's `broadcastTokens` table; the scope drain
+/// on stack unload drops every observer this stack registered with
+/// DistributedNotificationCenter.
 extension Bridge {
     /// Broadcasts primitives — concatenated into `Bridge.primitives` alongside
     /// the rest of the inline registrations. Pure builder; no side effects.
@@ -32,8 +30,7 @@ extension Bridge {
                 guard let name = body["name"] as? String else {
                     bridge.respond(requestId: requestId, value: NSNull()); return
                 }
-                let id = bridge.nextBroadcastId
-                bridge.nextBroadcastId += 1
+                let id = bridge.broadcastTokens.mintId()
                 let token = Broadcasts.observe(name: name) { [weak bridge] payload in
                     guard let webView = bridge?.webView else { return }
                     let json = Bridge.jsonify(payload)
@@ -46,10 +43,8 @@ extension Bridge {
                 bridge.respond(requestId: requestId, value: id)
             },
             .syncBridge("broadcasts.unobserve", permission: "broadcasts", denyValue: false) { b, body in
-                guard let id = body["id"] as? Int,
-                      let t = b.broadcastTokens.removeValue(forKey: id) else { return false }
-                t.cancel()
-                return true
+                guard let id = body["id"] as? Int else { return false }
+                return b.broadcastTokens.cancel(id)
             },
         ]
     }

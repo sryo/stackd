@@ -31,6 +31,15 @@ struct BridgedPage {
         try expect(nav.done, "webview never finished loading")
     }
 
+    /// Starts the bridge as a stack holding exactly `permissions`.
+    func start(permissions: [String]) throws {
+        let list = permissions.map { "\"\($0)\"" }.joined(separator: ",")
+        let manifest = try JSONDecoder().decode(StackManifest.self, from: Data("""
+        {"id":"stackd-tests-bridge","name":"t","size":{"w":1,"h":1},"permissions":[\(list)]}
+        """.utf8))
+        bridge.start(manifest: manifest)
+    }
+
     static func spin(for seconds: TimeInterval, until done: () -> Bool) {
         let deadline = Date().addingTimeInterval(seconds)
         while !done() && Date() < deadline {

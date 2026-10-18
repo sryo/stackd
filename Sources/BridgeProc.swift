@@ -17,11 +17,9 @@ import Foundation
 ///     from the table — the exit event handler does that, so a subsequent
 ///     cancel reports `false` only when the SIGTERM was never issued.
 ///
-/// `procStreamHandles` and `nextProcStreamId` were widened from
-/// fileprivate to internal in Bridge.swift so this file's `.custom` /
-/// `.syncBridge` closures can mint and release `ProcStreamHandle`s.
-/// Scope drain on stack unload (end of Bridge.swift) SIGTERMs any still-
-/// running child so reload doesn't strand subprocesses.
+/// Children live in the Bridge's `procStreamHandles` table; the scope drain
+/// on stack unload SIGTERMs any still-running child so reload doesn't
+/// strand subprocesses.
 extension Bridge {
     /// Proc primitives — concatenated into `Bridge.primitives` alongside
     /// the rest of the inline registrations. Pure builder; no side effects.
@@ -48,8 +46,7 @@ extension Bridge {
                 let args = body["args"] as? [String] ?? []
                 let env  = body["env"]  as? [String: String]
                 let cwd  = body["cwd"]  as? String
-                let id = bridge.nextProcStreamId
-                bridge.nextProcStreamId += 1
+                let id = bridge.procStreamHandles.mintId()
                 let handle = Proc.stream(cmd: cmd, args: args, env: env, cwd: cwd) { [weak bridge] payload in
                     guard let bridge = bridge, let webView = bridge.webView else { return }
                     let json = Bridge.jsonify(payload)
@@ -62,7 +59,7 @@ extension Bridge {
                     // Final event drops the handle so cancel() after exit no-ops
                     // and the per-stack drain doesn't try to SIGTERM a dead child.
                     if (payload["stream"] as? String) == "exit" {
-                        bridge.procStreamHandles.removeValue(forKey: id)
+                        bridge.procStreamHandles.remove(id)
                     }
                 }
                 guard let handle = handle else {

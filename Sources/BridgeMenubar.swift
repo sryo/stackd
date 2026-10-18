@@ -28,14 +28,10 @@ import Foundation
 ///     "menubar" permission (same gate as suppress/restore + the
 ///     menubar.observe channel).
 ///
-/// `menubarSuppressions`, `statusItems`, `nextStatusItemId` were widened
-/// from private/fileprivate to internal in Bridge.swift so this file's
-/// `.syncBridge` / `.custom` closures can mint and release handles. The
-/// `dispatchMenubarEvent` helper and the `parseStatusItemSpec` /
-/// `parseIconSpec` parsers were widened from fileprivate to internal for
-/// the same reason. Scope drain on stack unload (in Bridge.swift) cancels
-/// every still-active suppression and removes every NSStatusItem so a
-/// hot-reload doesn't leak.
+/// Suppressions and status items live on the Bridge (`menubarSuppressions`,
+/// the `statusItems` table); the scope drain on stack unload cancels every
+/// still-active suppression and removes every NSStatusItem so a hot-reload
+/// doesn't leak.
 ///
 /// NOTE: only the JS-bound runtime API moved here. Manifest-driven
 /// menubar startup wiring (`startMenubarItems()` called from
@@ -66,8 +62,7 @@ extension Bridge {
             .custom("menubar.addItem", permission: "menubar.item") { bridge, body, requestId in
                 DispatchQueue.main.async { [weak bridge] in
                     guard let bridge = bridge else { return }
-                    let id = bridge.nextStatusItemId
-                    bridge.nextStatusItemId += 1
+                    let id = bridge.statusItems.mintId()
                     let spec = Bridge.parseStatusItemSpec(body)
                     let handle = Menubar.addItem(id: id, spec: spec)
                     handle.onClick = { [weak bridge] in
@@ -102,7 +97,7 @@ extension Bridge {
                 return true
             },
             .syncBridge("menubar.item.remove", permission: "menubar.item", denyValue: false) { b, body in
-                guard let id = body["id"] as? Int, let h = b.statusItems.removeValue(forKey: id) else { return false }
+                guard let id = body["id"] as? Int, let h = b.statusItems.remove(id) else { return false }
                 h.remove()
                 return true
             },

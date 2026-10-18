@@ -21,11 +21,9 @@ import Foundation
 /// `.app` bundle with the scheme declared. See
 /// `Sources/DataSources/URLHandler.swift` for the rationale.
 ///
-/// `urlHandlerTokens` and `nextURLHandlerId` were widened from fileprivate
-/// to internal in Bridge.swift so this file's `.custom` / `.syncBridge`
-/// closures can mint and release scheme subscribers. Scope drain on stack
-/// unload drops every per-scheme subscriber this stack added to the
-/// process-global SchemeRouter so reload-then-register doesn't leak.
+/// Subscribers live in the Bridge's `urlHandlerTokens` table; the scope
+/// drain on stack unload drops every per-scheme subscriber this stack added
+/// to the process-global SchemeRouter so reload-then-register doesn't leak.
 extension Bridge {
     /// URL-handler primitives — concatenated into `Bridge.primitives`
     /// alongside the rest of the inline registrations. Pure builder; no
@@ -44,8 +42,7 @@ extension Bridge {
                 guard let scheme = body["scheme"] as? String, !scheme.isEmpty else {
                     bridge.respond(requestId: requestId, value: NSNull()); return
                 }
-                let id = bridge.nextURLHandlerId
-                bridge.nextURLHandlerId += 1
+                let id = bridge.urlHandlerTokens.mintId()
                 let token = URLHandler.observe(scheme: scheme) { [weak bridge] payload in
                     guard let webView = bridge?.webView else { return }
                     let json = Bridge.jsonify(payload)
@@ -58,10 +55,8 @@ extension Bridge {
                 bridge.respond(requestId: requestId, value: id)
             },
             .syncBridge("urlhandler.unregister", permission: "urlhandler", denyValue: false) { b, body in
-                guard let id = body["id"] as? Int,
-                      let t = b.urlHandlerTokens.removeValue(forKey: id) else { return false }
-                t.cancel()
-                return true
+                guard let id = body["id"] as? Int else { return false }
+                return b.urlHandlerTokens.cancel(id)
             },
         ]
     }

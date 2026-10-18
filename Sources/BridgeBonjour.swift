@@ -20,11 +20,9 @@ import Foundation
 /// ("bonjour.publish"), so the mDNS service type travels under
 /// `serviceType` — matches the caffeinate.assert/assertionType workaround.
 ///
-/// `bonjourPublishHandles`, `bonjourBrowseHandles`, and `nextBonjourId`
-/// were widened from fileprivate to internal in Bridge.swift so this
-/// file's `.custom` / `.syncBridge` closures can mint and release the
-/// handles. Scope drain on stack unload (end of Bridge.swift) cancels
-/// every surviving listener / browser.
+/// Handles live in the Bridge's `bonjourPublishHandles` /
+/// `bonjourBrowseHandles` tables (one id space); the scope drain on stack
+/// unload cancels every surviving listener / browser.
 extension Bridge {
     /// Bonjour primitives — concatenated into `Bridge.primitives` alongside
     /// the rest of the inline registrations. Pure builder; no side effects.
@@ -43,16 +41,12 @@ extension Bridge {
                       let handle = Bonjour.publish(name: name, type: type, port: port, txt: txt) else {
                     bridge.respond(requestId: requestId, value: NSNull()); return
                 }
-                let id = bridge.nextBonjourId
-                bridge.nextBonjourId += 1
-                bridge.bonjourPublishHandles[id] = Token { handle.stop() }
+                let id = bridge.bonjourPublishHandles.insert(Token { handle.stop() })
                 bridge.respond(requestId: requestId, value: id)
             },
             .syncBridge("bonjour.publish.stop", permission: "bonjour", denyValue: false) { b, body in
-                guard let id = body["id"] as? Int,
-                      let t  = b.bonjourPublishHandles.removeValue(forKey: id) else { return false }
-                t.cancel()
-                return true
+                guard let id = body["id"] as? Int else { return false }
+                return b.bonjourPublishHandles.cancel(id)
             },
             .custom("bonjour.browse.start", permission: "bonjour") { bridge, body, requestId in
                 // serviceType (not `type`) for the same envelope-collision reason
@@ -61,8 +55,7 @@ extension Bridge {
                 guard !type.isEmpty else {
                     bridge.respond(requestId: requestId, value: NSNull()); return
                 }
-                let id = bridge.nextBonjourId
-                bridge.nextBonjourId += 1
+                let id = bridge.bonjourBrowseHandles.mintId()
                 let channel = "bonjour:browse:\(id)"
                 let browser = Bonjour.Browser(type: type) { [weak bridge] entries in
                     guard let bridge = bridge else { return }
@@ -73,10 +66,8 @@ extension Bridge {
                 bridge.respond(requestId: requestId, value: id)
             },
             .syncBridge("bonjour.browse.stop", permission: "bonjour", denyValue: false) { b, body in
-                guard let id = body["id"] as? Int,
-                      let t  = b.bonjourBrowseHandles.removeValue(forKey: id) else { return false }
-                t.cancel()
-                return true
+                guard let id = body["id"] as? Int else { return false }
+                return b.bonjourBrowseHandles.cancel(id)
             },
         ]
     }
