@@ -125,6 +125,11 @@ enum CLI {
         let missingSPI = SkyLight.missingSymbols()
         print("\n" + SkyLight.doctorLines(missing: missingSPI).joined(separator: "\n"))
         issues += missingSPI.count
+        // The probes call private SPI; flush so the report above survives a fault.
+        fflush(stdout)
+        let probes = DoctorProbes.run(LiveDoctorBackend())
+        print("\n" + DoctorProbes.report(probes).joined(separator: "\n"))
+        issues += DoctorProbes.issueCount(probes)
         print("\nchecked \(checked) stack(s), \(issues) issue(s).")
         return issues == 0 ? 0 : 1
     }
