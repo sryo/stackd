@@ -479,6 +479,47 @@ enum WindowSubroleVerdict: Equatable {
 
 // MARK: - WindowsByID: per-window actions targeting a CGWindowID
 
+/// Elements per app window plus each window's owning pid, kept in step so
+/// a window's owner is one lookup. A walk of an app's windows merges in:
+/// windows it leaves out keep their elements, and a window id another app's
+/// walk lists moves to that app. Generic over the element so the
+/// bookkeeping is testable without AX; the caller locks.
+struct WindowElementIndex<Element> {
+    private var byPid: [pid_t: [CGWindowID: Element]] = [:]
+    private var owner: [CGWindowID: pid_t] = [:]
+
+    /// Apps holding at least one window, ascending.
+    var pids: [pid_t] { byPid.keys.sorted() }
+
+    func element(windowID: CGWindowID, pid: pid_t) -> Element? { byPid[pid]?[windowID] }
+
+    func pid(for windowID: CGWindowID) -> pid_t? { owner[windowID] }
+
+    mutating func merge(pid: pid_t, _ walk: [CGWindowID: Element]) {
+        for (wid, el) in walk {
+            if let previous = owner[wid], previous != pid { remove(pid: previous, windowID: wid) }
+            byPid[pid, default: [:]][wid] = el
+            owner[wid] = pid
+        }
+    }
+
+    mutating func remove(pid: pid_t, windowID: CGWindowID) {
+        guard byPid[pid]?.removeValue(forKey: windowID) != nil else { return }
+        if owner[windowID] == pid { owner[windowID] = nil }
+        if byPid[pid]?.isEmpty == true { byPid[pid] = nil }
+    }
+
+    mutating func remove(pid: pid_t) {
+        guard let windows = byPid.removeValue(forKey: pid) else { return }
+        for wid in windows.keys where owner[wid] == pid { owner[wid] = nil }
+    }
+
+    mutating func removeAll() {
+        byPid.removeAll()
+        owner.removeAll()
+    }
+}
+
 /// When a failed attribute read on a cached element means "re-resolve the
 /// element and read again" rather than a real answer about the window.
 enum StaleElementRetry {
@@ -563,13 +604,20 @@ enum WindowsByID {
         )
     }
 
-    // pid → (CGWindowID → AXUIElement). Repopulated lazily on lookup miss.
-    private static var axCache: [pid_t: [CGWindowID: AXUIElement]] = [:]
+    // pid → (CGWindowID → AXUIElement), with each window's owner. Repopulated
+    // lazily on lookup miss.
+    private static var axCache = WindowElementIndex<AXUIElement>()
     private static let cacheLock = NSLock()
 
     static func invalidateCache(pid: pid_t, windowID: CGWindowID) {
         cacheLock.lock(); defer { cacheLock.unlock() }
-        axCache[pid]?[windowID] = nil
+        axCache.remove(pid: pid, windowID: windowID)
+    }
+
+    /// Every element held for `pid`'s windows (the app quit).
+    static func invalidateCache(pid: pid_t) {
+        cacheLock.lock(); defer { cacheLock.unlock() }
+        axCache.remove(pid: pid)
     }
 
     static func invalidateAll() {
@@ -583,7 +631,7 @@ enum WindowsByID {
         guard let getWindow = AXShim.getWindow else { return nil }
 
         cacheLock.lock()
-        if let cached = axCache[pid]?[windowID] {
+        if let cached = axCache.element(windowID: windowID, pid: pid) {
             cacheLock.unlock()
             return cached
         }
@@ -612,13 +660,10 @@ enum WindowsByID {
         // preserves the union of what we've ever seen for this pid.
         // Stale AXUIElements raise -25204 when actioned, which we already
         // tolerate (the per-window invalidate path drops them on destroy).
-        var existing = axCache[pid] ?? [:]
-        for (wid, el) in map {
-            existing[wid] = el  // freshest AX element wins for shared ids
-        }
-        axCache[pid] = existing
+        axCache.merge(pid: pid, map)
+        let el = axCache.element(windowID: windowID, pid: pid)
         cacheLock.unlock()
-        return existing[windowID]
+        return el
     }
 
     // Look up by CGWindowID alone — recover the pid, then dispatch via
@@ -633,7 +678,7 @@ enum WindowsByID {
     /// single-window CGWindowList query.
     static func ownerPID(windowID: CGWindowID) -> pid_t? {
         cacheLock.lock()
-        let cached = axCache.mapValues { Set($0.keys) }
+        let cached = axCache
         cacheLock.unlock()
         return WindowOwnerLookup.pid(for: windowID, cached: cached) { wid in
             (windowInfo(windowID: wid)?[kCGWindowOwnerPID as String] as? Int).map { pid_t($0) }

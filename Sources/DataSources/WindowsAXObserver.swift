@@ -661,6 +661,9 @@ final class WindowsAXObserver {
         }
         lastTitle.removeValue(forKey: pid)
         appObservers.removeValue(forKey: pid)
+        // Including windows reached through WindowsByID that this observer
+        // never tracked: their elements die with the process.
+        WindowsByID.invalidateCache(pid: pid)
         WindowDebug.log("ax: uninstalled pid=\(pid)")
     }
 

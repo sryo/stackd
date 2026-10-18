@@ -3,15 +3,13 @@ import ApplicationServices
 import CoreGraphics
 import Foundation
 
-/// Pure resolution order for a window's owning pid. `cached` maps each pid
-/// to the window ids its AX cache holds; `query` is the single-window
-/// CGWindowList fallback.
+/// Pure resolution order for a window's owning pid: the AX element cache's
+/// owner map first, then `query`, the single-window CGWindowList fallback.
 enum WindowOwnerLookup {
-    static func pid(for windowID: CGWindowID,
-                    cached: [pid_t: Set<CGWindowID>],
-                    query: (CGWindowID) -> pid_t?) -> pid_t? {
-        if let hit = cached.first(where: { $0.value.contains(windowID) }) { return hit.key }
-        return query(windowID)
+    static func pid<Element>(for windowID: CGWindowID,
+                             cached: WindowElementIndex<Element>,
+                             query: (CGWindowID) -> pid_t?) -> pid_t? {
+        cached.pid(for: windowID) ?? query(windowID)
     }
 }
 
