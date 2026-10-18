@@ -280,7 +280,7 @@ final class StackWindow: NSPanel, WKNavigationDelegate {
             withTimeInterval: StackWindow.firstPaintFallback, repeats: false
         ) { [weak self] _ in
             guard let self = self else { return }
-            if self.gate.fallbackFired() { self.revealNow() }
+            if self.gate.reveal() { self.revealNow() }
         }
     }
 
@@ -489,17 +489,17 @@ final class StackWindow: NSPanel, WKNavigationDelegate {
         // First-paint signal: WKWebView's CALayer has the initial frame
         // committed by the time didFinishNavigation fires. Reveal once;
         // later navigations within the same window are no-ops.
-        if gate.shouldRevealOnLoadFinish() { revealNow() }
+        if gate.reveal() { revealNow() }
     }
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
         log("webview did-fail \(error)")
         // Reveal a broken stack instead of leaving it permanently hidden —
         // visible-but-empty is more debuggable than silently invisible.
-        if gate.shouldRevealOnLoadFail() { revealNow() }
+        if gate.reveal() { revealNow() }
     }
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
         log("webview did-fail-provisional \(error)")
-        if gate.shouldRevealOnLoadFail() { revealNow() }
+        if gate.reveal() { revealNow() }
     }
 }
 
@@ -531,29 +531,14 @@ struct FirstPaintGate {
         return true
     }
 
-    /// Called from WKNavigationDelegate.didFinishNavigation. Returns true
-    /// only on the transition .armed → .revealed; later navigations within
-    /// the same window (e.g. JS-driven reloads) are no-ops. Returns false
-    /// if JS has taken alpha control via `sd.window.setAlpha` — the stack
-    /// owns visibility now, the gate stops auto-revealing.
-    mutating func shouldRevealOnLoadFinish() -> Bool {
-        guard state == .armed, !overridden else { return false }
-        state = .revealed
-        return true
-    }
-
-    /// Called from didFail / didFailProvisionalNavigation. Same transition
-    /// as load-finish — we'd rather show a broken stack than a hidden one,
-    /// EXCEPT when JS has taken alpha control (the stack chose its visibility
-    /// state deliberately; we don't second-guess on a load error).
-    mutating func shouldRevealOnLoadFail() -> Bool {
-        guard state == .armed, !overridden else { return false }
-        state = .revealed
-        return true
-    }
-
-    /// Called when the fallback timer fires. Same transition.
-    mutating func fallbackFired() -> Bool {
+    /// Called from WKNavigationDelegate.didFinishNavigation (first paint),
+    /// didFail / didFailProvisionalNavigation (we'd rather show a broken
+    /// stack than a hidden one) and the fallback timer. Returns true only on
+    /// the transition .armed → .revealed; later signals (a JS-driven reload,
+    /// a late fallback) are no-ops. Returns false if JS has taken alpha
+    /// control via `sd.window.setAlpha` — the stack owns visibility now, the
+    /// gate stops auto-revealing, even on a load error.
+    mutating func reveal() -> Bool {
         guard state == .armed, !overridden else { return false }
         state = .revealed
         return true

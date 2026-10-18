@@ -33,80 +33,44 @@ func registerWindowLifecycleTests() {
 
     test("FirstPaintGate: reveal signals before arming are dropped") {
         var g = FirstPaintGate()
-        try expect(g.shouldRevealOnLoadFinish() == false)
-        try expect(g.shouldRevealOnLoadFail() == false)
-        try expect(g.fallbackFired() == false)
+        try expect(g.reveal() == false)
         try expect(g.state == .idle)
     }
 
-    test("FirstPaintGate: didFail after didFinish is a no-op") {
+    test("FirstPaintGate: a second reveal signal is a no-op (didFail after didFinish, a late fallback)") {
         var g = FirstPaintGate()
         _ = g.shouldArmOnShow()
-        _ = g.shouldRevealOnLoadFinish()
-        try expect(g.shouldRevealOnLoadFail() == false)
+        _ = g.reveal()
+        try expect(g.reveal() == false)
         try expect(g.state == .revealed)
     }
 
     // MARK: full lifecycle scenario
+    //
+    // didFinish (first paint), didFail (a broken stack shows anyway) and the
+    // fallback timer (a never-loaded window) are the same signal: reveal().
 
     test("FirstPaintGate: typical happy-path lifecycle (idle → armed → revealed)") {
         var g = FirstPaintGate()
         try expect(g.state == .idle)
         try expect(g.shouldArmOnShow() == true)
         try expect(g.state == .armed)
-        try expect(g.shouldRevealOnLoadFinish() == true)
+        try expect(g.reveal() == true)
         try expect(g.state == .revealed)
         // Subsequent signals (reload, re-show, fallback) all no-op:
-        try expect(g.shouldRevealOnLoadFinish() == false)
+        try expect(g.reveal() == false)
         try expect(g.shouldArmOnShow() == false)
-        try expect(g.fallbackFired() == false)
         try expect(g.state == .revealed)
-    }
-
-    test("FirstPaintGate: broken-stack lifecycle (didFail before didFinish reveals anyway)") {
-        var g = FirstPaintGate()
-        _ = g.shouldArmOnShow()
-        try expect(g.shouldRevealOnLoadFail() == true)
-        try expect(g.state == .revealed)
-        // didFinish would never arrive for a 404'd provisional nav, but if
-        // it did, we'd no-op (already revealed):
-        try expect(g.shouldRevealOnLoadFinish() == false)
-        try expect(g.state == .revealed)
-    }
-
-    test("FirstPaintGate: no-content lifecycle (fallback rescues a never-loaded window)") {
-        var g = FirstPaintGate()
-        _ = g.shouldArmOnShow()
-        // Nothing loaded — eventually the timer fires:
-        try expect(g.fallbackFired() == true)
-        try expect(g.state == .revealed)
-        // A late navigation finish doesn't undo or re-fire:
-        try expect(g.shouldRevealOnLoadFinish() == false)
-        try expect(g.fallbackFired() == false)
     }
 
     // MARK: gate override (JS-controlled alpha via sd.window.setAlpha)
 
-    test("FirstPaintGate: override before reveal disables auto-reveal on didFinish") {
+    test("FirstPaintGate: override before reveal disables the auto-reveal") {
         var g = FirstPaintGate()
         _ = g.shouldArmOnShow()
         g.markOverridden()
-        try expect(g.shouldRevealOnLoadFinish() == false)
+        try expect(g.reveal() == false)
         try expect(g.state == .armed) // state unchanged; JS owns alpha now
-    }
-
-    test("FirstPaintGate: override disables fallback reveal") {
-        var g = FirstPaintGate()
-        _ = g.shouldArmOnShow()
-        g.markOverridden()
-        try expect(g.fallbackFired() == false)
-    }
-
-    test("FirstPaintGate: override disables didFail reveal") {
-        var g = FirstPaintGate()
-        _ = g.shouldArmOnShow()
-        g.markOverridden()
-        try expect(g.shouldRevealOnLoadFail() == false)
     }
 
     test("FirstPaintGate: override before the first show blocks arming") {
@@ -252,7 +216,7 @@ func registerWindowLifecycleTests() {
     test("FirstPaintGate: revealedDirectly from revealed is a no-op") {
         var g = FirstPaintGate()
         _ = g.shouldArmOnShow()
-        _ = g.shouldRevealOnLoadFinish()
+        _ = g.reveal()
         try expect(g.revealedDirectly() == false)
         try expect(g.state == .revealed)
     }
@@ -269,6 +233,6 @@ func registerWindowLifecycleTests() {
         // JS-driven reload) is a no-op.
         var g = FirstPaintGate()
         _ = g.revealedDirectly()
-        try expect(g.shouldRevealOnLoadFinish() == false)
+        try expect(g.reveal() == false)
     }
 }
