@@ -358,6 +358,15 @@ struct CreateAnnouncementLedger {
     }
 }
 
+/// What the created fan-out drives: the sd.windows.all push and bang
+/// delivery to every stack.
+protocol WindowLifecycleHost: AnyObject {
+    func pumpWindowsListForAllStacks()
+    @discardableResult func bang(name: String, detail: [String: Any]) -> Int
+}
+
+extension StackHost: WindowLifecycleHost {}
+
 enum WindowLifecycleFanout {
     private static var announcements = CreateAnnouncementLedger()
 
@@ -368,7 +377,7 @@ enum WindowLifecycleFanout {
         announcements.announcedRecently(id: id, now: Date().timeIntervalSince1970)
     }
 
-    static func fireCreated(host: StackHost?, snap: WindowsLifecycleObserver.Snap, attempt: Int = 0) {
+    static func fireCreated(host: WindowLifecycleHost?, snap: WindowsLifecycleObserver.Snap, attempt: Int = 0) {
         // Single-owner dedup at the funnel: announcers classify ("is this
         // a create at all?"); WHETHER it was already announced is decided
         // here, once. Retries (attempt > 0) are the same announcement.
@@ -395,7 +404,7 @@ enum WindowLifecycleFanout {
         }
     }
 
-    private static func dispatch(host: StackHost?, snap: WindowsLifecycleObserver.Snap, attempt: Int) {
+    private static func dispatch(host: WindowLifecycleHost?, snap: WindowsLifecycleObserver.Snap, attempt: Int) {
         WindowDebug.log("created fan-out: wid=\(snap.id) dispatch (attempt=\(attempt))")
         host?.pumpWindowsListForAllStacks()
         host?.bang(name: "sd.window.created", detail: WindowsLifecycleObserver.detail(snap))
