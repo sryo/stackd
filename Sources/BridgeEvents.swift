@@ -138,18 +138,17 @@ struct EventTapCapture {
     /// "enter" / "move" / "leave" for an `emitLeave` observer; nil otherwise.
     let phase: String?
 
+    /// The pointer-motion types whose payload carries `deltaX` / `deltaY`.
+    static let motionTypes: Set<CGEventType> = [.mouseMoved, .leftMouseDragged, .rightMouseDragged]
+
     init(type: CGEventType, event: CGEvent, phase: String?) {
         self.type = type
         keyCode = event.getIntegerValueField(.keyboardEventKeycode)
         flags = event.flags.rawValue
         location = event.location
-        switch type {
-        case .mouseMoved, .leftMouseDragged, .rightMouseDragged, .otherMouseDragged:
-            motionDelta = (event.getDoubleValueField(.mouseEventDeltaX),
-                           event.getDoubleValueField(.mouseEventDeltaY))
-        default:
-            motionDelta = nil
-        }
+        motionDelta = EventTapCapture.motionTypes.contains(type)
+            ? (event.getDoubleValueField(.mouseEventDeltaX), event.getDoubleValueField(.mouseEventDeltaY))
+            : nil
         scroll = type == .scrollWheel ? ScrollWheel.read(event) : nil
         gestureEvent = type.rawValue == Gesture.cgEventType.rawValue ? event.copy() : nil
         self.phase = phase

@@ -66,6 +66,13 @@ func registerEventTapCaptureTests() {
         try expectEqual(c["type"] as? String, "leftMouseDown")
     }
 
+    test("eventtap capture: every pointer-motion type that carries a delta is one a manifest can tap") {
+        for type in EventTapCapture.motionTypes {
+            let name = EventTapRegistry.name(for: type)
+            try expectEqual(EventTapRegistry.parse(name), type, "motion type \(type.rawValue) has no eventtap name")
+        }
+    }
+
     test("eventtap capture: a scroll event carries the scroll fields read at capture") {
         guard let e = CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 2,
                               wheel1: -4, wheel2: 2, wheel3: 0) else {
