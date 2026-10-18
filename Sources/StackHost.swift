@@ -45,10 +45,9 @@ struct StackManifest: Decodable {
     /// `cornerRadius`; `"capsule"` produces a pill (or circle when w==h),
     /// ignoring `cornerRadius`. See `StackShape` for the resolution rule.
     let shape: String?
-    /// Inner inset between the material edge and the WebView, in points.
-    /// Default 0 (WebView fills the material). When > 0, the WebView's
-    /// corners are auto-computed to stay CONCENTRIC with the outer material
-    /// edge (mirrors SwiftUI's `RoundedRectangularShapeCorners.concentric`).
+    /// Inner inset between the material edge and the page content, in
+    /// points, applied as body padding. Missing on a rounded glass stack →
+    /// cornerRadius/2, otherwise 0 (see `StackPadding.effectivePadding`).
     let padding: Double?
     /// Inject a minimal CSS reset (`:where(html,body){margin:0;padding:0;
     /// background:transparent}`) at document end. Default true. Set `false`

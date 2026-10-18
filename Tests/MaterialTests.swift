@@ -120,17 +120,6 @@ func registerMaterialTests() {
 
     // MARK: StackPadding
     //
-    // When a WebView is inset by P inside a material with outer cornerRadius
-    // R, its inner cornerRadius is max(0, R - P) — parallel arcs sharing a
-    // center. Mirrors SwiftUI's RoundedRectangularShapeCorners.concentric.
-
-    test("padding: parse nil → 0, non-negative passes through, negative clamps to 0") {
-        try expectEqual(StackPadding.parse(nil), 0)
-        try expectEqual(StackPadding.parse(8), 8)
-        try expectEqual(StackPadding.parse(0), 0)
-        try expectEqual(StackPadding.parse(-3), 0)
-    }
-
     // When the manifest omits `padding` on a glass material with
     // cornerRadius > 0, the daemon auto-defaults to cornerRadius/2. Explicit
     // manifest values (including 0) are respected. Non-glass materials
@@ -165,16 +154,6 @@ func registerMaterialTests() {
             StackPadding.effectivePadding(manifest: nil, material: .vibrancy(.hudWindow), cornerRadius: 24), 0)
         try expectEqual(
             StackPadding.effectivePadding(manifest: nil, material: .none, cornerRadius: 24), 0)
-    }
-
-    test("concentric: inner radius is outer minus padding, collapsing to 0 at or past parity") {
-        let cases: [(outer: Double, padding: Double, inner: Double)] = [
-            (24, 8, 16), (24, 0, 24), (24, 24, 0), (24, 40, 0), (0, 0, 0),
-        ]
-        for c in cases {
-            try expectEqual(StackPadding.concentricInnerRadius(outer: c.outer, padding: c.padding), c.inner,
-                            "outer=\(c.outer) padding=\(c.padding)")
-        }
     }
 
     // MARK: MaterialAttachment.mode

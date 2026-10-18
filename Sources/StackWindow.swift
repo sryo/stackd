@@ -83,9 +83,7 @@ final class StackWindow: NSPanel, WKNavigationDelegate {
         webView.wantsLayer = true
         webView.layer?.isOpaque = false
         webView.layer?.backgroundColor = NSColor.clear.cgColor
-        if #available(macOS 12.0, *) {
-            webView.underPageBackgroundColor = .clear
-        }
+        webView.underPageBackgroundColor = .clear
         if #available(macOS 13.3, *) {
             webView.isInspectable = true
         }

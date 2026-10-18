@@ -191,22 +191,9 @@ enum StackShape: String {
     }
 }
 
-/// Inner inset between the material edge and the WebView, in points.
-///
-/// Enables concentric corners: when the WebView is inset by P inside a
-/// material with outer cornerRadius R, the WebView's own cornerRadius
-/// becomes `max(0, R - P)` so the inner curve is concentric with the outer
-/// (parallel arcs sharing a center). Mirrors SwiftUI's
-/// `RoundedRectangularShapeCorners.concentric` / `ConcentricRectangle`.
-///
-/// Apple's HIG guidance: when the inset exceeds the outer radius, the
-/// inner corners collapse to 0 (sharp). Matches the SwiftUI implementation.
+/// Inner inset between the material edge and the page content, in points.
+/// Bridge applies it as body padding (the auto-padding contract).
 enum StackPadding {
-    static func parse(_ raw: Double?) -> Double {
-        guard let raw = raw else { return 0 }
-        return max(0, raw)
-    }
-
     /// Resolve the EFFECTIVE padding for a stack given the manifest value,
     /// material, and outer cornerRadius.
     ///
@@ -227,12 +214,6 @@ enum StackPadding {
             return r / 2.0
         }
         return 0
-    }
-
-    /// Pure concentric inner-radius formula. `padding ≥ outer` → 0 (collapses
-    /// to a sharp corner, matching SwiftUI's behavior).
-    static func concentricInnerRadius(outer: Double, padding: Double) -> Double {
-        return max(0, outer - padding)
     }
 }
 

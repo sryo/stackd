@@ -46,7 +46,7 @@ final class OverlayHandle: NSObject, WKNavigationDelegate {
     // The target's window level, which the panel's level is derived from.
     private var targetLevel = OverlayTargetLevel()
     // Tick driving: a vsync subscription while armed, a slow backstop timer
-    // otherwise. Only live between start() and stop().
+    // otherwise. Only live between start() and detach().
     private var tickArm = OverlayTickArm()
     private var started = false
     private var linkToken: Token?
@@ -146,8 +146,8 @@ final class OverlayHandle: NSObject, WKNavigationDelegate {
         arm()
     }
 
-    /// Stop ticking. Idempotent; detach() calls it too.
-    func stop() {
+    /// Stop ticking. Part of detach().
+    private func stop() {
         started = false
         backstop?.invalidate()
         backstop = nil

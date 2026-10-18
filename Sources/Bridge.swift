@@ -99,17 +99,12 @@ final class Bridge: NSObject, WKScriptMessageHandler {
     let urlHandlerTokens = HandleTable<Token>()
     // Window-tracked overlays (sd.overlay.attach) and free-region overlays
     // (sd.overlay.region) share ids so they never collide. Each tracked
-    // overlay owns a borderless NSPanel + WKWebView and an overlayTokens
-    // entry under the same id that stops its reposition driving;
-    // regionFollowTokens holds a region's cursor-follow vsync subscription.
+    // overlay owns a borderless NSPanel + WKWebView and stops its own
+    // reposition driving on detach; regionFollowTokens holds a region's
+    // cursor-follow vsync subscription.
     let overlayHandles: HandleTable<OverlayHandle>
     let regionOverlayHandles: HandleTable<RegionOverlayHandle>
-    let overlayTokens = HandleTable<Token>()
     let regionFollowTokens = HandleTable<Token>()
-    // Reserved for backpressure if a future overlay tick path becomes async
-    // (e.g. snapshot-driven reposition). Currently the tick is synchronous —
-    // setFrame + an evaluateJavaScript fire-and-forget — so this stays empty.
-    var overlayInFlight: Set<Int> = []
     // HTTP servers (sd.httpserver.serve) and the requests waiting for
     // sd.httpserver.respond(), whose value is the connection's completion.
     // One id space, so a server id never equals a request id.
@@ -445,20 +440,18 @@ final class Bridge: NSObject, WKScriptMessageHandler {
             self.hotkeyTokens.cancelAll()
             for h in self.statusItems.drain() { h.remove() }
         })
-        // Overlays — cancel each per-overlay displayLink subscription, then
-        // detach each handle (closes the overlay NSPanel) so a hot-reload
-        // doesn't leak panels. NSPanel.close must run on main; we sync-hop
-        // (matching the per-call overlay.detach path) so the panels are
+        // Overlays — cancel each region's cursor follow, then detach each
+        // handle (stops its ticking and closes the overlay NSPanel) so a
+        // hot-reload doesn't leak panels. NSPanel.close must run on main;
+        // we sync-hop (matching the per-call overlay.detach path) so the panels are
         // actually torn down before the new stack instance has a chance
         // to attach its own — otherwise a hot-reload of overlay-border
         // produces two visible outlines until the OS gets around to
         // running the async block.
         scope.adopt(Token { [weak self] in
             guard let self = self else { return }
-            self.overlayTokens.cancelAll()
             self.regionFollowTokens.cancelAll()
             let handles = self.overlayHandles.drain()
-            self.overlayInFlight.removeAll()
             let regionHandles = self.regionOverlayHandles.drain()
             if Thread.isMainThread {
                 for h in handles { h.detach() }

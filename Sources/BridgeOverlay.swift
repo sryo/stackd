@@ -24,18 +24,18 @@ import Foundation
 ///     WebView is otherwise opaque to the host stack — no postMessage
 ///     channel.
 ///
-///   - `overlay.detach` — cancel the displayLink subscription, then close
-///     the overlay NSPanel synchronously. Detaching does NOT touch the
+///   - `overlay.detach` — stop the handle's ticking, then close the
+///     overlay NSPanel synchronously. Detaching does NOT touch the
 ///     target window. Synchronous teardown (sync-hop to main if needed)
 ///     so the JS-side await doesn't resolve until the panel is actually
 ///     gone — a follow-up attach in the same turn would otherwise produce
 ///     two visible overlays.
 ///
 /// Overlays live in the Bridge's `overlayHandles` / `regionOverlayHandles`
-/// tables (one id space) with their driving tokens in `overlayTokens` /
+/// tables (one id space); a region's cursor follow lives in
 /// `regionFollowTokens`. The scope drain on stack unload cancels every
-/// per-overlay displayLink subscription, then sync-hops to main to detach
-/// each handle so a hot-reload doesn't strand the panels.
+/// cursor follow, then sync-hops to main to detach each handle so a
+/// hot-reload doesn't strand the panels.
 extension Bridge {
     /// Overlay primitives — concatenated into `Bridge.primitives` alongside
     /// the rest of the inline registrations. Pure builder; no side effects.
@@ -79,14 +79,9 @@ extension Bridge {
 
                     // Tick driving lives in the handle: vsync ticks while
                     // window events say the target may be changing, a slow
-                    // backstop otherwise (see OverlayTickArm). The token
-                    // stops both on detach / scope drain.
+                    // backstop otherwise (see OverlayTickArm). detach()
+                    // stops both.
                     handle.start()
-                    let token = Token { [weak handle] in
-                        if Thread.isMainThread { handle?.stop() }
-                        else { DispatchQueue.main.async { handle?.stop() } }
-                    }
-                    bridge.overlayTokens[id] = token
                     bridge.respond(requestId: requestId, value: id)
                 }
             },
@@ -135,11 +130,10 @@ extension Bridge {
                 }
                 return true
             },
-            // Tear down: cancel the displayLink subscription, then close the
-            // overlay NSPanel. Detaching does NOT touch the target window.
+            // Tear down: stop ticking, then close the overlay NSPanel.
+            // Detaching does NOT touch the target window.
             .syncBridge("overlay.detach", permission: "overlay", denyValue: false) { b, body in
                 guard let id = body["id"] as? Int else { return false }
-                b.overlayTokens.cancel(id)
                 if let handle = b.overlayHandles.remove(id) {
                     // Synchronous teardown — the JS-side await must not resolve
                     // until the NSPanel is actually gone. If it resolved while
@@ -154,7 +148,6 @@ extension Bridge {
                         DispatchQueue.main.sync { handle.detach() }
                     }
                 }
-                b.overlayInFlight.remove(id)
                 return true
             },
             // ── Free-region overlay ────────────────────────────────────────────
