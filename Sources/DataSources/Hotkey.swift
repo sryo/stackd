@@ -6,6 +6,40 @@ import Foundation
 // MARK: Hotkey — Carbon hotkey registry + modal modes
 // MARK: ============================================================
 
+/// A parsed `"ctrl+alt+cmd+b"` chord: a Carbon virtual keycode and modifier mask.
+struct HotkeySpec: Equatable {
+    enum ParseError: Error, Equatable {
+        /// Carbon hot keys have no fn modifier; dropping it would bind the bare key.
+        case unsupportedModifier(String)
+        case missingKey
+        case unknownKey(String)
+    }
+
+    var keyCode: UInt32
+    var modifiers: UInt32
+
+    /// `+`-separated, case-insensitive. Everything that is not a modifier name
+    /// is the key; the last one wins.
+    static func parse(_ spec: String) -> Result<HotkeySpec, ParseError> {
+        var mods: UInt32 = 0
+        var keyToken: String?
+        for part in spec.lowercased().split(separator: "+") {
+            let p = part.trimmingCharacters(in: .whitespaces)
+            switch p {
+            case "cmd", "command", "meta":   mods |= UInt32(cmdKey)
+            case "ctrl", "control":          mods |= UInt32(controlKey)
+            case "alt", "option", "opt":     mods |= UInt32(optionKey)
+            case "shift":                    mods |= UInt32(shiftKey)
+            case "fn":                       return .failure(.unsupportedModifier(p))
+            default:                         keyToken = p
+            }
+        }
+        guard let token = keyToken else { return .failure(.missingKey) }
+        guard let keyCode = HotkeyRegistry.keyCode(for: token) else { return .failure(.unknownKey(token)) }
+        return .success(HotkeySpec(keyCode: keyCode, modifiers: mods))
+    }
+}
+
 final class HotkeyRegistry {
     static let shared = HotkeyRegistry()
 
@@ -53,21 +87,14 @@ final class HotkeyRegistry {
               apps: [String]? = nil,
               excludeApps: [String]? = nil,
               callback: @escaping () -> Void) -> Token? {
-        let parts = spec.lowercased().split(separator: "+").map { $0.trimmingCharacters(in: .whitespaces) }
-        var mods: UInt32 = 0
-        var keyToken: String?
-        for p in parts {
-            switch p {
-            case "cmd", "command", "meta":   mods |= UInt32(cmdKey)
-            case "ctrl", "control":          mods |= UInt32(controlKey)
-            case "alt", "option", "opt":     mods |= UInt32(optionKey)
-            case "shift":                    mods |= UInt32(shiftKey)
-            case "fn":                       break // No Carbon support; skip.
-            default: keyToken = p
-            }
-        }
-        guard let token = keyToken, let keyCode = HotkeyRegistry.keyCode(for: token) else {
-            log("hotkey unparsed: \(spec)")
+        let keyCode: UInt32
+        let mods: UInt32
+        switch HotkeySpec.parse(spec) {
+        case .success(let parsed):
+            keyCode = parsed.keyCode
+            mods = parsed.modifiers
+        case .failure(let error):
+            log("hotkey unparsed: \(spec) (\(error))")
             return nil
         }
 
@@ -142,13 +169,26 @@ final class HotkeyRegistry {
         }
     }
 
+    /// Whether a binding's mode and app gates let it fire. `frontmost` (the
+    /// frontmost app's bundle id) is only asked for when an app list or an
+    /// exclusion list is set, and at most once.
+    static func gateAllows(mode: String?, currentMode: String, apps: [String]?,
+                           excludeApps: [String]?, frontmost: () -> String) -> Bool {
+        if let mode = mode, mode != currentMode { return false }
+        let appListed = apps.map { !$0.contains("*") } ?? false
+        guard appListed || excludeApps != nil else { return true }
+        let frontId = frontmost()
+        if appListed, let apps = apps, !apps.contains(frontId) { return false }
+        if let exclude = excludeApps, exclude.contains(frontId) { return false }
+        return true
+    }
+
     fileprivate func dispatch(id: UInt32) {
         guard let b = bindings[id] else { return }
-        if let m = b.mode, m != currentMode { return }
-        let frontId = NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? ""
-        if let apps = b.apps, !apps.contains("*"), !apps.contains(frontId) { return }
-        if let exclude = b.excludeApps, exclude.contains(frontId) { return }
-        b.callback()
+        let allowed = HotkeyRegistry.gateAllows(
+            mode: b.mode, currentMode: currentMode, apps: b.apps, excludeApps: b.excludeApps,
+            frontmost: { NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "" })
+        if allowed { b.callback() }
     }
 
     private func installEventHandler() {
@@ -168,48 +208,58 @@ final class HotkeyRegistry {
             1, &spec, nil, &eventHandler)
     }
 
-    // Minimal name → US-keyboard virtual-keycode map. Letters/digits/common keys.
+    /// Name → US-keyboard virtual keycode, shared by hotkey binding and key
+    /// synthesis (EventsSynth). Function-key, navigation and keypad names
+    /// mirror `hs.keycodes.map` so Hammerspoon muscle memory transfers.
+    ///
+    /// Media (mediaPlay/mediaNext/mediaPrev) and brightness keys are absent:
+    /// those are HID Consumer-page events (NX_KEYTYPE_*) posted through
+    /// NSEvent.otherEvent(.systemDefined, subtype: 8, ...), not virtual keycodes.
+    private static let keyCodes: [String: Int] = [
+        "a": kVK_ANSI_A, "b": kVK_ANSI_B, "c": kVK_ANSI_C, "d": kVK_ANSI_D, "e": kVK_ANSI_E,
+        "f": kVK_ANSI_F, "g": kVK_ANSI_G, "h": kVK_ANSI_H, "i": kVK_ANSI_I, "j": kVK_ANSI_J,
+        "k": kVK_ANSI_K, "l": kVK_ANSI_L, "m": kVK_ANSI_M, "n": kVK_ANSI_N, "o": kVK_ANSI_O,
+        "p": kVK_ANSI_P, "q": kVK_ANSI_Q, "r": kVK_ANSI_R, "s": kVK_ANSI_S, "t": kVK_ANSI_T,
+        "u": kVK_ANSI_U, "v": kVK_ANSI_V, "w": kVK_ANSI_W, "x": kVK_ANSI_X, "y": kVK_ANSI_Y,
+        "z": kVK_ANSI_Z,
+        "0": kVK_ANSI_0, "1": kVK_ANSI_1, "2": kVK_ANSI_2, "3": kVK_ANSI_3, "4": kVK_ANSI_4,
+        "5": kVK_ANSI_5, "6": kVK_ANSI_6, "7": kVK_ANSI_7, "8": kVK_ANSI_8, "9": kVK_ANSI_9,
+        "space": kVK_Space, "tab": kVK_Tab,
+        "return": kVK_Return, "enter": kVK_Return,
+        "escape": kVK_Escape, "esc": kVK_Escape,
+        "delete": kVK_Delete, "backspace": kVK_Delete,
+        "left": kVK_LeftArrow, "right": kVK_RightArrow, "up": kVK_UpArrow, "down": kVK_DownArrow,
+        "-": kVK_ANSI_Minus, "minus": kVK_ANSI_Minus,
+        "=": kVK_ANSI_Equal, "equal": kVK_ANSI_Equal, "equals": kVK_ANSI_Equal,
+        ",": kVK_ANSI_Comma, "comma": kVK_ANSI_Comma,
+        ".": kVK_ANSI_Period, "period": kVK_ANSI_Period,
+        "/": kVK_ANSI_Slash, "slash": kVK_ANSI_Slash,
+        ";": kVK_ANSI_Semicolon, "semicolon": kVK_ANSI_Semicolon,
+        "'": kVK_ANSI_Quote, "quote": kVK_ANSI_Quote,
+        "[": kVK_ANSI_LeftBracket, "leftbracket": kVK_ANSI_LeftBracket,
+        "]": kVK_ANSI_RightBracket, "rightbracket": kVK_ANSI_RightBracket,
+        "\\": kVK_ANSI_Backslash, "backslash": kVK_ANSI_Backslash,
+        "`": kVK_ANSI_Grave, "grave": kVK_ANSI_Grave,
+        "f1": kVK_F1, "f2": kVK_F2, "f3": kVK_F3, "f4": kVK_F4, "f5": kVK_F5,
+        "f6": kVK_F6, "f7": kVK_F7, "f8": kVK_F8, "f9": kVK_F9, "f10": kVK_F10,
+        "f11": kVK_F11, "f12": kVK_F12, "f13": kVK_F13, "f14": kVK_F14, "f15": kVK_F15,
+        "f16": kVK_F16, "f17": kVK_F17, "f18": kVK_F18, "f19": kVK_F19, "f20": kVK_F20,
+        "home": kVK_Home, "end": kVK_End, "pageup": kVK_PageUp, "pagedown": kVK_PageDown,
+        "forwarddelete": kVK_ForwardDelete, "help": kVK_Help,
+        "pad.": kVK_ANSI_KeypadDecimal, "paddecimal": kVK_ANSI_KeypadDecimal,
+        "pad*": kVK_ANSI_KeypadMultiply, "padmultiply": kVK_ANSI_KeypadMultiply,
+        "pad+": kVK_ANSI_KeypadPlus, "padplus": kVK_ANSI_KeypadPlus,
+        "pad/": kVK_ANSI_KeypadDivide, "paddivide": kVK_ANSI_KeypadDivide,
+        "pad-": kVK_ANSI_KeypadMinus, "padminus": kVK_ANSI_KeypadMinus,
+        "pad=": kVK_ANSI_KeypadEquals, "padequals": kVK_ANSI_KeypadEquals,
+        "pad0": kVK_ANSI_Keypad0, "pad1": kVK_ANSI_Keypad1, "pad2": kVK_ANSI_Keypad2,
+        "pad3": kVK_ANSI_Keypad3, "pad4": kVK_ANSI_Keypad4, "pad5": kVK_ANSI_Keypad5,
+        "pad6": kVK_ANSI_Keypad6, "pad7": kVK_ANSI_Keypad7, "pad8": kVK_ANSI_Keypad8,
+        "pad9": kVK_ANSI_Keypad9,
+        "padclear": kVK_ANSI_KeypadClear, "padenter": kVK_ANSI_KeypadEnter,
+    ]
+
     static func keyCode(for token: String) -> UInt32? {
-        switch token {
-        case "a": return UInt32(kVK_ANSI_A); case "b": return UInt32(kVK_ANSI_B)
-        case "c": return UInt32(kVK_ANSI_C); case "d": return UInt32(kVK_ANSI_D)
-        case "e": return UInt32(kVK_ANSI_E); case "f": return UInt32(kVK_ANSI_F)
-        case "g": return UInt32(kVK_ANSI_G); case "h": return UInt32(kVK_ANSI_H)
-        case "i": return UInt32(kVK_ANSI_I); case "j": return UInt32(kVK_ANSI_J)
-        case "k": return UInt32(kVK_ANSI_K); case "l": return UInt32(kVK_ANSI_L)
-        case "m": return UInt32(kVK_ANSI_M); case "n": return UInt32(kVK_ANSI_N)
-        case "o": return UInt32(kVK_ANSI_O); case "p": return UInt32(kVK_ANSI_P)
-        case "q": return UInt32(kVK_ANSI_Q); case "r": return UInt32(kVK_ANSI_R)
-        case "s": return UInt32(kVK_ANSI_S); case "t": return UInt32(kVK_ANSI_T)
-        case "u": return UInt32(kVK_ANSI_U); case "v": return UInt32(kVK_ANSI_V)
-        case "w": return UInt32(kVK_ANSI_W); case "x": return UInt32(kVK_ANSI_X)
-        case "y": return UInt32(kVK_ANSI_Y); case "z": return UInt32(kVK_ANSI_Z)
-        case "0": return UInt32(kVK_ANSI_0); case "1": return UInt32(kVK_ANSI_1)
-        case "2": return UInt32(kVK_ANSI_2); case "3": return UInt32(kVK_ANSI_3)
-        case "4": return UInt32(kVK_ANSI_4); case "5": return UInt32(kVK_ANSI_5)
-        case "6": return UInt32(kVK_ANSI_6); case "7": return UInt32(kVK_ANSI_7)
-        case "8": return UInt32(kVK_ANSI_8); case "9": return UInt32(kVK_ANSI_9)
-        case "space": return UInt32(kVK_Space)
-        case "return", "enter": return UInt32(kVK_Return)
-        case "escape", "esc":   return UInt32(kVK_Escape)
-        case "tab":             return UInt32(kVK_Tab)
-        case "delete", "backspace": return UInt32(kVK_Delete)
-        case "left":  return UInt32(kVK_LeftArrow)
-        case "right": return UInt32(kVK_RightArrow)
-        case "up":    return UInt32(kVK_UpArrow)
-        case "down":  return UInt32(kVK_DownArrow)
-        case "-", "minus":             return UInt32(kVK_ANSI_Minus)
-        case "=", "equal", "equals":   return UInt32(kVK_ANSI_Equal)
-        case ",", "comma":             return UInt32(kVK_ANSI_Comma)
-        case ".", "period":            return UInt32(kVK_ANSI_Period)
-        case "/", "slash":             return UInt32(kVK_ANSI_Slash)
-        case ";", "semicolon":         return UInt32(kVK_ANSI_Semicolon)
-        case "'", "quote":             return UInt32(kVK_ANSI_Quote)
-        case "[", "leftbracket":       return UInt32(kVK_ANSI_LeftBracket)
-        case "]", "rightbracket":      return UInt32(kVK_ANSI_RightBracket)
-        case "\\", "backslash":        return UInt32(kVK_ANSI_Backslash)
-        case "`", "grave":             return UInt32(kVK_ANSI_Grave)
-        default: return nil
-        }
+        keyCodes[token].map { UInt32($0) }
     }
 }

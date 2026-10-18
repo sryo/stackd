@@ -42,7 +42,7 @@ import CoreGraphics
 //      plus the pure rectGateAllows / rectGateTransition helpers the tap
 //      callback runs.
 //   3. HotkeyRegistry.keyCode(for:)            — pure token → virtual
-//      keycode lookup. The bind() spec parser walks this table; if "cmd"
+//      keycode lookup. HotkeySpec.parse walks this table; if "cmd"
 //      stopped resolving the hotkey surface is dead.
 //   4. EventTapPredicate.isEmpty / .matches    — pure predicate
 //      evaluator. We build CGEvents in-memory (CGEvent(keyboardEventSource:
@@ -246,7 +246,7 @@ func registerInputTests() {
     // MARK: - HotkeyRegistry.keyCode token table
 
     test("HotkeyRegistry.keyCode resolves letters, digits, and named keys to their Carbon constants") {
-        // The bind() spec parser splits "cmd+shift+a" and resolves the
+        // HotkeySpec.parse splits "cmd+shift+a" and resolves the
         // non-modifier token through this table. If any of these keys
         // stop resolving, the corresponding hotkey spec silently fails
         // to register (bind() logs and returns nil). Sample across each
@@ -270,7 +270,7 @@ func registerInputTests() {
     }
 
     test("HotkeyRegistry.keyCode returns nil for modifier tokens and unknown strings") {
-        // Modifier names are NOT in this table — bind() strips them out of
+        // Modifier names are NOT in this table — HotkeySpec.parse strips them out of
         // the token stream and accumulates them into the Carbon modifier
         // mask separately. If a modifier ever resolved here it would
         // double-register (once as a modifier flag, once as the "main"
