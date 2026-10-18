@@ -198,13 +198,16 @@ enum Xattr {
     }
 }
 
-/// One FSWatch per active sd.fs.watch subscription. Lifetime owned by Bridge
-/// (held in a [watchId: FSWatch] map). Deinit tears the FSEventStream down.
+/// One FSWatch per active sd.fs.watch subscription, and the stream under the
+/// hot-reload FileWatcher. Lifetime owned by the creator (Bridge holds a
+/// [watchId: FSWatch] map). Deinit tears the FSEventStream down.
 final class FSWatch {
     private var stream: FSEventStreamRef?
     private let callback: ([(path: String, flags: FSEventStreamEventFlags)]) -> Void
 
-    init?(paths: [String], callback: @escaping ([(path: String, flags: FSEventStreamEventFlags)]) -> Void) {
+    init?(paths: [String],
+          latency: CFTimeInterval = 0.1,
+          callback: @escaping ([(path: String, flags: FSEventStreamEventFlags)]) -> Void) {
         self.callback = callback
         var ctx = FSEventStreamContext(
             version: 0,
@@ -234,7 +237,7 @@ final class FSWatch {
             kCFAllocatorDefault, cb, &ctx,
             cfPaths,
             FSEventStreamEventId(kFSEventStreamEventIdSinceNow),
-            0.1,
+            latency,
             UInt32(kFSEventStreamCreateFlagFileEvents | kFSEventStreamCreateFlagNoDefer | kFSEventStreamCreateFlagUseCFTypes)
         ) else { return nil }
         self.stream = s

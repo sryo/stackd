@@ -1,8 +1,11 @@
 import Foundation
 import CoreServices
 
+/// Hot-reload trigger: watches stack folders through an `FSWatch` and calls
+/// back once, debounced, when something that changes a stack's behavior
+/// moved.
 final class FileWatcher {
-    private var stream: FSEventStreamRef?
+    private var watch: FSWatch?
     private let callback: () -> Void
     private var debounceTask: DispatchWorkItem?
     private let debounceMs: Int
@@ -24,59 +27,33 @@ final class FileWatcher {
         self.callback = callback
         self.debounceMs = debounceMs
 
-        var ctx = FSEventStreamContext(
-            version: 0,
-            info: Unmanaged.passUnretained(self).toOpaque(),
-            retain: nil, release: nil, copyDescription: nil
-        )
-
-        let streamCallback: FSEventStreamCallback = {
-            _, info, numEvents, eventPaths, eventFlags, _ in
-            guard let info = info else { return }
-            let watcher = Unmanaged<FileWatcher>.fromOpaque(info).takeUnretainedValue()
-            let paths = Unmanaged<CFArray>
-                .fromOpaque(eventPaths)
-                .takeUnretainedValue() as! [String]
-            // Reload triggers: (a) a file with a stack-source extension, or
-            // (b) a directory create/rename/remove anywhere under a watched
-            // root. (b) catches `cp -r examples/foo ~/stackd/stacks/foo` —
-            // FSEvents coalesces the inner file events under the new dir
-            // path on initial creation, so checking the parent dir event is
-            // the only way to notice a new stack folder appeared.
-            let dirFlag = UInt32(kFSEventStreamEventFlagItemIsDir)
-            for i in 0..<numEvents {
-                let path  = paths[i]
-                let flags = eventFlags[i]
-                if watcher.isIgnored(path) { continue }
-                let ext   = (path as NSString).pathExtension.lowercased()
-                if FileWatcher.reloadExtensions.contains(ext) {
-                    watcher.scheduleFire(); return
-                }
-                if (flags & dirFlag) != 0 {
-                    watcher.scheduleFire(); return
-                }
-            }
+        watch = FSWatch(paths: paths, latency: 0.2) { [weak self] events in
+            self?.handle(events)
         }
-
-        let cfPaths = paths as CFArray
-        stream = FSEventStreamCreate(
-            kCFAllocatorDefault,
-            streamCallback,
-            &ctx,
-            cfPaths,
-            FSEventStreamEventId(kFSEventStreamEventIdSinceNow),
-            0.2,
-            UInt32(kFSEventStreamCreateFlagFileEvents
-                 | kFSEventStreamCreateFlagNoDefer
-                 | kFSEventStreamCreateFlagUseCFTypes)
-        )
-
-        if let stream = stream {
-            FSEventStreamSetDispatchQueue(stream, DispatchQueue.main)
-            FSEventStreamStart(stream)
+        if watch != nil {
             log("watching \(paths.joined(separator: ", "))")
         } else {
             log("FSEventStream creation failed")
+        }
+    }
+
+    /// Reload triggers: (a) a file with a stack-source extension, or
+    /// (b) a directory create/rename/remove anywhere under a watched
+    /// root. (b) catches `cp -r examples/foo ~/stackd/stacks/foo` —
+    /// FSEvents coalesces the inner file events under the new dir
+    /// path on initial creation, so checking the parent dir event is
+    /// the only way to notice a new stack folder appeared.
+    static func triggersReload(path: String, flags: FSEventStreamEventFlags) -> Bool {
+        if reloadExtensions.contains((path as NSString).pathExtension.lowercased()) { return true }
+        return (flags & UInt32(kFSEventStreamEventFlagItemIsDir)) != 0
+    }
+
+    private func handle(_ events: [(path: String, flags: FSEventStreamEventFlags)]) {
+        for event in events where !isIgnored(event.path) {
+            if Self.triggersReload(path: event.path, flags: event.flags) {
+                scheduleFire()
+                return
+            }
         }
     }
 
@@ -114,12 +91,8 @@ final class FileWatcher {
 
     func stop() {
         debounceTask?.cancel()
-        if let stream = stream {
-            FSEventStreamStop(stream)
-            FSEventStreamInvalidate(stream)
-            FSEventStreamRelease(stream)
-            self.stream = nil
-        }
+        watch?.stop()
+        watch = nil
     }
 
     deinit { stop() }

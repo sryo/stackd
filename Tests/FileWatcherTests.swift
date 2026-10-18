@@ -1,4 +1,5 @@
 import Foundation
+import CoreServices
 
 // FileWatcher drives hot reload from FSEvents. Its one policy is which
 // changes count: stack-source extensions (and directory create/rename/
@@ -35,6 +36,18 @@ private func warmUp(_ dir: URL, fires: () -> Int) throws {
 }
 
 func registerFileWatcherTests() {
+    test("FileWatcher.triggersReload: source extensions and directory events reload, data files do not") {
+        let file = FSEventStreamEventFlags(kFSEventStreamEventFlagItemIsFile | kFSEventStreamEventFlagItemModified)
+        let dir  = FSEventStreamEventFlags(kFSEventStreamEventFlagItemIsDir | kFSEventStreamEventFlagItemCreated)
+        for name in ["index.js", "a.mjs", "x.html", "x.htm", "s.css", "stack.json", "i.svg", "m.wasm", "INDEX.JS"] {
+            try expect(FileWatcher.triggersReload(path: "/stacks/bar/\(name)", flags: file), "\(name) should reload")
+        }
+        for name in ["data.db", "data.db-wal", "sd.sqlite-shm", "settings.plist", "stack.log", "stack.pid", ".DS_Store", "README"] {
+            try expect(!FileWatcher.triggersReload(path: "/stacks/bar/\(name)", flags: file), "\(name) must not reload")
+        }
+        try expect(FileWatcher.triggersReload(path: "/stacks/new-stack", flags: dir), "a directory event reloads")
+    }
+
     test("FileWatcher fires for stack-source edits (any case) but not for runtime data files") {
         let fm = FileManager.default
         let created = fm.temporaryDirectory.appendingPathComponent("stackd-filewatcher-\(UUID().uuidString)")
