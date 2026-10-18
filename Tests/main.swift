@@ -10,11 +10,21 @@ __registerAllTests()
 // "live" (camera / speech / location / AX) categories without touching every
 // registerXxxTests() call site. Test names are arbitrary strings passed to
 // test(name:_:) inside each register function; the regex matches against them.
+// A bad pattern stops the run: ignoring it would silently run everything (or,
+// for --exclude, nothing excluded) and report a green result for the wrong set.
 private func parseRegex(_ flag: String) -> NSRegularExpression? {
     let args = CommandLine.arguments
     guard let i = args.firstIndex(of: flag), i + 1 < args.count else { return nil }
-    return try? NSRegularExpression(pattern: args[i + 1], options: [])
+    do {
+        return try NSRegularExpression(pattern: args[i + 1], options: [])
+    } catch {
+        print("bad \(flag) pattern '\(args[i + 1])': \(error.localizedDescription)")
+        exit(2)
+    }
 }
+// Output is piped by tests.sh and CI; line-buffer it so a crash or a hang
+// still shows every test that finished before it.
+setvbuf(stdout, nil, _IOLBF, 0)
 let __include = parseRegex("--filter")
 let __exclude = parseRegex("--exclude")
 exit(runAll(include: __include, exclude: __exclude))

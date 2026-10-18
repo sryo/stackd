@@ -15,17 +15,12 @@ python3 docs/sync.py --check
 # The LaunchAgent template daemonctl.sh install writes must stay valid XML.
 scripts/daemonctl.sh print-plist | plutil -lint -
 
-# Derive the production source list from build.sh so we don't have to keep
-# two lists in sync. Drop Sources/main.swift — Tests/main.swift replaces it
-# as the entry point.
+# Production sources: every Swift file under Sources/ (build.sh globs the same
+# way) except main.swift — Tests/main.swift replaces it as the entry point.
 SWIFT_SOURCES=()
 while IFS= read -r f; do
   [[ "$f" == "Sources/main.swift" ]] || SWIFT_SOURCES+=("$f")
-done < <(awk '
-  /^SWIFT_SOURCES=\(/ { in_arr=1; next }
-  in_arr && /^\)/     { in_arr=0; next }
-  in_arr && /Sources\// { gsub(/^[[:space:]]+|[[:space:]]+$/, ""); print }
-' build.sh)
+done < <(find Sources -name '*.swift' | LC_ALL=C sort)
 
 # Test files — derived by glob so a new Tests/<X>Tests.swift is picked up
 # automatically. The registration trampoline below is generated from the
@@ -86,7 +81,8 @@ fi
 # ad-hoc signed, and claiming the daemon's bundle id from a different code
 # identity can flap the daemon's TCC grants (same failure mode as the
 # rebuild-kills-AX-trust issue).
-swiftc \
+# -j: the test target is not whole-module, so its frontend jobs run in parallel.
+swiftc -j "$(sysctl -n hw.ncpu)" \
   -o .build/stackd-tests \
   "${SWIFT_SOURCES[@]}" "${TEST_SOURCES[@]}" \
   .build/test-obj/TouchEvents.o .build/test-obj/SafePredicate.o \

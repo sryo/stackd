@@ -46,6 +46,12 @@ func runAll(include: NSRegularExpression? = nil, exclude: NSRegularExpression? =
     }
     print("———")
     let skipNote = skipped > 0 ? " (\(skipped) skipped)" : ""
+    if ran == 0 {
+        // A filter that matches nothing is a typo, not a pass.
+        print("no tests matched\(skipNote)")
+        return 2
+    }
     print(failed == 0 ? "\(ran) passed\(skipNote)" : "\(failed)/\(ran) failed\(skipNote)")
-    return Int32(failed)
+    // The exit status is 8 bits wide: 256 failures would wrap to success.
+    return failed == 0 ? 0 : 1
 }
