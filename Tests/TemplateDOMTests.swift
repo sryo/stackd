@@ -202,16 +202,42 @@ func registerTemplateDOMTests() {
         try expectEqual(got, "2|<!-- sd-each:sd.battery.list -->")
     }
 
-    test("template DOM: sd-each over a bare signal renders nothing; its .value renders") {
-        // The signal is a Proxy over a plain object, so Array.isArray(sd.usb)
-        // is false even when its payload is an array.
+    test("template DOM: sd-each over a bare array signal renders its current items") {
+        // The documented form: `sd-each="sd.usb"` / `sd-each="sd.camera"`
+        // iterate the signal's payload, exactly like `.value`.
         let page = try TemplatePage()
         let got = page.run("""
-        const r = mount('<ul><li sd-each="sd.usb">{{ item.name }}</li><li sd-each="sd.usb.value">{{ item.name }}</li></ul>');
-        push('usb', [{ name: 'a' }]);
+        const r = mount('<ul><li sd-each="sd.usb">{{ item.name }}#{{ index }}</li></ul><ol><li sd-each="sd.camera">{{ item.name }}</li></ol><p><b sd-each="sd.usb.value">{{ item.name }}</b></p>');
+        push('usb', [{ name: 'a' }, { name: 'b' }]);
+        push('camera', [{ name: 'cam' }]);
+        const first = [r.querySelector('ul').innerHTML, r.querySelector('ol').innerHTML, r.querySelector('p').innerHTML].join('|');
+        push('usb', [{ name: 'c' }]);
+        return first + '|' + r.querySelector('ul').innerHTML;
+        """)
+        try expectEqual(got, "<!-- sd-each:sd.usb --><li>a#0</li><li>b#1</li>|<!-- sd-each:sd.camera --><li>cam</li>|<!-- sd-each:sd.usb.value --><b>a</b><b>b</b>|<!-- sd-each:sd.usb --><li>c#0</li>")
+    }
+
+    test("template DOM: keyed sd-each over a bare array signal reconciles by key") {
+        let page = try TemplatePage()
+        let got = page.run("""
+        const r = mount('<ul><li sd-each="sd.usb" sd-key="item.id">{{ item.name }}</li></ul>');
+        push('usb', [{ id: 1, name: 'a' }, { id: 2, name: 'b' }]);
+        const [a, b] = Array.from(r.querySelectorAll('li'));
+        push('usb', [{ id: 2, name: 'b' }, { id: 1, name: 'a' }]);
+        const now = Array.from(r.querySelectorAll('li'));
+        return (now[0] === b) + ',' + (now[1] === a) + ',' + now.map(n => n.textContent).join('');
+        """)
+        try expectEqual(got, "true,true,ba")
+    }
+
+    test("template DOM: sd-each over a signal whose payload is not an array renders nothing") {
+        let page = try TemplatePage()
+        let got = page.run("""
+        const r = mount('<ul><li sd-each="sd.battery">{{ item }}</li></ul>');
+        push('battery', { percent: 3 });
         return r.firstChild.innerHTML;
         """)
-        try expectEqual(got, "<!-- sd-each:sd.usb --><!-- sd-each:sd.usb.value --><li>a</li>")
+        try expectEqual(got, "<!-- sd-each:sd.battery -->")
     }
 
     // ── sd-each, keyed ────────────────────────────────────────────────────

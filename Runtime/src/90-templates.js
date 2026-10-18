@@ -308,6 +308,7 @@ function __sdProcessAttribute(el, attrName, raw) {
 // `<li sd-each="sd.camera">{{ item.name }} ({{ index }})</li>` clones the
 // element once per array item. `item` and `index` are bound inside any
 // `{{ … }}` (text content or attributes) on the element or its descendants.
+// An expression that yields a signal iterates the signal's current payload.
 //
 // Reconciliation modes:
 //   - WITHOUT `sd-key`: full re-render on every signal fire — every active
@@ -507,6 +508,10 @@ function __sdProcessEachElement(el) {
     evalKey._warned = false;
     let arr;
     try { arr = sourceCompiled.fn(sd, undefined, undefined); } catch (e) { arr = null; }
+    // `sd-each="sd.usb"` names the signal itself; iterate its payload.
+    if (arr && typeof arr.peek === "function" && typeof arr.subscribe === "function") {
+      arr = arr.peek();
+    }
     if (!Array.isArray(arr)) {
       for (const n of active) n.remove();
       active = [];
