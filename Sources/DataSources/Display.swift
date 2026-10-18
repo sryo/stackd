@@ -44,9 +44,26 @@ enum Display {
                 "visibleFrame": rect(cgVisible),
                 "scale":        screen.backingScaleFactor,
                 "builtin":      CGDisplayIsBuiltin(id) != 0,
-                "brightness":   brightness(of: id) as Any? ?? NSNull()
+                "brightness":   snapshotBrightness(of: id) as Any? ?? NSNull()
             ]
         }
+    }
+
+    /// External monitors' DDC read is an I²C round trip plus a settle sleep,
+    /// and `all()` runs on main from the 1s display poll, so it answers from
+    /// a short-lived cache refreshed on a background queue. A monitor never
+    /// read before reports null until its first refresh lands, one tick later.
+    private static let externalBrightness = BrightnessReader(
+        ttl: 5,
+        queue: DispatchQueue(label: "stackd.display.ddc", qos: .utility)
+    ) { id in
+        DisplayDDC.getBrightness(displayID: id).map { Float($0) / 100.0 }
+    }
+
+    private static func snapshotBrightness(of displayID: CGDirectDisplayID) -> Float? {
+        CGDisplayIsBuiltin(displayID) != 0
+            ? brightness(of: displayID)
+            : externalBrightness.brightness(of: displayID)
     }
 
     static func brightness(of displayID: CGDirectDisplayID) -> Float? {
@@ -60,8 +77,9 @@ enum Display {
             var v: Float = 0
             return getter(displayID, &v) == 0 ? v : nil
         }
-        guard let pct = DisplayDDC.getBrightness(displayID: displayID) else { return nil }
-        return Float(pct) / 100.0
+        let live = DisplayDDC.getBrightness(displayID: displayID).map { Float($0) / 100.0 }
+        externalBrightness.record(displayID, value: live)
+        return live
     }
 
     @discardableResult
@@ -78,7 +96,9 @@ enum Display {
         // declare a larger max via the capabilities string will see this
         // as "always low" until a v2 caps-string fetch lands.
         let percent = Int((clamped * 100).rounded())
-        return DisplayDDC.setBrightness(displayID: displayID, percent: percent)
+        let written = DisplayDDC.setBrightness(displayID: displayID, percent: percent)
+        externalBrightness.invalidate(displayID, assuming: written ? Float(percent) / 100.0 : nil)
+        return written
     }
 
     private static func uuidString(for id: CGDirectDisplayID) -> String? {
