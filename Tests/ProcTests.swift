@@ -89,7 +89,7 @@ func registerProcTests() {
     test("Proc.exec reports whether the child launched") {
         var done = false
         let launched = Proc.exec(cmd: "/bin/sh", args: ["-c", "true"]) { _ in done = true }
-        procSpin(timeout: 5) { done }
+        spin(timeout: 5) { done }
         try expect(launched, "a real binary launches")
         let missing = Proc.exec(cmd: "/usr/bin/definitely-not-a-real-binary-\(UUID().uuidString)", args: []) { _ in }
         try expect(!missing, "a missing binary does not")
