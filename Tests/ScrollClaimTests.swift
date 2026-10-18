@@ -1,6 +1,6 @@
 import Foundation
 
-// Tests for `ScrollClaim.decide` in Sources/DataSources/Input.swift — the
+// Tests for `ScrollClaim.decide` in Sources/DataSources/TrackpadGestures.swift — the
 // synchronous decision the consuming tap makes for every scrollWheel event
 // while a stack holds a claim (sd.events.claimScroll).
 func registerScrollClaimTests() {

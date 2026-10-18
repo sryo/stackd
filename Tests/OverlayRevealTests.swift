@@ -1,7 +1,7 @@
 import Foundation
 import CoreGraphics
 
-// Tests for the retarget repaint gate in Sources/DataSources/Overlay.swift.
+// Tests for the retarget repaint gate in Sources/DataSources/OverlayPolicy.swift.
 //
 // A retarget that resizes the panel, or lands it on another display (new
 // backing scale), shows the previous target's border stretched over the new

@@ -138,7 +138,7 @@ final class WindowsLifecycleObserver {
         }
         if OverlayEventFollow.enabled {
             let f = OverlayEventFollow.statsSnapshot()
-            WindowDebug.log("overlay-events: main=\(f.onMain) off-main=\(f.offMain) for-targets=\(f.forTargets) moved-off-main=\(f.movedOffMain) stepped=\(f.steppedOnMain)")
+            WindowDebug.log("overlay-events: main=\(f.onMain) off-main=\(f.offMain) for-targets=\(f.forTargets) stepped=\(f.steppedOnMain)")
         }
         if WindowDebug.enabled {
             let i = WindowServerIntake.statsSnapshot()

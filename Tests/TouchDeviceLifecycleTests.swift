@@ -1,7 +1,7 @@
 import Foundation
 
 // Tests for the pure pieces of sd.touchdevice's multi-device lifecycle in
-// Sources/DataSources/Input.swift: the refcon token that routes a
+// Sources/DataSources/TouchFrame.swift: the refcon token that routes a
 // MultitouchSupport callback to its registration, and the policy that turns
 // sleep / wake / unlock / hot-plug / registration outcomes into teardown and
 // (re-)registration actions.

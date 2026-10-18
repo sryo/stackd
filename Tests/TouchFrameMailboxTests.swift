@@ -1,7 +1,7 @@
 import Foundation
 
 // Tests for `TouchFrameMailbox` and `TouchFrame.payload` in
-// Sources/DataSources/Input.swift — the policy between the MultitouchSupport
+// Sources/DataSources/TouchFrame.swift — the policy between the MultitouchSupport
 // callback thread and the main-thread drain that feeds sd.touchdevice.
 // Everything here is pure: frames are built in memory and the clock is
 // passed in.

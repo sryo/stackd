@@ -2,7 +2,7 @@ import Foundation
 import CoreGraphics
 
 // Tests for `WindowOwnerLookup` and `WindowElementIndex` in
-// `Sources/DataSources/Windows.swift` — resolving a CGWindowID's owning pid
+// `Sources/DataSources/WindowsFocus.swift` — resolving a CGWindowID's owning pid
 // without walking the full CGWindowList: the AX element cache's reverse
 // wid → pid map answers first, a single-window CGWindowList query only on a
 // miss, and the window server (`WindowServerOwner`) only when CGWindowList

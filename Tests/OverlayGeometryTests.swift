@@ -3,7 +3,7 @@ import AppKit
 import CoreGraphics
 import WebKit
 
-// Tests for overlay geometry in `Sources/DataSources/Overlay.swift`:
+// Tests for overlay geometry in `Sources/DataSources/OverlayPolicy.swift`:
 //
 //   1. `OverlayGeometry` — panel placement + per-tick sd.target payload for
 //      the `outset` option on overlay.attach. Outset 0 must be byte-level

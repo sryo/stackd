@@ -7,7 +7,7 @@ Rebuild, launch, kill, reload — all yours. `./build.sh` compiles; `.build/stac
 Four interlocking rules — apply them together; any one alone misses the joint:
 1. **Hammerspoon is the inspiration — and the project stackd aims to replace.** `hs.<x>` is the map of which primitives to ship and what to call them; feature parity with HS is the bar. Match names and coverage, not call semantics: the bridge is async message-passing into a web page, so where HS's synchronous Lua shapes don't survive it (read-modify-write loops, sync return values), web-native shapes win — Promises, batch-first actions, push channels. `sd.windows.batch` exists for exactly this reason. HS is a reference to consult — its source/docs/behavior define "correct" — but never a runtime dependency: don't build stackd tooling (QA harnesses, oracles, scripts) that requires a live HS instance. (Refined from "Hammerspoon is the baseline" on 2026-06-09.)
 2. **WebKit is the only rendering surface.** No CGContext DSLs, no SVG path strings, no native canvas. The overlay primitive is a click-through NSPanel + WKWebView.
-3. **Primaries in respective sources.** Window things in `Windows.swift` even when consumed by `Overlay.swift`. AX walks for window properties land in `Windows.swift`, not the caller.
+3. **Primaries in respective sources.** Window things live in the `Windows*.swift` family (`Windows.swift` and its siblings) even when consumed by the overlay files. AX walks for window properties land there, not in the caller.
 4. **Observe and set, nothing else.** Rendering, decisions, diffing, latching, curated payloads belong in stacks UNLESS rule 1 says HS does it daemon-side.
 
 Also load-bearing:

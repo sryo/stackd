@@ -1,6 +1,6 @@
 import Foundation
 
-// Tests for `AXInstallRetryGate` in `Sources/DataSources/Windows.swift` —
+// Tests for `AXInstallRetryGate` in `Sources/DataSources/WindowsAXObserver.swift` —
 // rate-limits the "a window appeared for an app we have no AX observer on,
 // try installing now" retry so a burst of windows from one struggling app
 // can't turn into a burst of blocking AX registrations.

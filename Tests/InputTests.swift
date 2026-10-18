@@ -3,9 +3,9 @@ import AppKit
 import Carbon.HIToolbox
 import CoreGraphics
 
-// Tests for `Sources/DataSources/Input.swift`.
+// Tests for the input files in `Sources/DataSources/` (Input, InputAX, Pointer, EventTap, EventsSynth, TouchFrame, TouchDevice, TrackpadGestures, Hotkey).
 //
-// Input.swift is the union of the keyboard/mouse/eventtap/hotkey/touch
+// Together they are the union of the keyboard/mouse/eventtap/hotkey/touch
 // surface — ~24 static funcs across Input, InputAX, Mouse, Cursor,
 // EventTapRegistry, EventsSynth, Gesture, HotkeyRegistry, TouchDevice.
 //

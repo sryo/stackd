@@ -3,7 +3,7 @@ import AppKit
 import CoreGraphics
 import WebKit
 
-// Tests for `Sources/DataSources/Overlay.swift`: the SkyLight readers the
+// Tests for `Sources/DataSources/Overlay*.swift` and `WindowServerReads.swift`: the SkyLight readers the
 // overlay tick depends on (bounds / isOrderedIn / level), OverlayHandle's
 // retarget and repin bookkeeping, the pure repin / target-level policies,
 // the free-region overlay, and the panel recipe.

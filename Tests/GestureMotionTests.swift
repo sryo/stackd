@@ -1,7 +1,7 @@
 import Foundation
 import CoreGraphics
 
-// Tests for `Gesture.motion(cgEvent:)` in Sources/DataSources/Input.swift —
+// Tests for `Gesture.motion(cgEvent:)` in Sources/DataSources/TrackpadGestures.swift —
 // magnification / rotation / swipe direction / phase read off a gesture
 // CGEvent (type 29). Events come from the vendored TouchEvents.c
 // synthesizer (the same private encoding the window server produces) and

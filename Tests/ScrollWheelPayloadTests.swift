@@ -1,7 +1,7 @@
 import Foundation
 import CoreGraphics
 
-// Tests for `ScrollWheel` in Sources/DataSources/Input.swift — the scroll
+// Tests for `ScrollWheel` in Sources/DataSources/TrackpadGestures.swift — the scroll
 // fields merged into a scrollWheel eventtap payload. CGEvents built with
 // CGEvent(scrollWheelEvent2Source:) are never posted, so reading them is
 // side-effect free.

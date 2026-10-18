@@ -1,6 +1,6 @@
 import Foundation
 
-// AXInstallRetry (Sources/DataSources/Windows.swift): when to retry the
+// AXInstallRetry (Sources/DataSources/WindowsAXObserver.swift): when to retry the
 // frontmost app's AX observer install. A just-launched app is activated
 // before it answers AX: AXObserverAddNotification fails with
 // kAXErrorCannotComplete for a few hundred ms, and nothing announces when

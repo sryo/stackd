@@ -431,7 +431,7 @@ enum AX {
 /// delivering events to an empty subs dict until the AXAppObserver itself
 /// drops its last CF reference.
 ///
-/// Generic helper — not tied to any one data source. Windows.swift uses it
+/// Generic helper — not tied to any one data source. the Window*.swift files use it
 /// for FrontmostWindowObserver; future per-window observers (window-moved
 /// follower, role-changed watchers) would build on the same wrapper.
 final class AXAppObserver {

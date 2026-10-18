@@ -1,6 +1,6 @@
 import Foundation
 
-// Tests for `NewestWinsPush` in `Sources/DataSources/Overlay.swift` — the
+// Tests for `NewestWinsPush` in `Sources/DataSources/OverlayPolicy.swift` — the
 // one-in-flight rule for the per-tick `sd.target` push into an overlay's
 // WebView: while an evaluateJavaScript is outstanding, newer payloads
 // replace each other and only the newest is sent when it completes.

@@ -1,7 +1,7 @@
 import Foundation
 import CoreGraphics
 
-// Tests for `OverlayHeadroom` in `Sources/DataSources/Overlay.swift` — panel
+// Tests for `OverlayHeadroom` in `Sources/DataSources/OverlayPolicy.swift` — panel
 // sizing during a user live resize. While the target is being resized the
 // panel is rounded up with room to grow, so most resize ticks are cheap
 // moves instead of WebKit reshapes; it is fitted exactly once the resize

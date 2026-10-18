@@ -1,7 +1,7 @@
 import Foundation
 import CoreGraphics
 
-// Tests for `LiveResizeDetector` in `Sources/DataSources/Overlay.swift` —
+// Tests for `LiveResizeDetector` in `Sources/DataSources/OverlayPolicy.swift` —
 // "is the user dragging this window's edge right now?", observed from the
 // overlay tick so a stack can hide or simplify its overlay while the
 // target resizes, and the `resizing` flag it adds to the sd.target payload.

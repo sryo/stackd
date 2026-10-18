@@ -1,6 +1,6 @@
 import Foundation
 
-// Tests for `OverlayTickArm` in `Sources/DataSources/Overlay.swift` — when a
+// Tests for `OverlayTickArm` in `Sources/DataSources/OverlayPolicy.swift` — when a
 // window-tracking overlay runs its per-vsync tick. Events about the target
 // arm it; it keeps itself armed while the target's frame or visibility keeps
 // changing, and disarms after a short quiet spell. A slow backstop covers

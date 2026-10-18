@@ -207,7 +207,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // reordered + focusedByMouse. SkyLight has no removeNotifyProc, so
         // this is install-once for the process lifetime; the host.bang
         // fan-out inside the callback is a no-op when no stack handles the
-        // bang. See Windows.swift CGS section for event IDs and payload
+        // bang. See WindowEvents.swift for event IDs and payload
         // decoding.
         WindowEvents.install()
         IntakeTrace.installDumpTriggers()

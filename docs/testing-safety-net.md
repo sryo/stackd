@@ -261,11 +261,11 @@ rebuild`) before the window closes, then debug headlessly.
 
 | area (Sources/) | tests.sh | L1 | L3 | doctor | bench | qa-windowscape | owner pass / manual |
 |---|---|---|---|---|---|---|---|
-| `DataSources/Windows.swift`, `WindowMotion.swift`, `WindowResizing.swift`, `BridgeWindows.swift` | ✓ | ✓ | | | motion, retile, drag, resize, focus, raise, minimize, spaces | S1–S6 | |
+| `DataSources/Window*.swift`, `Spaces.swift`, `MissionControl.swift`, `WindowMotion.swift`, `WindowResizing.swift`, `BridgeWindows.swift` | ✓ | ✓ | | | motion, retile, drag, resize, focus, raise, minimize, spaces | S1–S6 | |
 | `DataSources/WindowServerIntake.swift`, `IntakeTrace.swift` | ✓ | env | | | all scenarios (CGS counts with debug env) | S1–S6 | |
-| `DataSources/Overlay.swift`, `BridgeOverlay.swift` | ✓ | ✓ | ✓ | | every `follow_*`, `panel_hidden_pct`, raise, spaces | S5 | overlay-border |
+| `DataSources/Overlay*.swift`, `RegionOverlay.swift`, `WindowServerReads.swift`, `BridgeOverlay.swift` | ✓ | ✓ | ✓ | | every `follow_*`, `panel_hidden_pct`, raise, spaces | S5 | overlay-border |
 | `Private/SkyLight.swift` | ✓ | | | ✓ | raise, spaces, motion | ✓ | |
-| `DataSources/Input.swift`, `BridgeEvents.swift`, `BridgeHotkey.swift` | ✓ | ✓ | | | `--mouse` (live-resize path) | | hotkeys, eventtap consume, trackpad gestures (tttaps, sideswipe) |
+| `DataSources/{Input,Pointer,EventTap,EventsSynth,Touch*,Trackpad*,Hotkey}*.swift`, `BridgeEvents.swift`, `BridgeHotkey.swift` | ✓ | ✓ | | | `--mouse` (live-resize path) | | hotkeys, eventtap consume, trackpad gestures (tttaps, sideswipe) |
 | `DataSources/AX.swift`, `BridgeAX.swift`, `DataSources/Apps.swift` | ✓ | ✓ | | | focus | S5 | palette menu search, app focus |
 | `Bridge.swift`, `BridgeChannels.swift`, `Channels.swift`, `Permissions.swift`, `Runtime/src/` | ✓ | ✓ | ✓ | ✓ | bench stack (attach, bang, setFrame) | | every stack loads |
 | `StackHost.swift`, `StackWindow.swift`, `StackMaterial.swift`, `PassthroughWebView.swift`, `WebViewEval.swift`, `URLSchemeHandler.swift`, `ScreenshotHider.swift` | ✓ | | ✓ | ✓ | | | every stack renders, clicks pass through, screenshots |

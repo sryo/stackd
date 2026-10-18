@@ -1,6 +1,6 @@
 import Foundation
 
-// Tests for `PerWindowCoverage` in `Sources/DataSources/Windows.swift` —
+// Tests for `PerWindowCoverage` in `Sources/DataSources/WindowsAXObserver.swift` —
 // which listed windows the safety poll re-attaches per-window AX observers
 // to. A window whose observers never attached (subrole ladder ran dry, AX
 // didn't vend it yet when CGS announced it) otherwise gets no minimize /

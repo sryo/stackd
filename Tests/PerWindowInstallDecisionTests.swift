@@ -1,6 +1,6 @@
 import Foundation
 
-// Tests for `PerWindowInstallDecision` in `Sources/DataSources/Windows.swift`
+// Tests for `PerWindowInstallDecision` in `Sources/DataSources/WindowsAXObserver.swift`
 // — whether a window re-found by the safety poll or a CGS create needs its
 // per-window AX observers (re)attached. Observers stored for a dead element
 // (e.g. after sleep) would otherwise block re-installation forever.

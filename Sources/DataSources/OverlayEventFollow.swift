@@ -42,9 +42,6 @@ enum OverlayEventFollow {
         var onMain = 0
         var offMain = 0
         var forTargets = 0
-        /// Panels moved at the window server before the main-thread step.
-        /// Always 0: frame events only move panels from that step.
-        var movedOffMain = 0
         var steppedOnMain = 0
     }
 

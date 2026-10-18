@@ -1,6 +1,6 @@
 import Foundation
 
-// FocusedReadSchedule (Sources/DataSources/Windows.swift): when the
+// FocusedReadSchedule (Sources/DataSources/WindowsFocus.swift): when the
 // frontmost app's focused window is read off main after an activation or an
 // AX focus notification. Latest wins per pid, one read in flight per pid, a
 // read for an app that is no longer the target is dropped, and a read that

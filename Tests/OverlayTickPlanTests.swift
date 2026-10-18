@@ -1,7 +1,7 @@
 import Foundation
 import CoreGraphics
 
-// Tests for `OverlayTickPlan` in `Sources/DataSources/Overlay.swift` — the
+// Tests for `OverlayTickPlan` in `Sources/DataSources/OverlayPolicy.swift` — the
 // pure per-tick decision of what an overlay must do given the target's
 // current geometry: nothing, a cheap origin-only move, or a full reshape
 // (which WebKit has to lay out), and whether the `sd.target` payload needs

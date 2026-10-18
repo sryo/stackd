@@ -1,6 +1,6 @@
 import Foundation
 
-// Tests for `TrackpadSystemGestures` in Sources/DataSources/Input.swift — the
+// Tests for `TrackpadSystemGestures` in Sources/DataSources/TrackpadSystemGestures.swift — the
 // `stackd doctor` probe that reads the trackpad / Dock preference keys and
 // reports which finger counts macOS itself acts on. Preferences are
 // injected as a dictionary per domain; nothing reads the live defaults.

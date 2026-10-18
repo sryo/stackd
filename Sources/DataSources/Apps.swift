@@ -10,7 +10,7 @@ import CoreGraphics
 // Both subscribe to NSWorkspace.shared.notificationCenter but with different
 // lifetimes and fire shapes — keep the observers separate, just colocate them.
 // Window-related code (focused window, lifecycle, per-id actions, focus
-// observer) lives in Windows.swift — they share the AX + CGWindowList machinery.
+// observer) lives in the Window*.swift files — they share the AX + CGWindowList machinery.
 
 enum App {
     static func frontmostApp() -> [String: Any]? {
@@ -118,7 +118,7 @@ enum Apps {
     // visibleWindows / hide / unhide surface. The bundle-id `hide()` above
     // is the bundleId variant; the pid `hide(pid:)` below is the per-app
     // variant that matches the new sd.apps.* shape. All AX walks cap the
-    // messaging timeout at 100ms (same as Windows.swift) so an unresponsive
+    // messaging timeout at 100ms (same as the Window*.swift files) so an unresponsive
     // app can't stall the daemon.
 
     // Element keyed by its kAXMenuBarAttribute (the app's AXMenuBar). Apps
@@ -322,7 +322,7 @@ enum Apps {
     //
     // Completes the curated window-set surface around `visibleWindows(pid)`.
     // Each method walks the app's AX tree, maps AXUIElement → CGWindowID via
-    // the shim in Windows.swift, and returns ids only — JS chains into
+    // the AX shim in Windows.swift, and returns ids only — JS chains into
     // `sd.windows.byId.*` for any per-window action it wants. AX messaging
     // timeout capped at 100ms (same as `menu`/`visibleWindows`) so an
     // unresponsive app can't stall the daemon.
