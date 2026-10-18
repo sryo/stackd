@@ -95,6 +95,7 @@ enum Channels {
         Channel(name: "displaysChanged", jsPath: "display.changed",    permission: "display"),
         Channel(name: "media",           jsPath: "media.nowPlaying",   permission: "media"),
         Channel(name: "calendarChanged", jsPath: "calendar.observe",   permission: "calendar"),
+        Channel(name: "privacy",         jsPath: "privacy.observe",    permission: "privacy"),
         // menubarItems / menubarChanged have no template surface — stacks
         // subscribe via sd.menubar.items / sd.menubar.changed in JS but
         // there's no {{ sd.menubar.x }} placeholder shape today.

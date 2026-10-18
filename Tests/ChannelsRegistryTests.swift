@@ -30,6 +30,7 @@ func registerChannelsRegistryTests() {
         ("display",     "displaysChanged"),
         ("media",       "media"),
         ("calendar",    "calendarChanged"),
+        ("privacy",     "privacy"),
         ("menubar",     "menubarItems"),
         ("menubar",     "menubarChanged"),
         ("pasteboard",  "pasteboard"),
@@ -75,7 +76,7 @@ func registerChannelsRegistryTests() {
         "spaces.all",
         "caffeinate", "displayLink",
         "host.load", "sensors", "touchdevice", "location", "usb", "camera",
-        "calendar.observe",
+        "calendar.observe", "privacy.observe",
     ]
 
     test("registry exposes exactly the pinned jsPath set") {

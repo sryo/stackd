@@ -83,6 +83,7 @@ displays js=display.all perm=display replay
 displaysChanged js=display.changed perm=display replay
 media js=media.nowPlaying perm=media replay
 calendarChanged js=calendar.observe perm=calendar replay
+privacy js=privacy.observe perm=privacy replay
 menubarItems js=- perm=menubar replay
 menubarChanged js=- perm=menubar replay
 pasteboard js=pasteboard.changed perm=pasteboard replay
