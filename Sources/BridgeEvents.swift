@@ -1,3 +1,4 @@
+import CoreGraphics
 import Foundation
 
 /// Events primitive group — extracted from Bridge.swift as part of the
@@ -116,5 +117,68 @@ extension Bridge {
     /// Bridge per display, so the stack id alone doesn't identify it.
     private static func scrollClaimOwner(_ bridge: Bridge) -> String {
         "\(bridge.stackId)#\(UInt(bitPattern: ObjectIdentifier(bridge).hashValue))"
+    }
+}
+
+/// What a stack's `onTap_<callback>` payload is made of, read from the
+/// CGEvent inside the tap callback. Building the payload (and, for a
+/// gesture, decoding it through NSEvent) and its JSON happens later, once
+/// the callback has returned: a consuming tap holds every event of its
+/// types on the main run loop until the callback answers. A gesture keeps
+/// a copy of its event, because the original belongs to the tap.
+struct EventTapCapture {
+    let type: CGEventType
+    let keyCode: Int64
+    let flags: UInt64
+    let location: CGPoint
+    /// mouseMoved and the dragged variants: the frame-to-frame motion.
+    let motionDelta: (x: Double, y: Double)?
+    let scroll: ScrollWheel.Fields?
+    let gestureEvent: CGEvent?
+    /// "enter" / "move" / "leave" for an `emitLeave` observer; nil otherwise.
+    let phase: String?
+
+    init(type: CGEventType, event: CGEvent, phase: String?) {
+        self.type = type
+        keyCode = event.getIntegerValueField(.keyboardEventKeycode)
+        flags = event.flags.rawValue
+        location = event.location
+        switch type {
+        case .mouseMoved, .leftMouseDragged, .rightMouseDragged, .otherMouseDragged:
+            motionDelta = (event.getDoubleValueField(.mouseEventDeltaX),
+                           event.getDoubleValueField(.mouseEventDeltaY))
+        default:
+            motionDelta = nil
+        }
+        scroll = type == .scrollWheel ? ScrollWheel.read(event) : nil
+        gestureEvent = type.rawValue == Gesture.cgEventType.rawValue ? event.copy() : nil
+        self.phase = phase
+    }
+
+    var payload: [String: Any] {
+        var payload: [String: Any] = [
+            "type":     EventTapRegistry.name(for: type),
+            "keyCode":  keyCode,
+            "flags":    flags,
+            "x":        Int(location.x),
+            "y":        Int(location.y)
+        ]
+        // Consumers that integrate motion (EdgeHopper accumulates these to
+        // detect cursor "punch-through" at screen edges) need the deltas —
+        // sampling location() at JS rate misses sub-frame motion.
+        if let d = motionDelta {
+            payload["deltaX"] = d.x
+            payload["deltaY"] = d.y
+        }
+        if let s = scroll {
+            for (k, v) in ScrollWheel.payload(s) { payload[k] = v }
+        }
+        if let g = gestureEvent, let described = Gesture.describe(cgEvent: g) {
+            for (k, v) in described { payload[k] = v }
+        }
+        // Present only when the manifest opted in via `emitLeave: true`, so
+        // every other payload keeps the shape existing stacks read.
+        if let phase = phase { payload["phase"] = phase }
+        return payload
     }
 }

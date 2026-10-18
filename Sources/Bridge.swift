@@ -1122,45 +1122,14 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         fireGlobal(handler: "onHotkey_\(safe)")
     }
 
+    /// Runs inside a tap callback, which a consuming tap blocks input on:
+    /// only the event's fields are read here; the payload and its JSON are
+    /// built on a later main-queue turn.
     private func fireEventTap(callback: String, type: CGEventType, event: CGEvent, phase: String? = nil) {
-        let typeName = EventTapRegistry.name(for: type)
-        let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
-        let flags = event.flags.rawValue
-        let loc = event.location
-
-        var payload: [String: Any] = [
-            "type":     typeName,
-            "keyCode":  keyCode,
-            "flags":    flags,
-            "x":        Int(loc.x),
-            "y":        Int(loc.y)
-        ]
-        // mouseMoved + the dragged variants carry frame-to-frame deltas in the
-        // CGEvent's mouseEventDeltaX/Y fields. Consumers that integrate motion
-        // (EdgeHopper accumulates these to detect cursor "punch-through" at
-        // screen edges) need them — sampling location() at JS rate misses
-        // sub-frame motion.
-        switch type {
-        case .mouseMoved, .leftMouseDragged, .rightMouseDragged, .otherMouseDragged:
-            payload["deltaX"] = event.getDoubleValueField(.mouseEventDeltaX)
-            payload["deltaY"] = event.getDoubleValueField(.mouseEventDeltaY)
-        case .scrollWheel:
-            for (k, v) in ScrollWheel.payload(ScrollWheel.read(event)) { payload[k] = v }
-        default: break
+        let capture = EventTapCapture(type: type, event: event, phase: phase)
+        DispatchQueue.main.async { [weak self] in
+            self?.fireGlobal(handler: "onTap_\(callback)", args: [Bridge.jsonify(capture.payload)])
         }
-        if type.rawValue == Gesture.cgEventType.rawValue,
-           let g = Gesture.describe(cgEvent: event) {
-            for (k, v) in g { payload[k] = v }
-        }
-        // `phase` is only present when the manifest opted in via
-        // `emitLeave: true`. The observer-tap dispatch path supplies
-        // "enter" / "move" / "leave" for transition-aware handlers; every
-        // other observer-tap call site (and every consume-side fire) leaves
-        // it nil so the payload stays byte-identical to the pre-leave
-        // shape that existing stacks read.
-        if let phase = phase { payload["phase"] = phase }
-
-        fireGlobal(handler: "onTap_\(callback)", args: [Bridge.jsonify(payload)])
     }
 
     /// Widened from private to internal so primitive groups extracted into
