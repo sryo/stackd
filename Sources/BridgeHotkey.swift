@@ -52,14 +52,7 @@ extension Bridge {
                 let token = HotkeyRegistry.shared.bind(
                     spec: spec, mode: mode, apps: apps, excludeApps: excludeApps
                 ) { [weak bridge] in
-                    // Fire on the same hop pattern as fireBang / fireHotkey — the
-                    // Carbon callback already runs on main, but the eval has to be
-                    // async to keep main from re-entering JS while a script is mid-flight.
-                    guard let webView = bridge?.webView else { return }
-                    DispatchQueue.main.async {
-                        webView.sdEvaluate("window.__sd_hotkey_fire && window.__sd_hotkey_fire(\(id));",
-                                                   completionHandler: nil)
-                    }
+                    bridge?.send("window.__sd_hotkey_fire && window.__sd_hotkey_fire(\(id));")
                 }
                 guard let token = token else {
                     bridge.respond(requestId: requestId, value: NSNull()); return

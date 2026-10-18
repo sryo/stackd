@@ -67,10 +67,7 @@ extension Bridge {
                                 "body":    req.body
                             ]
                             let json = Bridge.jsonify(payload)
-                            bridge.webView?.sdEvaluate(
-                                "window.__sd_http_request && window.__sd_http_request(\(serverId), \(reqId), \(json));",
-                                completionHandler: nil
-                            )
+                            bridge.send("window.__sd_http_request && window.__sd_http_request(\(serverId), \(reqId), \(json));")
                         }
                     }
                     server.start()

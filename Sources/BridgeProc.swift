@@ -48,14 +48,9 @@ extension Bridge {
                 let cwd  = body["cwd"]  as? String
                 let id = bridge.procStreamHandles.mintId()
                 let handle = Proc.stream(cmd: cmd, args: args, env: env, cwd: cwd) { [weak bridge] payload in
-                    guard let bridge = bridge, let webView = bridge.webView else { return }
+                    guard let bridge = bridge else { return }
                     let json = Bridge.jsonify(payload)
-                    // Proc.stream already hops to main before invoking onEvent;
-                    // evaluateJavaScript runs synchronously from here.
-                    webView.sdEvaluate(
-                        "window.__sd_proc_stream_fire && window.__sd_proc_stream_fire(\(id), \(json));",
-                        completionHandler: nil
-                    )
+                    bridge.send("window.__sd_proc_stream_fire && window.__sd_proc_stream_fire(\(id), \(json));")
                     // Final event drops the handle so cancel() after exit no-ops
                     // and the per-stack drain doesn't try to SIGTERM a dead child.
                     if (payload["stream"] as? String) == "exit" {

@@ -44,12 +44,9 @@ extension Bridge {
                 }
                 let id = bridge.urlHandlerTokens.mintId()
                 let token = URLHandler.observe(scheme: scheme) { [weak bridge] payload in
-                    guard let webView = bridge?.webView else { return }
+                    guard let bridge = bridge else { return }
                     let json = Bridge.jsonify(payload)
-                    DispatchQueue.main.async {
-                        webView.sdEvaluate("window.__sd_urlhandler_fire && window.__sd_urlhandler_fire(\(id), \(json));",
-                                                   completionHandler: nil)
-                    }
+                    bridge.send("window.__sd_urlhandler_fire && window.__sd_urlhandler_fire(\(id), \(json));")
                 }
                 bridge.urlHandlerTokens[id] = token
                 bridge.respond(requestId: requestId, value: id)

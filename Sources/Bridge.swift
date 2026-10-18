@@ -83,6 +83,8 @@ final class Bridge: NSObject, WKScriptMessageHandler {
     // Ordering for eval(_:in:) — see EvalOrderGate.
     private var evalGate = EvalOrderGate()
     private let evalGateLock = NSLock()
+    // Scripts sent to the page and not yet evaluated — see send(_:).
+    private let outbox = EvalOutbox()
 
     // Native handles JS primitives mint for this stack, keyed by the id JS
     // gets back. The scope drain releases whatever is still held at unload
@@ -471,10 +473,9 @@ final class Bridge: NSObject, WKScriptMessageHandler {
     /// page's screen info (sd.screen.current / window.__sd_screen) and fire
     /// `sd:screen` so stacks that laid out from it can redo it.
     func updateScreen(_ screen: NSScreen, index: Int) {
-        guard let webView = webView else { return }
+        guard webView != nil else { return }
         let payload = Bridge.jsonify(Bridge.screenInfo(screen: screen, index: index))
-        let script = "window.__sd_screen=\(payload);if(window.sd&&sd.screen)sd.screen.current=window.__sd_screen;window.dispatchEvent(new CustomEvent('sd:screen',{detail:window.__sd_screen}));"
-        webView.sdEvaluate(script, completionHandler: nil)
+        send("window.__sd_screen=\(payload);if(window.sd&&sd.screen)sd.screen.current=window.__sd_screen;window.dispatchEvent(new CustomEvent('sd:screen',{detail:window.__sd_screen}));")
     }
 
     /// Detail can hold any JSON-compatible Any (String, Int, Bool, Array, Dict).
@@ -486,13 +487,7 @@ final class Bridge: NSObject, WKScriptMessageHandler {
 
     /// Pre-serialized variant so a fan-out across stacks encodes once.
     func fireBang(name: String, json: String) {
-        guard let webView = webView else { return }
-        let safe = name.lowercased().map { c -> Character in
-            (c.isLetter || c.isNumber) ? c : "_"
-        }
-        let suffix = String(safe)
-        let script = "window.onBang_\(suffix) && window.onBang_\(suffix)(\(json));"
-        eval(script, in: webView)
+        send(Bridge.bangScript(name: name, json: json))
     }
 
     // MARK: - Message dispatch
@@ -566,17 +561,29 @@ final class Bridge: NSObject, WKScriptMessageHandler {
     /// `.syncBridge` closures. The method is still module-internal — no public
     /// API surface change.
     func respond(requestId: Int, value: Any?) {
-        guard let webView = webView else { return }
+        guard webView != nil else { return }
         let json = value.map { Bridge.jsonify($0) } ?? "null"
-        let script = "window.__sd_response && window.__sd_response(\(requestId), \(json));"
+        send(Bridge.responseScript(requestId: requestId, json: json))
+    }
+
+    /// Queue `script` for this stack's page. Every send — pushes, responses,
+    /// bangs, callback fires — goes through the outbox, from any thread, so
+    /// the page runs them in call order; whatever was sent during one
+    /// run-loop pass is evaluated as one script when the pass ends.
+    func send(_ script: String) {
+        guard webView != nil, outbox.append(script) else { return }
+        EvalOutbox.atTurnEnd { [weak self] in self?.flushOutbox() }
+    }
+
+    private func flushOutbox() {
+        guard let script = outbox.take(), let webView = webView else { return }
         eval(script, in: webView)
     }
 
     /// Evaluate a script in this stack's WebView — inline when already on
-    /// main with nothing queued (saves a main-queue hop per response, push
-    /// and bang), otherwise hopped to main in order. evaluateJavaScript is
-    /// itself asynchronous (it posts to the WebContent process), so running
-    /// it inline can't re-enter page JS.
+    /// main with nothing queued, otherwise hopped to main in order.
+    /// evaluateJavaScript is itself asynchronous (it posts to the WebContent
+    /// process), so running it inline can't re-enter page JS.
     private func eval(_ script: String, in webView: WKWebView) {
         evalGateLock.lock()
         let inline = evalGate.shouldRunInline(isMain: Thread.isMainThread)
@@ -1053,11 +1060,7 @@ final class Bridge: NSObject, WKScriptMessageHandler {
     /// already valid JS (a JSON blob, a numeric literal, a string literal)
     /// and is joined with commas.
     private func fireGlobal(handler: String, args: [String] = []) {
-        guard let webView = webView else { return }
-        let h = Bridge.jsString(handler)
-        let joined = args.joined(separator: ", ")
-        let script = "globalThis[\(h)] && globalThis[\(h)](\(joined));"
-        eval(script, in: webView)
+        send(Bridge.globalScript(handler: handler, args: args))
     }
 
     /// Widened from private to internal so fs.watch.start's callback (now in
@@ -1164,7 +1167,7 @@ final class Bridge: NSObject, WKScriptMessageHandler {
     /// their own files can push per-handle channels (spotlight:subscribe:<id>,
     /// speech:listen:<id>, …) without going through a re-export shim.
     func push(channel: String, json: String) {
-        guard let webView = webView else { return }
+        guard webView != nil else { return }
         // Trace every channel push when STACKD_RPC_DEBUG=1. Same throttle
         // shape as the RPC tracer above. Off by default — high-rate
         // channels (sd.mouse, sd.windows.all) would otherwise spam stderr.
@@ -1177,8 +1180,7 @@ final class Bridge: NSObject, WKScriptMessageHandler {
                 log("push \(channel) (\(json.count)B) \(preview)")
             }
         }
-        let script = "window.__sd_push && window.__sd_push(\"\(channel)\", \(json));"
-        eval(script, in: webView)
+        send(Bridge.pushScript(channel: channel, json: json))
     }
 
     deinit {

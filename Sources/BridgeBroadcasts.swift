@@ -32,12 +32,9 @@ extension Bridge {
                 }
                 let id = bridge.broadcastTokens.mintId()
                 let token = Broadcasts.observe(name: name) { [weak bridge] payload in
-                    guard let webView = bridge?.webView else { return }
+                    guard let bridge = bridge else { return }
                     let json = Bridge.jsonify(payload)
-                    DispatchQueue.main.async {
-                        webView.sdEvaluate("window.__sd_broadcast_fire && window.__sd_broadcast_fire(\(id), \(json));",
-                                                   completionHandler: nil)
-                    }
+                    bridge.send("window.__sd_broadcast_fire && window.__sd_broadcast_fire(\(id), \(json));")
                 }
                 bridge.broadcastTokens[id] = token
                 bridge.respond(requestId: requestId, value: id)
