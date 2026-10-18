@@ -214,6 +214,49 @@ function unregisterHandler(map, id, unbindPayload) {
   return request(unbindPayload);
 }
 
+// The `{ id, subscribe, stop }` handle for a daemon-side stream: `start` is
+// the request that opens it and resolves to its id (null on failure), the
+// daemon pushes on channel `<prefix><id>`, and `stop` (sent with the id)
+// closes it. The id arrives async, so subscribers attached before it are
+// held and bound once it does; each returned unsubscribe works on either
+// side of the bind. A stop() before the bind closes the stream as soon as
+// its id arrives. `wrap` adapts each subscriber (e.g. to skip the channel's
+// null initial value).
+function streamHandle(start, prefix, stop, wrap = (fn) => fn) {
+  const held = new Set();
+  let ch = null;
+  let boundId = null;
+  let stopped = false;
+  const bind = (fn) => ch.subscribe(wrap(fn));
+  const started = request(start).then((id) => {
+    if (id == null) return null;
+    if (stopped) { request({ ...stop, id }); return null; }
+    boundId = id;
+    ch = channel(prefix + id);
+    for (const sub of held) sub.unsubscribe = bind(sub.fn);
+    held.clear();
+    return id;
+  });
+  return {
+    get id() { return boundId; },
+    subscribe(fn) {
+      if (ch) return bind(fn);
+      const sub = { fn, unsubscribe: null };
+      held.add(sub);
+      return () => {
+        held.delete(sub);
+        if (sub.unsubscribe) sub.unsubscribe();
+      };
+    },
+    async stop() {
+      stopped = true;
+      const id = await started;
+      if (id == null) return false;
+      return request({ ...stop, id });
+    }
+  };
+}
+
 // Wrap a bang name as a subscribe-able signal. Installs a
 // window.onBang_<bangSlug> handler that pushes detail into the channel.
 // Used by sd.windows.{created,destroyed,...}. The bangSlug is the sanitized

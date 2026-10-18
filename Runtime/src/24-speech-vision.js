@@ -30,47 +30,15 @@
   // it doesn't. sd.speech.listen.cancel() stops every active listener
   // owned by this stack in one call (panic-stop shortcut).
 sd.speech = (() => {
-    // listen() returns a handle synchronously; the underlying id arrives
-    // async (the request() round-trip), so subscribers attached before the
-    // id resolves get buffered locally and re-bound to the synthesized
-    // channel ("speech:listen:<id>") once we have it. Mirrors the
-    // sd.bonjour.browse pattern exactly.
+    // listen() returns a handle synchronously; results push on
+    // "speech:listen:<id>".
     const listen = (opts) => {
       const o = opts || {};
-      const localSubs = new Set();
-      let realCh = null;
-      let realId = null;
-      let stopped = false;
-      const start = request({
+      return streamHandle({
         type:            "speech.listen.start",
         locale:          o.locale,
         requireOnDevice: !!o.requireOnDevice
-      }).then((id) => {
-        if (id == null || stopped) return null;
-        realId = id;
-        realCh = channel("speech:listen:" + id);
-        for (const fn of localSubs) realCh.subscribe(fn);
-        localSubs.clear();
-        return id;
-      });
-      return {
-        get id() { return realId; },
-        subscribe(fn) {
-          if (realCh) return realCh.subscribe(fn);
-          localSubs.add(fn);
-          // Pre-bind unsubscribe: drop from the local set if the start
-          // request hasn't resolved yet. Post-bind unsubscribes are
-          // best-effort (process-lifetime channels — same trade-off as
-          // sd.bonjour.browse).
-          return () => { localSubs.delete(fn); };
-        },
-        async stop() {
-          stopped = true;
-          const id = await start;
-          if (id == null) return false;
-          return request({ type: "speech.listen.stop", id });
-        }
-      };
+      }, "speech:listen:", { type: "speech.listen.stop" });
     };
     // Convenience hung off listen() itself — `sd.speech.listen.cancel()`
     // tears down every active listener owned by this stack at once.

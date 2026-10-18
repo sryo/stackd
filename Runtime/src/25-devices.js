@@ -51,43 +51,14 @@ sd.camera = Object.assign(channel("camera", []), {
       });
     },
     stream(opts) {
-      // Mirror sd.bonjour.browse: the handle id resolves async, so any
-      // subscribers attached before the channel exists get buffered locally
-      // and re-bound to the synthesized channel ("camera:stream:<id>") once
-      // we have it. Post-resolve subscribe() goes straight through.
       const o = opts || {};
-      const localSubs = new Set();
-      let realCh = null;
-      let realId = null;
-      let stopped = false;
-      const start = request({
+      return streamHandle({
         type:     "camera.stream.start",
         deviceId: o.deviceId,
         format:   o.format || "jpeg",
         quality:  o.quality,
         fps:      o.fps
-      }).then((id) => {
-        if (id == null || stopped) return null;
-        realId = id;
-        realCh = channel("camera:stream:" + id);
-        for (const fn of localSubs) realCh.subscribe(fn);
-        localSubs.clear();
-        return id;
-      });
-      return {
-        get id() { return realId; },
-        subscribe(fn) {
-          if (realCh) return realCh.subscribe(fn);
-          localSubs.add(fn);
-          return () => { localSubs.delete(fn); };
-        },
-        async stop() {
-          stopped = true;
-          const id = await start;
-          if (id == null) return false;
-          return request({ type: "camera.stream.stop", id });
-        }
-      };
+      }, "camera:stream:", { type: "camera.stream.stop" });
     }
   });
 sd.spaces = {

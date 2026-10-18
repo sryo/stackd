@@ -55,47 +55,13 @@ sd.spotlight = {
     },
     subscribe(opts) {
       const o = opts || {};
-      // The handle id arrives async, so subscribers attached before the
-      // id resolves get buffered locally and re-bound to the synthesized
-      // channel ("spotlight:subscribe:<id>") once we have it. After that,
-      // subscribe() goes straight to the underlying channel signal.
-      const localSubs = new Set();
-      let realCh = null;
-      let realId = null;
-      let stopped = false;
-      const start = request({
+      return streamHandle({
         type:       "spotlight.subscribe",
         predicate:  o.predicate,
         scopes:     o.scopes,
         attributes: o.attributes,
         limit:      o.limit
-      }).then((id) => {
-        if (id == null || stopped) return null;
-        realId = id;
-        realCh = channel("spotlight:subscribe:" + id);
-        for (const fn of localSubs) realCh.subscribe(fn);
-        localSubs.clear();
-        return id;
-      });
-      return {
-        get id() { return realId; },
-        subscribe(fn) {
-          if (realCh) return realCh.subscribe(fn);
-          localSubs.add(fn);
-          // Pre-bind unsubscribe: drop from the local set if the start
-          // request hasn't resolved yet. Post-bind unsubscribes are
-          // best-effort (the channel signal doesn't expose an unbind hook
-          // once we lose the inner unsubscribe ref) — process-lifetime
-          // channels mean the cost is one callback ref until stack unload.
-          return () => { localSubs.delete(fn); };
-        },
-        async stop() {
-          stopped = true;
-          const id = await start;
-          if (id == null) return false;
-          return request({ type: "spotlight.subscribe.stop", id });
-        }
-      };
+      }, "spotlight:subscribe:", { type: "spotlight.subscribe.stop" });
     }
   };
   // Bonjour / mDNS — publish a service on the LAN, or browse for one.
@@ -148,44 +114,10 @@ sd.bonjour = {
       };
     },
     browse(type) {
-      // The handle id arrives async, so subscribers attached before the
-      // id resolves get buffered locally and re-bound to the synthesized
-      // channel ("bonjour:browse:<id>") once we have it. After that,
-      // subscribe() goes straight to the underlying channel signal.
-      const localSubs = new Set();
-      let realCh = null;
-      let realId = null;
-      let stopped = false;
-      const start = request({
+      return streamHandle({
         type:        "bonjour.browse.start",
         serviceType: String(type ?? "")
-      }).then((id) => {
-        if (id == null || stopped) return null;
-        realId = id;
-        realCh = channel("bonjour:browse:" + id);
-        for (const fn of localSubs) realCh.subscribe(fn);
-        localSubs.clear();
-        return id;
-      });
-      return {
-        get id() { return realId; },
-        subscribe(fn) {
-          if (realCh) return realCh.subscribe(fn);
-          localSubs.add(fn);
-          // Pre-bind unsubscribe: drop from the local set if the start
-          // request hasn't resolved yet. Post-bind unsubscribes are
-          // best-effort (the channel signal doesn't expose an unbind hook
-          // once we lose the inner unsubscribe ref) — process-lifetime
-          // channels mean the cost is one callback ref until stack unload.
-          return () => { localSubs.delete(fn); };
-        },
-        async stop() {
-          stopped = true;
-          const id = await start;
-          if (id == null) return false;
-          return request({ type: "bonjour.browse.stop", id });
-        }
-      };
+      }, "bonjour:browse:", { type: "bonjour.browse.stop" });
     }
   };
   // Pending macOS software updates via `softwareupdate -l`. No TCC; the
