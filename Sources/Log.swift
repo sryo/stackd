@@ -102,3 +102,33 @@ enum Log {
         return true
     }
 }
+
+/// Debug-only: logs every main run-loop pass that kept the thread busy past
+/// `threshold` — the stretch between waking and going back to sleep. Every
+/// window event, bridge call and display-link tick runs on main, so a long
+/// pass here delays all of them at once.
+enum MainStallWatch {
+    static let threshold: Double = 0.04
+    private static var observer: CFRunLoopObserver?
+
+    /// The log line for one run-loop pass that stayed busy `busy` seconds,
+    /// or nil when it was short enough to stay quiet.
+    static func report(busy: Double) -> String? {
+        busy > threshold ? "main: busy \(Int((busy * 1000).rounded()))ms" : nil
+    }
+
+    static func install() {
+        guard WindowDebug.enabled, observer == nil else { return }
+        var woke = CFAbsoluteTimeGetCurrent()
+        let obs = CFRunLoopObserverCreateWithHandler(
+            nil, CFRunLoopActivity.afterWaiting.rawValue | CFRunLoopActivity.beforeWaiting.rawValue,
+            true, 0
+        ) { _, activity in
+            let now = CFAbsoluteTimeGetCurrent()
+            if activity == .afterWaiting { woke = now; return }
+            if let line = report(busy: now - woke) { WindowDebug.log(line) }
+        }
+        CFRunLoopAddObserver(CFRunLoopGetMain(), obs, .commonModes)
+        observer = obs
+    }
+}
