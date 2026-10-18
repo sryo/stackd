@@ -10,7 +10,13 @@ struct BridgedPage {
     let bridge: Bridge
 
     init() throws {
-        webView = WKWebView(frame: NSRect(x: 0, y: 0, width: 10, height: 10))
+        try self.init(webView: WKWebView(frame: NSRect(x: 0, y: 0, width: 10, height: 10)))
+    }
+
+    /// Attaches the bridge to `webView` — e.g. a StackWindow's — and loads
+    /// the recording page into it.
+    init(webView: WKWebView) throws {
+        self.webView = webView
         bridge = Bridge(webView: webView)
         final class Nav: NSObject, WKNavigationDelegate {
             var done = false

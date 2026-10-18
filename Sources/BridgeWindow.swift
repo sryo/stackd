@@ -3,33 +3,23 @@ import WebKit
 /// Self-panel window primitive group. These are the window.* entries that act
 /// on the stack's OWN StackWindow (the panel hosting this Bridge's WKWebView),
 /// as opposed to BridgeWindows.swift's windows.* primitives that act on OTHER
-/// apps' windows via AX/SkyLight. All five hop to main for AppKit.
+/// apps' windows via AX/SkyLight. All of them hop to main for AppKit.
 extension Bridge {
     /// Self-panel window primitives — concatenated into `Bridge.primitives`
     /// alongside the rest of the group builders. Pure builder; no side
     /// effects.
     static func windowPrimitives() -> [Primitive] {
         return [
-            // Invocable-window control — async (must hop to main for AppKit).
-            .custom("window.invoke", denyValue: false) { bridge, _, requestId in
-                DispatchQueue.main.async { [weak bridge] in
-                    if let win = bridge?.webView?.window as? StackWindow, win.invocable {
-                        win.invoke()
-                        bridge?.respond(requestId: requestId, value: true)
-                    } else {
-                        bridge?.respond(requestId: requestId, value: false)
-                    }
-                }
+            // Invocable-window control.
+            selfPanel("window.invoke", parse: { _ in () }) { win, _ in
+                guard win.invocable else { return false }
+                win.invoke()
+                return true
             },
-            .custom("window.dismiss", denyValue: false) { bridge, _, requestId in
-                DispatchQueue.main.async { [weak bridge] in
-                    if let win = bridge?.webView?.window as? StackWindow, win.invocable {
-                        win.dismiss()
-                        bridge?.respond(requestId: requestId, value: true)
-                    } else {
-                        bridge?.respond(requestId: requestId, value: false)
-                    }
-                }
+            selfPanel("window.dismiss", parse: { _ in () }) { win, _ in
+                guard win.invocable else { return false }
+                win.dismiss()
+                return true
             },
             // JS-controlled window alpha. Not gated to invocable — any stack can
             // fade its panel (SideSwipe's volume/brightness disc, transient toasts,
@@ -39,38 +29,18 @@ extension Bridge {
             //
             // First call disables the FirstPaintGate's auto-reveal — see
             // StackWindow.setAlpha / FirstPaintGate.markOverridden.
-            .custom("window.setAlpha", denyValue: false) { bridge, body, requestId in
-                guard let alpha = StackWindow.parseSetAlpha(body) else {
-                    bridge.respond(requestId: requestId, value: false)
-                    return
-                }
-                DispatchQueue.main.async { [weak bridge] in
-                    if let win = bridge?.webView?.window as? StackWindow {
-                        win.setAlpha(alpha)
-                        bridge?.respond(requestId: requestId, value: true)
-                    } else {
-                        bridge?.respond(requestId: requestId, value: false)
-                    }
-                }
+            selfPanel("window.setAlpha", parse: StackWindow.parseSetAlpha) { win, alpha in
+                win.setAlpha(alpha)
+                return true
             },
             // JS-controlled window frame. Input is in CG/AX convention (top-left
             // origin) — matches sd.windows.focused / sd.ax.attribute. Width / height
             // optional; omitted dimensions preserve current. Used by stacks that
             // reposition per-invocation (Muse anchors to AX-focused element) where
             // a single manifest anchor isn't expressive enough.
-            .custom("window.setFrame", denyValue: false) { bridge, body, requestId in
-                guard let f = StackWindow.parseSetFrame(body) else {
-                    bridge.respond(requestId: requestId, value: false)
-                    return
-                }
-                DispatchQueue.main.async { [weak bridge] in
-                    if let win = bridge?.webView?.window as? StackWindow {
-                        win.setFrame(cgX: f.x, cgY: f.y, w: f.w, h: f.h)
-                        bridge?.respond(requestId: requestId, value: true)
-                    } else {
-                        bridge?.respond(requestId: requestId, value: false)
-                    }
-                }
+            selfPanel("window.setFrame", parse: StackWindow.parseSetFrame) { win, f in
+                win.setFrame(cgX: f.x, cgY: f.y, w: f.w, h: f.h)
+                return true
             },
             // sd-on:click backing. JS pushes the current set of interactive
             // element rects (CSS viewport coords, re-pushed on DOM/layout/
@@ -124,20 +94,33 @@ extension Bridge {
             // JS-controlled click-through. Bar-like stacks toggle this to route
             // events between themselves and the system menubar underneath as the
             // mouse moves over / off their item rects.
-            .custom("window.setClickThrough", denyValue: false) { bridge, body, requestId in
-                guard let v = StackWindow.parseSetClickThrough(body) else {
+            selfPanel("window.setClickThrough", parse: StackWindow.parseSetClickThrough) { win, v in
+                win.setClickThrough(v)
+                return true
+            },
+        ]
+    }
+
+    /// A window.* primitive acting on the stack's own panel: a request
+    /// `parse` rejects answers false at once; otherwise, on main, `act` runs
+    /// against the StackWindow hosting the page and its result is the
+    /// answer — false when the page isn't in a StackWindow.
+    private static func selfPanel<Arg>(_ type: String,
+                                       parse: @escaping ([String: Any]) -> Arg?,
+                                       _ act: @escaping (StackWindow, Arg) -> Bool) -> Primitive {
+        .custom(type, denyValue: false) { bridge, body, requestId in
+            guard let arg = parse(body) else {
+                bridge.respond(requestId: requestId, value: false)
+                return
+            }
+            DispatchQueue.main.async { [weak bridge] in
+                guard let bridge = bridge else { return }
+                guard let win = bridge.webView?.window as? StackWindow else {
                     bridge.respond(requestId: requestId, value: false)
                     return
                 }
-                DispatchQueue.main.async { [weak bridge] in
-                    if let win = bridge?.webView?.window as? StackWindow {
-                        win.setClickThrough(v)
-                        bridge?.respond(requestId: requestId, value: true)
-                    } else {
-                        bridge?.respond(requestId: requestId, value: false)
-                    }
-                }
-            },
-        ]
+                bridge.respond(requestId: requestId, value: act(win, arg))
+            }
+        }
     }
 }
