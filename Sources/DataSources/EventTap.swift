@@ -92,7 +92,8 @@ final class EventTapRegistry {
     private var nextConsumerId: Int = 1
     private var consumeTap: CFMachPort?
     private var consumeRunLoopSource: CFRunLoopSource?
-    private var consumeMask: CGEventMask = 0
+    private var consumeMask: CGEventMask = 0          // mask the live tap was created with
+    private var consumeTapEnabled = false
 
     // Per-consumer cursor-rect gate. Keyed by Consumer.key. nil → no gate
     // (consume on predicate alone, original behavior). [] → empty gate
@@ -133,6 +134,7 @@ final class EventTapRegistry {
     func releaseScroll(owner: String) -> Bool {
         guard scrollClaim?.owner == owner else { return false }
         scrollClaim = nil
+        disableConsumeTapIfIdle()
         return true
     }
 
@@ -248,6 +250,38 @@ final class EventTapRegistry {
                 self?.insideByKey.removeValue(forKey: key)
             }
         }
+    }
+
+    /// What a CGEventTap needs so its interest mask matches what is registered.
+    enum TapMaskAction: Equatable {
+        case keep
+        /// Nothing is registered any more; stop the tap from waking the run loop.
+        case disable
+        case enable
+        /// The tap's mask is fixed at creation, so a different set of event
+        /// types needs a new tap carrying exactly this mask.
+        case reinstall(CGEventMask)
+    }
+
+    static func eventMask(_ types: some Sequence<CGEventType>) -> CGEventMask {
+        types.reduce(0) { $0 | (1 << CGEventMask($1.rawValue)) }
+    }
+
+    /// Event types the consuming tap must intercept: those with a registered
+    /// consumer, plus scrollWheel while a scroll claim is held.
+    static func neededConsumeMask(consumers: Set<CGEventType>, claim: ScrollClaim?) -> CGEventMask {
+        eventMask(consumers) | (claim == nil ? 0 : eventMask([.scrollWheel]))
+    }
+
+    /// `installed` is the mask of the live tap (nil = none); `enabled` is
+    /// whether it currently delivers events. A disabled tap comes back with
+    /// the mask it was built with, so one that no longer matches the need is
+    /// rebuilt rather than re-enabled.
+    static func tapMaskAction(needed: CGEventMask, installed: CGEventMask?, enabled: Bool) -> TapMaskAction {
+        if needed == 0 { return installed != nil && enabled ? .disable : .keep }
+        guard let installed = installed else { return .reinstall(needed) }
+        if enabled { return needed & ~installed == 0 ? .keep : .reinstall(needed) }
+        return installed == needed ? .enable : .reinstall(needed)
     }
 
     /// Pure rect-gate predicate shared by the observe and consume paths.
@@ -374,6 +408,7 @@ final class EventTapRegistry {
                 self?.consumers.removeValue(forKey: eventType)
             }
             self?.rectsByKey.removeValue(forKey: key)
+            self?.disableConsumeTapIfIdle()
         }
     }
 
@@ -397,19 +432,33 @@ final class EventTapRegistry {
     /// Test/inspection accessor for the cursor-rect gate. nil = no gate set.
     func rectsForKey(_ key: String) -> [CGRect]? { rectsByKey[key] }
 
+    private var neededConsumeMask: CGEventMask {
+        EventTapRegistry.neededConsumeMask(consumers: Set(consumers.keys), claim: scrollClaim)
+    }
+
     private func ensureConsumeTap(adding eventType: CGEventType) -> Bool {
+        // The mask is fixed when the tap is created and CG has no "add event
+        // type to existing tap" call, so widening it means a new tap. A tap
+        // left disabled after its last consumer went away is switched back
+        // on when it still matches; otherwise it is rebuilt.
+        let needed = neededConsumeMask | EventTapRegistry.eventMask([eventType])
+        let installed: CGEventMask? = consumeTap == nil ? nil : consumeMask
+        switch EventTapRegistry.tapMaskAction(needed: needed, installed: installed, enabled: consumeTapEnabled) {
+        case .keep, .disable:
+            return true
+        case .enable:
+            if let t = consumeTap { CGEvent.tapEnable(tap: t, enable: true) }
+            consumeTapEnabled = true
+            return true
+        case .reinstall(let mask):
+            tearDownConsumeTap()
+            return installConsumeTap(mask: mask)
+        }
+    }
+
+    private func installConsumeTap(mask newMask: CGEventMask) -> Bool {
         // Same Accessibility gate as the observer tap. If we can't install the
         // observer side we can't install the consume side either.
-        let bit: UInt64 = 1 << UInt64(eventType.rawValue)
-        if consumeTap != nil {
-            // Tap already running — re-creating it is the only way to widen its
-            // mask. The mask is set once at tapCreate; CG has no "add event
-            // type to existing tap" call. If the new type isn't already covered
-            // we tear down + reinstall with the union.
-            if (consumeMask & bit) != 0 { return true }
-            tearDownConsumeTap()
-        }
-
         let trusted: Bool = {
             let opts: [String: Bool] = [
                 kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: !promptShown
@@ -422,13 +471,15 @@ final class EventTapRegistry {
             return false
         }
 
-        let newMask = consumeMask | bit
         let userInfo = Unmanaged.passUnretained(self).toOpaque()
         let callback: CGEventTapCallBack = { (_, type, event, ctx) in
             guard let ctx = ctx else { return Unmanaged.passUnretained(event) }
             let registry = Unmanaged<EventTapRegistry>.fromOpaque(ctx).takeUnretainedValue()
             if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
-                if let t = registry.consumeTap { CGEvent.tapEnable(tap: t, enable: true) }
+                // An idle tap was switched off on purpose; only a wanted one comes back.
+                if let t = registry.consumeTap, registry.consumeTapEnabled {
+                    CGEvent.tapEnable(tap: t, enable: true)
+                }
                 return Unmanaged.passUnretained(event)
             }
             return registry.dispatchConsume(type: type, event: event)
@@ -451,8 +502,21 @@ final class EventTapRegistry {
         self.consumeTap = newTap
         self.consumeRunLoopSource = source
         self.consumeMask = newMask
+        self.consumeTapEnabled = true
         log("CGEventTap (consume) installed mask=\(String(newMask, radix: 16))")
         return true
+    }
+
+    /// A blocking tap makes every event of its types wait on the main run
+    /// loop, so it is switched off as soon as no consumer or claim needs it.
+    private func disableConsumeTapIfIdle() {
+        let installed: CGEventMask? = consumeTap == nil ? nil : consumeMask
+        guard case .disable = EventTapRegistry.tapMaskAction(
+            needed: neededConsumeMask, installed: installed, enabled: consumeTapEnabled),
+              let t = consumeTap else { return }
+        CGEvent.tapEnable(tap: t, enable: false)
+        consumeTapEnabled = false
+        log("CGEventTap (consume) idle; disabled")
     }
 
     private func tearDownConsumeTap() {
@@ -464,15 +528,17 @@ final class EventTapRegistry {
         }
         consumeTap = nil
         consumeRunLoopSource = nil
-        // consumeMask retained intentionally — ensureConsumeTap re-uses it as
-        // the lower bound when widening for a new event type.
+        consumeMask = 0
+        consumeTapEnabled = false
     }
 
     private func dispatchConsume(type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
         if type == .scrollWheel, let claim = scrollClaim {
             switch ScrollClaim.decide(claim: claim, ScrollWheel.read(event)) {
             case .swallow: return nil
-            case .release: scrollClaim = nil
+            case .release:
+                scrollClaim = nil
+                disableConsumeTapIfIdle()
             case .pass:    break
             }
         }
