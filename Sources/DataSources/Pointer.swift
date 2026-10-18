@@ -62,12 +62,7 @@ enum Mouse {
     /// surface stackd exposes.
     @discardableResult
     static func warp(x: Double, y: Double) -> Bool {
-        CGWarpMouseCursorPosition(CGPoint(x: x, y: y))
-        // Re-associate cursor with input after a warp — macOS otherwise
-        // applies a ~250ms suppression window where trackpad/mouse motion
-        // doesn't move the cursor.
-        CGAssociateMouseAndMouseCursorPosition(1)
-        return true
+        Cursor.setPosition(x: x, y: y, display: nil)
     }
 }
 

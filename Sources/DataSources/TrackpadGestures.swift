@@ -59,16 +59,14 @@ enum Gesture {
         guard let nsEvent = NSEvent(cgEvent: cgEvent) else { return nil }
         let subtype = Int(nsEvent.subtype.rawValue)
 
-        // All touches currently on the trackpad (began/moved/stationary).
-        let touchingSet = nsEvent.touches(matching: .touching, in: nil)
-        let fingers = touchingSet.count
-
         // Per-touch detail for TTTaps-class consumers: stable identity, phase,
         // normalized position (0–1 trackpad-relative). Walk .any to include
-        // .ended / .cancelled touches alongside the live ones.
+        // .ended / .cancelled touches alongside the live ones; the live ones
+        // (began/moved/stationary) are the fingers currently on the trackpad.
         let touchesAll = nsEvent.touches(matching: .any, in: nil)
         var touches: [[String: Any]] = []
         var phases: [String: Int] = [:]
+        var fingers = 0
         for t in touchesAll {
             let phaseName: String
             switch t.phase {
@@ -88,6 +86,7 @@ enum Gesture {
             // count of "live" touches per-event mirror Hammerspoon's
             // touchCount = #event:getTouches().
             let touching = (t.phase == .began || t.phase == .moved || t.phase == .stationary)
+            if touching { fingers += 1 }
             touches.append([
                 "identity":  id,
                 "phase":     phaseName,

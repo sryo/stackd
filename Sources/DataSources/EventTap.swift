@@ -208,17 +208,19 @@ final class EventTapRegistry {
         }
     }
 
-    private func installObserverTap(mask: CGEventMask) -> Bool {
-        let trusted: Bool = {
-            // Only prompt once per process; otherwise repeated calls spam.
-            let opts: [String: Bool] = [
-                kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: !promptShown
-            ]
-            promptShown = true
-            return AXIsProcessTrustedWithOptions(opts as CFDictionary)
-        }()
+    /// Whether the process is trusted for Accessibility, which both taps need.
+    /// The system prompt is shown on the first check only; later checks stay
+    /// silent so repeated installs don't spam it.
+    private func accessibilityGranted() -> Bool {
+        let opts: [String: Bool] = [
+            kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: !promptShown
+        ]
+        promptShown = true
+        return AXIsProcessTrustedWithOptions(opts as CFDictionary)
+    }
 
-        guard trusted else {
+    private func installObserverTap(mask: CGEventMask) -> Bool {
+        guard accessibilityGranted() else {
             log("Accessibility not granted; CGEventTap disabled")
             return false
         }
@@ -503,14 +505,7 @@ final class EventTapRegistry {
     private func installConsumeTap(mask: CGEventMask) -> Bool {
         // Same Accessibility gate as the observer tap. If we can't install the
         // observer side we can't install the consume side either.
-        let trusted: Bool = {
-            let opts: [String: Bool] = [
-                kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: !promptShown
-            ]
-            promptShown = true
-            return AXIsProcessTrustedWithOptions(opts as CFDictionary)
-        }()
-        guard trusted else {
+        guard accessibilityGranted() else {
             log("Accessibility not granted; consuming CGEventTap disabled")
             return false
         }
@@ -582,44 +577,24 @@ final class EventTapRegistry {
 
     // MARK: - String ↔ CGEventType
 
+    /// The event types a stack can tap, by the name its manifest uses.
+    private static let eventNames: [(name: String, type: CGEventType)] = [
+        ("keyDown", .keyDown), ("keyUp", .keyUp), ("flagsChanged", .flagsChanged),
+        ("leftMouseDown", .leftMouseDown), ("leftMouseUp", .leftMouseUp),
+        ("rightMouseDown", .rightMouseDown), ("rightMouseUp", .rightMouseUp),
+        ("otherMouseDown", .otherMouseDown), ("otherMouseUp", .otherMouseUp),
+        ("leftMouseDragged", .leftMouseDragged), ("rightMouseDragged", .rightMouseDragged),
+        ("mouseMoved", .mouseMoved), ("scrollWheel", .scrollWheel),
+        ("gesture", Gesture.cgEventType)
+    ]
+    private static let typeByName = Dictionary(uniqueKeysWithValues: eventNames.map { ($0.name, $0.type) })
+    private static let nameByType = Dictionary(uniqueKeysWithValues: eventNames.map { ($0.type, $0.name) })
+
     static func parse(_ name: String) -> CGEventType? {
-        switch name {
-        case "keyDown":         return .keyDown
-        case "keyUp":           return .keyUp
-        case "flagsChanged":    return .flagsChanged
-        case "leftMouseDown":     return .leftMouseDown
-        case "leftMouseUp":       return .leftMouseUp
-        case "rightMouseDown":    return .rightMouseDown
-        case "rightMouseUp":      return .rightMouseUp
-        case "otherMouseDown":    return .otherMouseDown
-        case "otherMouseUp":      return .otherMouseUp
-        case "leftMouseDragged":  return .leftMouseDragged
-        case "rightMouseDragged": return .rightMouseDragged
-        case "mouseMoved":        return .mouseMoved
-        case "scrollWheel":     return .scrollWheel
-        case "gesture":         return Gesture.cgEventType
-        default: return nil
-        }
+        typeByName[name]
     }
 
     static func name(for type: CGEventType) -> String {
-        switch type {
-        case .keyDown:         return "keyDown"
-        case .keyUp:           return "keyUp"
-        case .flagsChanged:    return "flagsChanged"
-        case .leftMouseDown:     return "leftMouseDown"
-        case .leftMouseUp:       return "leftMouseUp"
-        case .rightMouseDown:    return "rightMouseDown"
-        case .rightMouseUp:      return "rightMouseUp"
-        case .otherMouseDown:    return "otherMouseDown"
-        case .otherMouseUp:      return "otherMouseUp"
-        case .leftMouseDragged:  return "leftMouseDragged"
-        case .rightMouseDragged: return "rightMouseDragged"
-        case .mouseMoved:        return "mouseMoved"
-        case .scrollWheel:     return "scrollWheel"
-        default:
-            if type.rawValue == Gesture.cgEventType.rawValue { return "gesture" }
-            return "unknown"
-        }
+        nameByType[type] ?? "unknown"
     }
 }

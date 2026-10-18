@@ -1,8 +1,7 @@
 import Foundation
 
-/// Hotkey primitive group — extracted from Bridge.swift as part of the
-/// god-object breakup continuation (follow-up to A1+A4). Five entries
-/// covering the JS-driven Carbon hotkey surface:
+/// Hotkey primitive group: five entries covering the JS-driven Carbon
+/// hotkey surface:
 ///
 ///   - `hotkey.bind` — mints an id, registers a Carbon hot key via
 ///     `HotkeyRegistry`, fires `__sd_hotkey_fire(id)` into the stack's
@@ -25,7 +24,7 @@ import Foundation
 ///
 /// NOTE: only the JS-bound runtime API lives here. Static manifest-driven
 /// hotkey wiring (StackManifest → HotkeyRegistry at stack load) stays in
-/// StackHost — same separation as bangs vs `sd.bang.*`.
+/// `Bridge.start(manifest:)` — same separation as bangs vs `sd.bang.*`.
 extension Bridge {
     /// Hotkey primitives — concatenated into `Bridge.primitives` alongside
     /// the rest of the inline registrations. Pure builder; no side effects.

@@ -21,9 +21,8 @@
 
 // MTDeviceRef is really a CFTypeRef under the hood, but we expose it to
 // Swift as an opaque void* so the toll-free CF→ObjC bridging doesn't kick
-// in and force us through Unmanaged. That lets us call MTDeviceRelease
-// directly (the framework expects manual retain/release for these handles,
-// not Swift ARC). asmagill's Lua bridge uses the same pattern.
+// in and put the handles under Swift ARC. They are owned by the array
+// MTDeviceCreateList returns. asmagill's Lua bridge uses the same pattern.
 typedef void *MTDeviceRef;
 
 typedef struct {
@@ -76,12 +75,8 @@ typedef void (*MTFrameCallbackFunction)(MTDeviceRef device,
                                         size_t frame,
                                         void *refcon);
 
-extern MTDeviceRef MTDeviceCreateDefault(void);
-extern void        MTDeviceRelease(MTDeviceRef device);
-
 // Every multitouch device (built-in and external trackpads, Magic Mouse).
-// The array owns its devices: keep it alive while they are registered and
-// don't MTDeviceRelease its elements.
+// The array owns its devices: keep it alive while they are registered.
 extern CFArrayRef   MTDeviceCreateList(void) CF_RETURNS_RETAINED;
 // The AppleMultitouchDevice IOService behind a device (not retained).
 extern io_service_t MTDeviceGetService(MTDeviceRef device);
