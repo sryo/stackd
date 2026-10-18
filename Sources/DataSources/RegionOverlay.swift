@@ -83,8 +83,7 @@ final class RegionOverlayHandle: NSObject, WKNavigationDelegate {
     let id: Int
     let panel: NSPanel
     let webView: WKWebView
-    private var navigationReady = false
-    private var pendingEvalJS: String?
+    private var pageEval = PendingPageEval()
     private var released = false
     // Last applied frame (AppKit coords) and whether a window-server move
     // left `panel.frame` behind it — same bookkeeping as OverlayHandle.
@@ -138,11 +137,7 @@ final class RegionOverlayHandle: NSObject, WKNavigationDelegate {
     /// right after create still run. Mirrors `OverlayHandle.evaluate`.
     func evaluate(_ js: String) {
         if released { return }
-        if navigationReady {
-            webView.sdEvaluate(js, completionHandler: nil)
-        } else {
-            pendingEvalJS = (pendingEvalJS ?? "") + ";" + js
-        }
+        if let now = pageEval.offer(js) { webView.sdEvaluate(now, completionHandler: nil) }
     }
 
     /// Tear down: close the panel (drops the WKWebView). Idempotent.
@@ -157,11 +152,7 @@ final class RegionOverlayHandle: NSObject, WKNavigationDelegate {
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-        navigationReady = true
-        if let pending = pendingEvalJS {
-            pendingEvalJS = nil
-            webView.sdEvaluate(pending, completionHandler: nil)
-        }
+        if let held = pageEval.pageLoaded() { webView.sdEvaluate(held, completionHandler: nil) }
     }
 }
 

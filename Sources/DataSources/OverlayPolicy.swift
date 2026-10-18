@@ -304,6 +304,30 @@ struct NewestWinsPush {
     }
 }
 
+// MARK: - Pending page eval (pure, testable)
+
+/// Scripts for an overlay page, which WebKit only takes once it has loaded.
+/// Until then every script is held, in order, and the load runs them as
+/// one; after it they pass straight through.
+struct PendingPageEval {
+    private(set) var loaded = false
+    private var held: String?
+
+    /// The script to run now, or nil when it is held for the load.
+    mutating func offer(_ js: String) -> String? {
+        if loaded { return js }
+        held = (held ?? "") + ";" + js
+        return nil
+    }
+
+    /// The page finished loading: everything held, as one script.
+    mutating func pageLoaded() -> String? {
+        loaded = true
+        defer { held = nil }
+        return held
+    }
+}
+
 // MARK: - Repin policy (pure, testable)
 
 /// Decides when a tick must re-assert the panel's z-order above its target.

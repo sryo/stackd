@@ -52,8 +52,9 @@ final class OverlayHandle: NSObject, WKNavigationDelegate {
     private var linkToken: Token?
     private var backstop: Timer?
     // The WKWebView only accepts evaluateJavaScript after didFinish lands.
-    // Until then we buffer the latest target geometry; on finish we flush.
-    private var navigationReady: Bool = false
+    // Until then we buffer the latest target geometry and every eval; on
+    // finish we flush.
+    private var pageEval = PendingPageEval()
     private var pendingTargetJS: String?
     private var lastPushedTargetJS: String?
     private var targetPush = NewestWinsPush()
@@ -273,21 +274,13 @@ final class OverlayHandle: NSObject, WKNavigationDelegate {
 
     /// Evaluate JS in the overlay's WebView. Used by stacks that drive the
     /// overlay's style from outside (overlay-border calls this on focus
-    /// change to update the border color/radius). Buffers pre-didFinish.
+    /// change to update the border color/radius). Buffers pre-didFinish:
+    /// every eval sent during the load window runs on flush, in order,
+    /// where target geometry is last-write-wins (pendingTargetJS).
     func evaluate(_ js: String) {
         if released { return }
-        if navigationReady {
-            webView.sdEvaluate(js, completionHandler: nil)
-        } else {
-            // Append rather than replace — multiple eval calls during the
-            // load window must all run on flush. pendingTargetJS already
-            // does last-write-wins for target geometry; arbitrary eval is
-            // append-only so style commands don't get dropped.
-            let prior = pendingEvalJS ?? ""
-            pendingEvalJS = prior + ";" + js
-        }
+        if let now = pageEval.offer(js) { webView.sdEvaluate(now, completionHandler: nil) }
     }
-    private var pendingEvalJS: String?
 
     /// Per-tick: reposition the panel to the target's current bounds
     /// (grown by `outset` on all sides) and, when it changed, push
@@ -404,7 +397,7 @@ final class OverlayHandle: NSObject, WKNavigationDelegate {
             return frameChanged || unfitted
         }
         lastPushedTargetJS = js
-        if navigationReady {
+        if pageEval.loaded {
             pushTarget(js)
         } else {
             // Buffer — flushed in webView(_:didFinish:).
@@ -433,7 +426,7 @@ final class OverlayHandle: NSObject, WKNavigationDelegate {
     /// animation frames there — the second fires only after the first
     /// painted frame at the new size and scale was committed — then reveal.
     private func confirmPaintIfHidden() {
-        guard navigationReady,
+        guard pageEval.loaded,
               let gen = reveal.confirmation(pushInFlight: targetPush.inFlight) else { return }
         webView.callAsyncJavaScript(
             "await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))",
@@ -473,15 +466,12 @@ final class OverlayHandle: NSObject, WKNavigationDelegate {
     // WKNavigationDelegate
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-        navigationReady = true
+        let held = pageEval.pageLoaded()
         if let pending = pendingTargetJS {
             pendingTargetJS = nil
             pushTarget(pending)
         }
-        if let pending = pendingEvalJS {
-            pendingEvalJS = nil
-            webView.sdEvaluate(pending, completionHandler: nil)
-        }
+        if let held { webView.sdEvaluate(held, completionHandler: nil) }
     }
 
     // MARK: - Helpers
