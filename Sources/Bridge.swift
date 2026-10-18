@@ -685,11 +685,16 @@ final class Bridge: NSObject, WKScriptMessageHandler {
             log("js[\(level)] \(msg)")
             return
         }
-        guard message.name == "sd",
-              let body = message.body as? [String: Any],
-              let type = body["type"] as? String,
-              let primitive = Bridge.dispatch[type] else { return }
+        guard message.name == "sd", let body = message.body as? [String: Any] else { return }
         let requestId = body["requestId"] as? Int ?? -1
+        // An unanswered request leaves its JS Promise pending forever, so an
+        // unknown type still resolves — with null, the runtime's failure value.
+        let typeName = body["type"] as? String
+        guard let type = typeName, let primitive = Bridge.dispatch[type] else {
+            log("\(stackId): unknown primitive \(typeName ?? "<missing type>") — answered null")
+            respond(requestId: requestId, value: nil)
+            return
+        }
         // Trace every primitive call when STACKD_RPC_DEBUG=1. Throttled
         // per (stack, type) pair so a stack that polls every 1s doesn't
         // drown the log. Off by default to keep production logs quiet —
