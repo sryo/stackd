@@ -1,0 +1,15 @@
+# Fixes that shipped without a same-commit test but are guarded now, or whose
+# code no longer exists. One per line: <sha> <TAB> guarded|obsolete <TAB> what.
+# scripts/regression-ledger.py reads this; everything else without a
+# same-commit test ranks as unguarded.
+aef9f4e	guarded	Tests/WindowsTests.swift: WindowAddressabilityCache.probe — grace optimism reports addressable:true, isStandard:false
+6a11d14	guarded	Tests/StackTemplatesTests.swift: stackd new: no template ships CSS backdrop-filter
+a142a3e	guarded	Tests/WorkspaceNotificationsTests.swift: NSWorkspace notifications are observed on the workspace center (source check)
+e3fb084	obsolete	TahoeSynthPoll was removed; the intake is event-driven now
+7f877f1	guarded	Tests/FileWatcherTests.swift: FileWatcher fires for stack-source edits but not for runtime data files
+7fb0d0c	guarded	Tests/FileWatcherTests.swift: an unrelated new folder still reloads
+aaa0cd4	guarded	Tests/PermissionsRegistryTests.swift: StackDoctor accepts every permission in Permissions.all
+4ebf931	guarded	Tests/PermissionsRegistryTests.swift: StackDoctor accepts every permission in Permissions.all
+30ac049	guarded	Tests/PermissionsRegistryTests.swift: StackDoctor accepts every permission in Permissions.all
+4edb8be	guarded	Tests/SafePredicateTests.swift
+583eb44	obsolete	the CGContext overlay was replaced by WebKit overlay panels
