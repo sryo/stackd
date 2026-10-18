@@ -269,6 +269,7 @@ sound.system perm=sound deny=false
 spaces.minimizedWindows perm=spaces deny=[]
 spaces.moveWindow perm=spaces deny={"ok":false,"spaces":[]}
 spaces.windowSpaces perm=spaces deny=[]
+spaces.windows perm=spaces deny=[]
 speech.listen.cancel perm=speech deny=false
 speech.listen.start perm=speech deny=null
 speech.listen.stop perm=speech deny=false
@@ -555,6 +556,7 @@ sd.spaces.all signal
 sd.spaces.minimizedWindows fn/1
 sd.spaces.moveWindow fn/2
 sd.spaces.windowSpaces fn/1
+sd.spaces.windows fn/2
 sd.speech object
 sd.speech.listen fn/1
 sd.speech.listen.cancel fn/0

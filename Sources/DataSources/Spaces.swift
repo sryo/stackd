@@ -38,6 +38,14 @@ private enum SkyLightSpaces {
     typealias SpaceSetCompatIDFn          = @convention(c) (Int32, UInt64, Int32) -> Int32
     typealias SetWindowListWorkspaceFn    = @convention(c) (Int32, UnsafePointer<UInt32>, Int32, Int32) -> Int32
 
+    // CFArrayRef SLSCopyWindowsWithOptionsAndTags(int cid, uint32 owner,
+    //     CFArrayRef spaces, uint32 options, uint64 *setTags, uint64 *clearTags)
+    // — per yabai/src/misc/extern.h and hs.spaces.windowsForSpace. `spaces`
+    // is non-optional on purpose: NULL crashes inside SkyLight.
+    typealias CopyWindowsWithOptionsAndTagsFn = @convention(c) (
+        Int32, UInt32, CFArray, UInt32, UnsafeMutablePointer<UInt64>, UnsafeMutablePointer<UInt64>
+    ) -> Unmanaged<CFArray>?
+
     static let copyManagedSpaces:    CopyManagedSpacesFn?    = SkyLight.sym("SLSCopyManagedDisplaySpaces")
     static let spaceGetType:         SpaceGetTypeFn?         = SkyLight.sym("SLSSpaceGetType")
     static let displayGetCurrentSpace: DisplayGetCurrentSpaceFn? = SkyLight.sym("SLSManagedDisplayGetCurrentSpace")
@@ -46,6 +54,7 @@ private enum SkyLightSpaces {
     static let moveWindowsToManagedSpace: MoveWindowsToManagedSpaceFn? = SkyLight.sym("SLSMoveWindowsToManagedSpace")
     static let spaceSetCompatID:          SpaceSetCompatIDFn?          = SkyLight.sym("SLSSpaceSetCompatID")
     static let setWindowListWorkspace:    SetWindowListWorkspaceFn?    = SkyLight.sym("SLSSetWindowListWorkspace")
+    static let copyWindowsWithOptionsAndTags: CopyWindowsWithOptionsAndTagsFn? = SkyLight.sym("SLSCopyWindowsWithOptionsAndTags")
 }
 
 enum Spaces {
@@ -158,6 +167,47 @@ enum Spaces {
         guard let cfRef = fn(cid, 0x7, arr)?.takeRetainedValue() else { return [] }
         let nums = (cfRef as? [NSNumber]) ?? []
         return nums.map { $0.uint64Value }
+    }
+
+    /// hs.spaces.windowsForSpace: ids of every window the window server
+    /// files under `spaceID`. That is more than Windows.all() lists:
+    /// overlays, tooltips, menus and other non-document surfaces come along.
+    /// `includeMinimized` false keeps only on-screen windows. Empty for an id
+    /// that is not a managed space.
+    static func windows(spaceID: UInt64, includeMinimized: Bool = true) -> [UInt32] {
+        guard let copy = SkyLightSpaces.copyWindowsWithOptionsAndTags else { return [] }
+        let cid = SkyLight.cid
+        return windows(spaceID: spaceID, includeMinimized: includeMinimized,
+                       managedSpaces: managedSpaceIDs()) { spaces, options in
+            var setTags: UInt64 = 0
+            var clearTags: UInt64 = 0
+            return copy(cid, 0, spaces, options, &setTags, &clearTags)?.takeRetainedValue()
+        }
+    }
+
+    /// The query behind `windows(spaceID:)`: `copy` makes the
+    /// SLSCopyWindowsWithOptionsAndTags call with the spaces array and
+    /// options it is handed. The id must be one of `managedSpaces` before
+    /// anything is asked: the window server reads an empty spaces array as
+    /// every space. Options per hs.spaces: 0x7 includes minimized windows,
+    /// 0x2 is on-screen only.
+    static func windows(spaceID: UInt64, includeMinimized: Bool, managedSpaces: [UInt64],
+                        copy: (CFArray, UInt32) -> CFArray?) -> [UInt32] {
+        guard spaceID != 0, managedSpaces.contains(spaceID) else { return [] }
+        let spaces = [NSNumber(value: spaceID)] as CFArray
+        let raw = copy(spaces, includeMinimized ? 0x7 : 0x2) as? [Any] ?? []
+        return raw.compactMap { ($0 as? NSNumber)?.uint32Value }
+    }
+
+    /// Every space id SLSCopyManagedDisplaySpaces lists, user and fullscreen.
+    private static func managedSpaceIDs() -> [UInt64] {
+        guard let copy = SkyLightSpaces.copyManagedSpaces,
+              let displays = copy(SkyLight.cid)?.takeRetainedValue() as? [[String: Any]] else { return [] }
+        return displays.flatMap { display in
+            ((display["Spaces"] as? [[String: Any]]) ?? []).compactMap {
+                ($0["ManagedSpaceID"] as? NSNumber)?.uint64Value
+            }
+        }
     }
 
     /// CGWindowIDs of all currently MINIMIZED windows on `spaceID`. Used by

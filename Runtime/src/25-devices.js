@@ -68,6 +68,14 @@ sd.spaces = {
     windowSpaces(id) { return request({ type: "spaces.windowSpaces", id }); },
     // CGWindowIDs of minimized windows on a space — Promise<number[]>.
     minimizedWindows(spaceID) { return request({ type: "spaces.minimizedWindows", spaceID }); },
+    // CGWindowIDs of every window on a space (hs.spaces.windowsForSpace) —
+    // Promise<number[]>. Raw window-server inventory: overlays, tooltips and
+    // menus come along, so join against sd.windows.all for app windows.
+    // includeMinimized defaults to true; false keeps on-screen windows only.
+    // [] for an id that is not a user or fullscreen space.
+    windows(spaceID, includeMinimized) {
+      return request({ type: "spaces.windows", spaceID, includeMinimized: includeMinimized !== false });
+    },
     // Move a window to another user space (hs.spaces.moveWindowToSpace
     // parity). Fullscreen/tiled target spaces are refused. Resolves
     //   { ok: bool, spaces: number[] }

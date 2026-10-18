@@ -258,11 +258,10 @@ enum Windows {
     /// only visible windows can filter. Standard windows only, stackd's own
     /// panels excluded.
     static func all() -> [[String: Any]] {
-        // SLSCopyWindowsWithOptionsAndTags is the yabai-style "authoritative"
-        // path but crashes inside SkyLight on macOS 26 (Tahoe) — repro: any
-        // stack with `windows` permission segfaults at startWorkspace's
-        // first push. Until the SPI signature is re-verified on Tahoe we
-        // route through the public CGWindowListCopyWindowInfo only.
+        // Discovery is the public CGWindowListCopyWindowInfo. yabai's
+        // SLSCopyWindowsWithOptionsAndTags crashes inside SkyLight on macOS
+        // 26 when handed a NULL spaces array (its every-space form); with an
+        // explicit space it backs Spaces.windows(spaceID:) instead.
         guard let raw = CGWindowListCopyWindowInfo(
             [.optionAll, .excludeDesktopElements],
             kCGNullWindowID

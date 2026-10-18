@@ -989,6 +989,11 @@ final class Bridge: NSObject, WKScriptMessageHandler {
             let id = UInt64((body["spaceID"] as? Int) ?? 0)
             return Spaces.minimizedWindows(spaceID: id).map { NSNumber(value: $0) }
         },
+        .sync("spaces.windows", permission: "spaces", denyValue: [NSNumber]()) { body in
+            let id = (body["spaceID"] as? Int).flatMap { UInt64(exactly: $0) } ?? 0
+            return Spaces.windows(spaceID: id, includeMinimized: body["includeMinimized"] as? Bool ?? true)
+                .map { NSNumber(value: $0) }
+        },
         // Write side — verified move; { ok, spaces } either way so callers
         // can update their per-window space caches without polling.
         .sync("spaces.moveWindow", permission: "spaces",

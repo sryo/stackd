@@ -67,6 +67,7 @@ enum SkyLight {
         "_SLPSSetFrontProcessWithOptions",
         "SLSCopyManagedDisplayForWindow",
         "SLSCopyBestManagedDisplayForRect",
+        "SLSCopyWindowsWithOptionsAndTags",
     ]
 
     static func missingSymbols(resolve: (String) -> Bool = { name in
