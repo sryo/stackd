@@ -257,7 +257,10 @@ enum Windows {
     /// and offscreen ones; each row carries `onscreen` so consumers that want
     /// only visible windows can filter. Standard windows only, stackd's own
     /// panels excluded.
-    static func all() -> [[String: Any]] {
+    /// `includeTabSiblings` keeps the hidden tabs of native-tabbed windows,
+    /// for callers that track which windows still exist rather than which
+    /// ones a user could tile.
+    static func all(includeTabSiblings: Bool = false) -> [[String: Any]] {
         // Discovery is the public CGWindowListCopyWindowInfo. yabai's
         // SLSCopyWindowsWithOptionsAndTags crashes inside SkyLight on macOS
         // 26 when handed a NULL spaces array (its every-space form); with an
@@ -266,10 +269,10 @@ enum Windows {
             [.optionAll, .excludeDesktopElements],
             kCGNullWindowID
         ) as? [[String: Any]] else { return [] }
-        guard WindowDebug.enabled else { return decode(raw) }
+        guard WindowDebug.enabled else { return decode(raw, keepTabSiblings: includeTabSiblings) }
         let began = CFAbsoluteTimeGetCurrent()
         _ = WindowAddressabilityCache.takeLiveProbeCount()
-        let out = decode(raw)
+        let out = decode(raw, keepTabSiblings: includeTabSiblings)
         let ms = Int((CFAbsoluteTimeGetCurrent() - began) * 1000)
         if ms >= 10 {
             WindowDebug.log("windows.all: \(ms)ms, \(WindowAddressabilityCache.takeLiveProbeCount()) live AX probes")
@@ -287,7 +290,8 @@ enum Windows {
         },
         display: (CGWindowID?, CGRect) -> [String: Any]? = WindowDisplay.liveResolver(),
         spaces: (CGWindowID) -> Set<UInt64> = { Set(Spaces.windowSpaces(windowID: $0)) },
-        axWindowIDs: (Int) -> Set<Int>? = { WindowsByID.currentWindowIDs(pid: pid_t($0)) }
+        axWindowIDs: (Int) -> Set<Int>? = { WindowsByID.currentWindowIDs(pid: pid_t($0)) },
+        keepTabSiblings: Bool = false
     ) -> [[String: Any]] {
         var bundleIds: [Int: String?] = [:]
         func bundleId(_ pid: Int) -> String? {
@@ -355,7 +359,7 @@ enum Windows {
         let tabs = WindowTabs.siblingIDs(in: rows, spacesOf: { spaces(CGWindowID($0)) }, axWindowIDs: axWindowIDs)
         WindowDebug.log("tabs: \(WindowTabs.debugSummary(rows, siblings: tabs))")
         WindowDebug.log("list: \(WindowTabs.debugList(rows.filter { !tabs.contains(($0["id"] as? Int) ?? -1) }))")
-        return WindowTabs.inheritTraits(rows: rows, siblings: tabs)
+        return keepTabSiblings ? rows : WindowTabs.inheritTraits(rows: rows, siblings: tabs)
     }
 }
 

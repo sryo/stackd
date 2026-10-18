@@ -126,6 +126,40 @@ func registerWindowTabsTests() {
         try expect(same?["isResizable"] == nil, "no sibling of this window to copy from")
     }
 
+    test("Windows.decode keeps hidden tabs when asked, for callers that track which windows exist") {
+        func cg(_ n: Int, onscreen: Int) -> [String: Any] {
+            [kCGWindowNumber as String: n, kCGWindowLayer as String: 0,
+             kCGWindowOwnerName as String: "Finder", kCGWindowOwnerPID as String: 4242,
+             kCGWindowIsOnscreen as String: onscreen,
+             kCGWindowBounds as String: ["X": 100.0, "Y": 50.0, "Width": 600.0, "Height": 800.0] as [String: CGFloat]]
+        }
+        let probe: (pid_t, CGWindowID) -> WindowAddressabilityCache.Probe = { _, wid in
+            WindowAddressabilityCache.Probe(addressable: wid == 1, isStandard: true, isMinimized: false, ts: 0)
+        }
+        let rows = Windows.decode([cg(1, onscreen: 1), cg(2, onscreen: 0)], probe: probe,
+                                  display: { _, _ in nil }, spaces: { _ in [1] },
+                                  axWindowIDs: { _ in [1] }, keepTabSiblings: true)
+        try expectEqual(rows.compactMap { $0["id"] as? Int }.sorted(), [1, 2])
+    }
+
+    test("the lifecycle poll lists windows with their hidden tabs, so a tab that is only hidden is not reported destroyed") {
+        // The poll diffs one snapshot against the next. Hidden tabs left out of
+        // it would read as closed windows: a destroy for a live tab, and a
+        // create when it is selected again.
+        guard let text = try? String(contentsOfFile: "Sources/DataSources/WindowsLifecycle.swift", encoding: .utf8) else {
+            throw Expectation(message: "run the tests from the repo root")
+        }
+        let observer = text.components(separatedBy: "enum WindowLifecycleFanout").first ?? text
+        let calls = observer.components(separatedBy: "\n").filter {
+            !$0.trimmingCharacters(in: .whitespaces).hasPrefix("//") && !$0.trimmingCharacters(in: .whitespaces).hasPrefix("///")
+                && $0.contains("Windows.all(")
+        }
+        try expect(!calls.isEmpty, "the poll no longer reads Windows.all(); update this guard")
+        for call in calls {
+            try expect(call.contains("includeTabSiblings: true"), "poll reads the window list without hidden tabs: \(call)")
+        }
+    }
+
     test("Windows.decode leaves a hidden tab out of the list") {
         func cg(_ n: Int, onscreen: Int) -> [String: Any] {
             [kCGWindowNumber as String: n, kCGWindowLayer as String: 0,

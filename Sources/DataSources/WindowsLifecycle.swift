@@ -77,7 +77,7 @@ final class WindowsLifecycleObserver {
     }
 
     private func tick() {
-        let rows = Windows.all()
+        let rows = Windows.all(includeTabSiblings: true)
         let now = current(rows)
         if Self.shouldSkipTick(previousCount: snapshot.count, currentCount: now.count) {
             WindowDebug.log("poll tick skipped: window list read empty (transient)")
@@ -271,7 +271,7 @@ final class WindowsLifecycleObserver {
         }
     }
 
-    private func current(_ rows: [[String: Any]] = Windows.all()) -> [Int: Snap] {
+    private func current(_ rows: [[String: Any]] = Windows.all(includeTabSiblings: true)) -> [Int: Snap] {
         var out: [Int: Snap] = [:]
         for raw in rows {
             guard let id = raw["id"] as? Int else { continue }
