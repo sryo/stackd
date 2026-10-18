@@ -142,35 +142,10 @@ final class DisplayObserver: RefCountedObserver {
             (NotificationCenter.default, NSApplication.didChangeScreenParametersNotification)
         ])
 
-        // Brightness-change distributed notifications. The macOS bezel UI
-        // (the small overlay that appears when you press F1/F2 or move the
-        // brightness slider in System Settings) posts a DN that we can hook
-        // for instant pushes. Multiple names because the bezel implementation
-        // moved between BezelServices and BezelUI across macOS versions —
-        // observing all known names is cheap and covers both paths.
-        //
-        // Programmatic brightness changes that bypass the bezel still need
-        // the safety-net poll below; on a typical Mac, F1/F2 + System
-        // Settings cover ~all user-driven brightness changes, so the live
-        // path handles the cases the user actually notices.
-        // The three bezel DN names below never fire during F1/F2 keypress
-        // or System Settings slider movement. Kept in case a future macOS
-        // adds them or a third-party tool posts them — they're cheap. The
-        // 1s safety poll is what actually catches brightness changes today.
-        let dn = DistributedNotificationCenter.default()
-        let brightnessTokens: [(NSObjectProtocol)] = [
-            "com.apple.BezelUI.BSBrightnessNotification",
-            "com.apple.BezelServices.BSBrightnessNotification",
-            "com.apple.brightness.changed",
-        ].map { name in
-            dn.addObserver(forName: Notification.Name(name),
-                           object: nil, queue: .main) { [weak self] _ in
-                self?.fire()
-            }
-        }
-
-        // 1s poll catches brightness changes (built-in DisplayServices SPI
-        // returns the live value on demand). Bridge's lastDisplay JSON dedup
+        // Brightness changes have no event source — the bezel's distributed
+        // notifications never fire for F1/F2 or the System Settings slider —
+        // so a 1s poll catches them (built-in DisplayServices SPI returns
+        // the live value on demand). Bridge's lastDisplay JSON dedup
         // absorbs no-op ticks, so the cost when brightness is stable is one
         // CGDirectDisplay read + a hash compare per active subscriber.
         let timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
@@ -180,7 +155,6 @@ final class DisplayObserver: RefCountedObserver {
 
         return Token {
             ncToken.cancel()
-            for t in brightnessTokens { dn.removeObserver(t) }
             timer.invalidate()
         }
     }

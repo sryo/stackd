@@ -11,14 +11,11 @@ import AppKit
 // installable once at first subscribe and stays for the daemon's lifetime.
 //
 // Critical: for macOS to ROUTE `myscheme://...` to stackd at all, the
-// daemon's Info.plist needs a CFBundleURLTypes entry naming the scheme.
-// The daemon today is built as a plain `.build/stackd` binary, NOT an
-// `.app` bundle — so during development, no `CFBundleURLTypes` is declared
-// and URL events for custom schemes won't actually arrive. The API surface
-// exists for when stackd ships as an `.app` with pre-declared schemes;
-// the Swift code installs the AppleEventManager handler unconditionally so
-// the wiring is ready. If URLs don't arrive, that's an Info.plist config
-// issue, not a code bug.
+// app's Info.plist needs a CFBundleURLTypes entry naming the scheme. The
+// daemon's Info.plist declares none, so URL events for custom schemes only
+// arrive from a build that pre-declares them. The Swift code installs the
+// AppleEventManager handler unconditionally so the wiring is ready. If URLs
+// don't arrive, that's an Info.plist config issue, not a code bug.
 //
 // Pattern mirrors Broadcasts.swift: per-Bridge handle table in Bridge.swift,
 // install-once observer here, observe(scheme: callback:) → Token. The

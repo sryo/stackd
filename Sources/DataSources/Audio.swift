@@ -429,8 +429,8 @@ enum AudioProcesses {
     /// Returns one dict per audio-process object, sans the pid=0 sentinel.
     /// Shape: { pid: Int, bundleId: String|NSNull, name: String|NSNull,
     ///          playingOutput: Bool }.
-    /// Bridge.startAudioProcesses polls this on a 2s tick; JS subscribes
-    /// via sd.audio.processes.
+    /// AudioProcessesObserver re-reads this on a process-list change and on a
+    /// 1s poll; JS subscribes via sd.audio.processes.
     ///
     /// Helper-process resolution: Chrome / Safari / Slack / Electron-based
     /// apps run their audio from a nested `<App>.app/.../Helper.app`

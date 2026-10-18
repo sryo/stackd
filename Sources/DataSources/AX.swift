@@ -665,11 +665,4 @@ enum AXObserverPool {
             lock.unlock()
         }
     }
-
-    /// Diagnostic — number of live AXObserverRefs the pool is currently
-    /// holding. Used by tests/smoke checks to confirm teardown.
-    static func liveObserverCount() -> Int {
-        lock.lock(); defer { lock.unlock() }
-        return pool.count
-    }
 }
