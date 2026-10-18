@@ -1,3 +1,4 @@
+import ApplicationServices
 import CoreGraphics
 import Foundation
 
@@ -74,7 +75,28 @@ protocol SpacesReading {
     func spaceCountsByDisplay() -> [Int]
 }
 
+/// What one AXExtrasMenuBar read of the menu bar's status items returned.
+enum StatusItemRead: Equatable {
+    case items(Int)
+    /// Answered, with no item in it.
+    case empty
+    /// The AXError code of a refused read.
+    case refused(Int32)
+}
+
+/// The two routes to the menu bar's status items (`MenubarItems`): one
+/// system-wide AXExtrasMenuBar read, or each running process asked for its
+/// own. Newer macOS releases refuse the first.
+protocol StatusItemReading {
+    var accessibilityTrusted: Bool { get }
+    func systemWideStatusItems() -> StatusItemRead
+    /// Only called once the system-wide read yielded nothing: it asks every
+    /// running process, which is slow.
+    func perProcessStatusItems() -> StatusItemRead
+}
+
 typealias DoctorProbeBackend = WindowServerConnectionReading & WindowBoundsReading & SpacesReading
+    & StatusItemReading
 
 enum DoctorProbes {
     /// Every probe, in report order.
@@ -83,6 +105,7 @@ enum DoctorProbes {
             ProbeResult(name: "windowserver", verdict: windowServerConnection(backend)),
             ProbeResult(name: "window-bounds", verdict: windowBounds(backend)),
             ProbeResult(name: "spaces", verdict: spaces(backend)),
+            ProbeResult(name: "status-items", verdict: statusItems(backend)),
         ]
     }
 
@@ -204,6 +227,29 @@ extension DoctorProbes {
     }
 }
 
+extension DoctorProbes {
+    /// Names the route that returns the menu bar's status items on this macOS.
+    /// Both reads need Accessibility; without it nothing can be judged.
+    static func statusItems(_ backend: StatusItemReading) -> ProbeVerdict {
+        guard backend.accessibilityTrusted else {
+            return .inconclusive("Accessibility is not granted to this process, so the status-item reads cannot run")
+        }
+        let systemWide = backend.systemWideStatusItems()
+        if case .items(let count) = systemWide {
+            return .works("system-wide AXExtrasMenuBar returned \(count) item(s)")
+        }
+        let why: String
+        switch systemWide {
+        case .refused(let code): why = "refused (AXError \(code))"
+        default:                 why = "returned no items"
+        }
+        if case .items(let count) = backend.perProcessStatusItems() {
+            return .works("per-process AXExtrasMenuBar fallback found \(count) item(s); the system-wide read \(why)")
+        }
+        return .failed("no status item readable: the system-wide read \(why) and the per-process fallback found none")
+    }
+}
+
 /// The readers `stackd doctor` probes with: the same paths the daemon uses.
 struct LiveDoctorBackend: DoctorProbeBackend {
     var connectionID: Int32 { SkyLight.cid }
@@ -240,5 +286,29 @@ struct LiveDoctorBackend: DoctorProbeBackend {
 
     func spaceCountsByDisplay() -> [Int] {
         Spaces.all().values.map { (($0 as? [String: Any])?["spaces"] as? [Any])?.count ?? 0 }
+    }
+
+    var accessibilityTrusted: Bool { AXIsProcessTrusted() }
+
+    func systemWideStatusItems() -> StatusItemRead {
+        let systemWide = AXUIElementCreateSystemWide()
+        AXUIElementSetMessagingTimeout(systemWide, 0.5)
+        var value: AnyObject?
+        let error = AXUIElementCopyAttributeValue(systemWide, "AXExtrasMenuBar" as CFString, &value)
+        guard error == .success else { return .refused(error.rawValue) }
+        guard let bar = AX.element(from: value) else { return .empty }
+        AXUIElementSetMessagingTimeout(bar, 0.5)
+        let count = AX.children(of: bar).count
+        return count > 0 ? .items(count) : .empty
+    }
+
+    /// Runs the daemon's own read with nothing cached, so every running
+    /// process is asked. The caller has already seen the system-wide read
+    /// come up empty, which sends the read down its per-process route.
+    func perProcessStatusItems() -> StatusItemRead {
+        var ownerCache: [pid_t: String] = [:]
+        var candidates = MenubarExtrasCandidates()
+        let count = MenubarItems.items(ownerCache: &ownerCache, candidates: &candidates).count
+        return count > 0 ? .items(count) : .empty
     }
 }

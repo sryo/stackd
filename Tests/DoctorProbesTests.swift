@@ -38,6 +38,22 @@ private final class FakeDoctorBackend: DoctorProbeBackend {
     var spaceCounts: [Int] = [2]
 
     func spaceCountsByDisplay() -> [Int] { spaceCounts }
+
+    var accessibilityTrusted = true
+    var systemWide: StatusItemRead = .items(12)
+    var perProcess: StatusItemRead = .items(12)
+    private(set) var systemWideReads = 0
+    private(set) var perProcessReads = 0
+
+    func systemWideStatusItems() -> StatusItemRead {
+        systemWideReads += 1
+        return systemWide
+    }
+
+    func perProcessStatusItems() -> StatusItemRead {
+        perProcessReads += 1
+        return perProcess
+    }
 }
 
 private func listed(_ id: CGWindowID, pid: pid_t = 500, owner: String = "Safari", layer: Int = 0,
@@ -261,15 +277,69 @@ func registerDoctorProbesTests() {
         try expect(detail.contains("2 display"), detail)
     }
 
+    // MARK: - Status items
+
+    test("status-items probe is inconclusive without Accessibility and reads nothing") {
+        let backend = FakeDoctorBackend()
+        backend.accessibilityTrusted = false
+        guard case .inconclusive(let detail) = DoctorProbes.statusItems(backend) else {
+            throw Expectation(message: "expected inconclusive")
+        }
+        try expect(detail.contains("Accessibility"), detail)
+        try expectEqual(backend.systemWideReads + backend.perProcessReads, 0)
+    }
+
+    test("status-items probe reports the system-wide route when it answers") {
+        let backend = FakeDoctorBackend()
+        backend.systemWide = .items(14)
+        guard case .works(let detail) = DoctorProbes.statusItems(backend) else {
+            throw Expectation(message: "expected works")
+        }
+        try expect(detail.contains("system-wide") && detail.contains("14"), detail)
+        try expectEqual(backend.perProcessReads, 0)
+    }
+
+    test("status-items probe reports the per-process route when the system-wide read is refused") {
+        let backend = FakeDoctorBackend()
+        backend.systemWide = .refused(-25205)
+        backend.perProcess = .items(9)
+        guard case .works(let detail) = DoctorProbes.statusItems(backend) else {
+            throw Expectation(message: "expected works")
+        }
+        try expect(detail.contains("per-process") && detail.contains("9"), detail)
+        try expect(detail.contains("-25205"), "detail should keep the refusal code: \(detail)")
+    }
+
+    test("status-items probe falls back when the system-wide read returns no items") {
+        let backend = FakeDoctorBackend()
+        backend.systemWide = .empty
+        backend.perProcess = .items(3)
+        guard case .works(let detail) = DoctorProbes.statusItems(backend) else {
+            throw Expectation(message: "expected works")
+        }
+        try expect(detail.contains("per-process"), detail)
+    }
+
+    test("status-items probe fails when neither route returns an item") {
+        let backend = FakeDoctorBackend()
+        backend.systemWide = .refused(-25205)
+        backend.perProcess = .empty
+        guard case .failed(let detail) = DoctorProbes.statusItems(backend) else {
+            throw Expectation(message: "expected failed")
+        }
+        try expect(detail.contains("system-wide") && detail.contains("per-process") && detail.contains("-25205"), detail)
+        try expectEqual(backend.perProcessReads, 1)
+    }
+
     // MARK: - Runner
 
     test("doctor probes: run reports every probe once, in order") {
         let results = DoctorProbes.run(FakeDoctorBackend())
-        try expectEqual(results.map(\.name), ["windowserver", "window-bounds", "spaces"])
+        try expectEqual(results.map(\.name), ["windowserver", "window-bounds", "spaces", "status-items"])
     }
 
     test("doctor probes: the live backend completes every probe without trapping") {
         let results = DoctorProbes.run(LiveDoctorBackend())
-        try expectEqual(results.map(\.name), ["windowserver", "window-bounds", "spaces"])
+        try expectEqual(results.map(\.name), ["windowserver", "window-bounds", "spaces", "status-items"])
     }
 }
