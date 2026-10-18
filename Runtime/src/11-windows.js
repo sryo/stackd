@@ -6,9 +6,11 @@ sd.windows = {
     // }
     // - bundleId: stable across launches (pid recycles, bundleId doesn't);
     //   stacks routing by app should key on this, not on pid or name.
-    // - display: the screen containing the window's top-left at push time,
-    //   daemon-precomputed so stacks don't reimplement the forPoint loop.
-    //   Omitted when off-screen.
+    // - display: the window's screen at push time, daemon-precomputed so
+    //   stacks don't reimplement the lookup: the display the window server
+    //   files the window under, else the one holding the largest part of
+    //   its frame (hs.window:screen()), the nearest one when offscreen.
+    //   Omitted only when no display is attached.
     // - space: first CGSpaceID the window appears on. Multi-space windows
     //   (sticky / fullscreen aux) still surface a usable value here; call
     //   sd.spaces.forWindow(id) for the full set.

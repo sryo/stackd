@@ -163,11 +163,12 @@ enum Windows {
         // Bundle identifier — stable across launches (pid recycles), so
         // stacks routing by app should key on this.
         if let bid = app.bundleIdentifier { out["bundleId"] = bid }
-        // Enrich with the containing display so consumers don't reimplement
-        // the forPoint loop. Probe at the window's top-left in CG coords —
-        // matches every other xy in sd.*. Display.forPoint is cheap
-        // (NSScreen.screens iteration, no DDC). null when off-screen.
-        if let d = Display.forPoint(pt) { out["display"] = d }
+        // Enrich with the window's display (WindowDisplay) so consumers
+        // don't reimplement the lookup. Absent only when no display is
+        // attached.
+        if let d = WindowDisplay.liveResolver()(read.id, CGRect(origin: pt, size: read.size)) {
+            out["display"] = d
+        }
         // CGSpaceID of the space the window appears on — first entry, since
         // 99% of windows live on exactly one space (the user-arranged case).
         // Multi-space windows (sticky-on-all-spaces / fullscreen-with-aux)
@@ -278,12 +279,14 @@ enum Windows {
     }
 
     /// CGWindowList rows → Windows.all() rows. `probe` gives each window's
-    /// AX verdict (the addressability cache in production).
+    /// AX verdict (the addressability cache in production); `display` its
+    /// `{ id, frame }` display dict.
     static func decode(
         _ list: [[String: Any]],
         probe: (pid_t, CGWindowID) -> WindowAddressabilityCache.Probe = {
             WindowAddressabilityCache.probe(pid: $0, windowID: $1)
-        }
+        },
+        display: (CGWindowID?, CGRect) -> [String: Any]? = WindowDisplay.liveResolver()
     ) -> [[String: Any]] {
         var bundleIds: [Int: String?] = [:]
         func bundleId(_ pid: Int) -> String? {
@@ -319,11 +322,11 @@ enum Windows {
             let originY = Int(bounds["Y"] ?? 0)
             // Mirror Windows.focused()'s display enrichment for every entry
             // in the list. Stacks iterating sd.windows.all (windowscape tiler,
-            // window switchers, focus-per-display HUDs) get the containing
-            // screen without a per-id RPC roundtrip. Space deliberately
-            // omitted here — Spaces.windowSpaces is a per-window CGS call,
-            // and a 50-window list shouldn't pay 50 of them per push.
-            // sd.spaces.forWindow(id) stays the path for that.
+            // window switchers, focus-per-display HUDs) get the window's
+            // screen without a per-id RPC roundtrip. With several displays
+            // that costs one window-server read per window. Space is
+            // omitted: a 50-window list shouldn't pay 50 SLSCopySpacesForWindows
+            // calls per push; sd.spaces.windowSpaces(id) is the path for that.
             var out: [String: Any] = [
                 "id": num,
                 "app": owner,
@@ -342,11 +345,62 @@ enum Windows {
                 ]
             ]
             if let bid = bundleId(pid) { out["bundleId"] = bid }
-            if let d = Display.forPoint(CGPoint(x: originX, y: originY)) {
-                out["display"] = d
-            }
+            let frame = CGRect(x: bounds["X"] ?? 0, y: bounds["Y"] ?? 0,
+                               width: bounds["Width"] ?? 0, height: bounds["Height"] ?? 0)
+            if let d = display(CGWindowID(num), frame) { out["display"] = d }
             if let t = verdict.traits { out.merge(t.fields) { $1 } }
             return out
+        }
+    }
+}
+
+// MARK: - WindowDisplay: the display a window is on
+
+/// The display a window is on. The window server's answer first: the
+/// display it files the window under (for a window straddling two displays,
+/// the one it stays visible on once the drag ends), then the display it
+/// would pick for the frame. Without a usable answer, hs.window:screen()'s
+/// rule: the display holding the largest part of the frame.
+enum WindowDisplay {
+    /// The window server's display identifiers: UUID strings, or "Main"
+    /// when it has no per-display answer.
+    struct WindowServer {
+        let displayForWindow: (CGWindowID) -> String?
+        let displayForRect: (CGRect) -> String?
+
+        static let live = WindowServer(
+            displayForWindow: { WindowServerDisplay.identifier(ofWindow: $0) },
+            displayForRect: { WindowServerDisplay.identifier(bestFor: $0) })
+    }
+
+    /// `windowServer` nil asks only the overlap rule. A single display is
+    /// the answer without asking anyone.
+    static func resolve(windowID: CGWindowID?, frame: CGRect,
+                        displays: [Display.Placement],
+                        windowServer: WindowServer?) -> Display.Placement? {
+        if displays.count == 1 { return displays[0] }
+        func named(_ identifier: String?) -> Display.Placement? {
+            guard let identifier = identifier else { return nil }
+            return displays.first { $0.uuid?.caseInsensitiveCompare(identifier) == .orderedSame }
+        }
+        if let ws = windowServer {
+            if let wid = windowID, let d = named(ws.displayForWindow(wid)) { return d }
+            if let d = named(ws.displayForRect(frame)) { return d }
+        }
+        return Display.largestOverlapDisplay(frame: frame, displays: displays)
+    }
+
+    /// The `{ id, frame }` display dict for each window of one pass over the
+    /// window list: the display set is read once per resolver. With
+    /// "Displays have separate spaces" off, one space spans every display
+    /// and the window server's answer names none of them in particular, so
+    /// only the overlap rule runs. Main thread.
+    static func liveResolver() -> (CGWindowID?, CGRect) -> [String: Any]? {
+        let displays = Display.placements()
+        let windowServer: WindowServer? = NSScreen.screensHaveSeparateSpaces ? .live : nil
+        return { wid, frame in
+            resolve(windowID: wid, frame: frame, displays: displays, windowServer: windowServer)
+                .map(Display.summary)
         }
     }
 }

@@ -130,6 +130,53 @@ enum Display {
         }
         return nil
     }
+
+    /// One active display as window placement sees it: CG display id,
+    /// top-left bounds and UUID (the identifier the window server names
+    /// displays by).
+    struct Placement: Equatable {
+        let id: CGDirectDisplayID
+        let frame: CGRect
+        let uuid: String?
+    }
+
+    /// Active displays in NSScreen order, the main display first. Skips
+    /// brightness, so it is as cheap as `forPoint`. Main thread.
+    static func placements() -> [Placement] {
+        NSScreen.screens.map { screen in
+            let id = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID ?? 0
+            return Placement(id: id, frame: CGDisplayBounds(id), uuid: uuidString(for: id))
+        }
+    }
+
+    /// The `{ id, frame }` dict window payloads carry, the same shape as
+    /// `forPoint`.
+    static func summary(_ p: Placement) -> [String: Any] {
+        ["id": Int(p.id), "frame": rect(p.frame)]
+    }
+
+    /// hs.screen.find(rect), which hs.window:screen() uses: the display
+    /// holding the largest part of `frame`, the first listed on a tie. When
+    /// no display overlaps it, the display whose center is nearest the
+    /// frame's. A zero width or height counts as 1, so a degenerate frame
+    /// still lands on the display it sits on.
+    static func largestOverlapDisplay(frame: CGRect, displays: [Placement]) -> Placement? {
+        let probe = CGRect(x: frame.minX, y: frame.minY,
+                           width: frame.width == 0 ? 1 : frame.width,
+                           height: frame.height == 0 ? 1 : frame.height)
+        var best: Placement?
+        var bestArea: CGFloat = 0
+        for d in displays {
+            let overlap = probe.intersection(d.frame)
+            let area = overlap.isNull ? 0 : overlap.width * overlap.height
+            if area > bestArea { best = d; bestArea = area }
+        }
+        if let best = best { return best }
+        func distance(_ d: Placement) -> CGFloat {
+            hypot(d.frame.midX - probe.midX, d.frame.midY - probe.midY)
+        }
+        return displays.min { distance($0) < distance($1) }
+    }
 }
 
 /// Resolves DisplayServices private SPI at runtime. Returns nil getters/setters

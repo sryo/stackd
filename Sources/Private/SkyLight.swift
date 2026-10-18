@@ -65,6 +65,8 @@ enum SkyLight {
         "SLSWindowQueryResultCopyWindows",
         "SLSWindowQueryWindows",
         "_SLPSSetFrontProcessWithOptions",
+        "SLSCopyManagedDisplayForWindow",
+        "SLSCopyBestManagedDisplayForRect",
     ]
 
     static func missingSymbols(resolve: (String) -> Bool = { name in

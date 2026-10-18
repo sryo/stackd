@@ -30,6 +30,34 @@ private enum SkyLightOverlay {
     static let iteratorCornerRadii: IteratorCornerRadiiFn? = SkyLight.sym("SLSWindowIteratorGetCornerRadii")
 }
 
+// Signatures per yabai/src/misc/extern.h. Both return a +1 display
+// identifier: a display UUID string, or "Main" when the window server has
+// no per-display answer.
+private enum SkyLightWindowDisplay {
+    typealias CopyManagedDisplayForWindowFn   = @convention(c) (Int32, UInt32) -> Unmanaged<CFString>?
+    typealias CopyBestManagedDisplayForRectFn = @convention(c) (Int32, CGRect) -> Unmanaged<CFString>?
+
+    static let forWindow: CopyManagedDisplayForWindowFn?   = SkyLight.sym("SLSCopyManagedDisplayForWindow")
+    static let forRect:   CopyBestManagedDisplayForRectFn? = SkyLight.sym("SLSCopyBestManagedDisplayForRect")
+}
+
+/// The window server's own answer to "which display is this on", as the
+/// display identifier it files the window's space under.
+enum WindowServerDisplay {
+    /// nil when the SPI is missing or `wid` is 0.
+    static func identifier(ofWindow wid: CGWindowID) -> String? {
+        guard wid != 0, let fn = SkyLightWindowDisplay.forWindow else { return nil }
+        return fn(Overlay.readConnection, UInt32(wid))?.takeRetainedValue() as String?
+    }
+
+    /// The display the window server would place `rect` (top-left global
+    /// coordinates) on. nil when the SPI is missing.
+    static func identifier(bestFor rect: CGRect) -> String? {
+        guard let fn = SkyLightWindowDisplay.forRect else { return nil }
+        return fn(Overlay.readConnection, rect)?.takeRetainedValue() as String?
+    }
+}
+
 /// Per-window attributes from an SLSWindowQueryWindows iterator.
 enum OverlayWindowQuery {
     /// Set exactly while the window is ordered in: cleared by minimize,
