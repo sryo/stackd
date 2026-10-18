@@ -5,8 +5,9 @@ import CoreGraphics
 // `Sources/DataSources/Windows.swift` — resolving a CGWindowID's owning pid
 // without walking the full CGWindowList: the AX element cache's reverse
 // wid → pid map answers first, a single-window CGWindowList query only on a
-// miss. The index is generic over the element so its bookkeeping runs on
-// strings, without AX.
+// miss, and the window server (`WindowServerOwner`) only when CGWindowList
+// has no dict for the window. The index is generic over the element so its
+// bookkeeping runs on strings, without AX.
 
 private func index(_ walks: [pid_t: [CGWindowID]]) -> WindowElementIndex<String> {
     var i = WindowElementIndex<String>()
@@ -19,23 +20,58 @@ private func index(_ walks: [pid_t: [CGWindowID]]) -> WindowElementIndex<String>
 func registerWindowOwnerLookupTests() {
     test("WindowOwnerLookup.pid answers from the cache without querying") {
         var queried = false
-        let pid = WindowOwnerLookup.pid(for: 200, cached: index([10: [100, 101], 20: [200]])) { _ in
-            queried = true; return nil
-        }
+        let pid = WindowOwnerLookup.pid(for: 200, cached: index([10: [100, 101], 20: [200]]),
+                                        query: { _ in queried = true; return nil },
+                                        windowServer: { _ in queried = true; return nil })
         try expect(pid == 20)
         try expect(!queried)
     }
 
     test("WindowOwnerLookup.pid falls back to the single-window query on a miss") {
         var queriedFor: CGWindowID?
-        let pid = WindowOwnerLookup.pid(for: 300, cached: index([10: [100]])) { wid in queriedFor = wid; return 30 }
+        var askedServer = false
+        let pid = WindowOwnerLookup.pid(for: 300, cached: index([10: [100]]),
+                                        query: { wid in queriedFor = wid; return 30 },
+                                        windowServer: { _ in askedServer = true; return 31 })
         try expect(pid == 30)
         try expect(queriedFor == 300)
+        try expect(!askedServer, "the window server is asked only when CGWindowList has no dict")
     }
 
-    test("WindowOwnerLookup.pid is nil when neither cache nor query knows the window") {
-        let pid = WindowOwnerLookup.pid(for: 999, cached: WindowElementIndex<String>()) { _ in nil }
+    test("WindowOwnerLookup.pid asks the window server when CGWindowList has no dict for the window") {
+        var askedFor: CGWindowID?
+        let pid = WindowOwnerLookup.pid(for: 400, cached: index([10: [100]]),
+                                        query: { _ in nil },
+                                        windowServer: { wid in askedFor = wid; return 40 })
+        try expect(pid == 40)
+        try expect(askedFor == 400)
+    }
+
+    test("WindowOwnerLookup.pid is nil when neither cache, query nor window server knows the window") {
+        let pid = WindowOwnerLookup.pid(for: 999, cached: WindowElementIndex<String>(),
+                                        query: { _ in nil }, windowServer: { _ in nil })
         try expect(pid == nil)
+    }
+
+    test("WindowServerOwner.pid reads an on-screen app window's owner the way CGWindowList reports it") {
+        // App-level windows only: CGWindowList files some system surfaces
+        // (the cursor, layer-24 overlays) under WindowServer while the
+        // window server names another owner, or none.
+        let rows = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID)
+            as? [[String: Any]] ?? []
+        guard let row = rows.first(where: {
+            ($0[kCGWindowLayer as String] as? Int).map(Windows.isAppWindowLevel) == true
+                && ($0[kCGWindowOwnerPID as String] as? Int).map { $0 > 0 } == true
+        }),
+              let wid = row[kCGWindowNumber as String] as? Int,
+              let cgPid = row[kCGWindowOwnerPID as String] as? Int
+        else { return }   // nothing on screen in this session
+        try expectEqual(WindowServerOwner.pid(of: CGWindowID(wid)), pid_t(cgPid))
+    }
+
+    test("WindowServerOwner.pid is nil for a window id the window server doesn't know") {
+        try expect(WindowServerOwner.pid(of: 0) == nil)
+        try expect(WindowServerOwner.pid(of: 0xFFFF_FFF0) == nil)
     }
 
     test("WindowElementIndex keeps windows a later walk of the same app leaves out") {

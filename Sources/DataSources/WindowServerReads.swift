@@ -41,6 +41,33 @@ private enum SkyLightWindowDisplay {
     static let forRect:   CopyBestManagedDisplayForRectFn? = SkyLight.sym("SLSCopyBestManagedDisplayForRect")
 }
 
+// CGError SLSGetWindowOwner(int cid, uint32 wid, int *ownerCid) and
+// CGError SLSConnectionGetPID(int cid, pid_t *pid), per yabai/src/misc/extern.h.
+private enum SkyLightWindowOwner {
+    typealias GetWindowOwnerFn    = @convention(c) (Int32, UInt32, UnsafeMutablePointer<Int32>) -> Int32
+    typealias ConnectionGetPIDFn  = @convention(c) (Int32, UnsafeMutablePointer<pid_t>) -> Int32
+
+    static let getWindowOwner:   GetWindowOwnerFn?   = SkyLight.sym("SLSGetWindowOwner")
+    static let connectionGetPID: ConnectionGetPIDFn? = SkyLight.sym("SLSConnectionGetPID")
+}
+
+/// The process that owns a window, from the window server: the window's
+/// owning connection, then that connection's pid. Answers for windows
+/// CGWindowList has no dict for.
+enum WindowServerOwner {
+    /// nil when the SPI is missing or the window server doesn't know `wid`.
+    static func pid(of wid: CGWindowID) -> pid_t? {
+        guard wid != 0,
+              let getOwner = SkyLightWindowOwner.getWindowOwner,
+              let getPID = SkyLightWindowOwner.connectionGetPID else { return nil }
+        var ownerCid: Int32 = 0
+        guard getOwner(Overlay.readConnection, UInt32(wid), &ownerCid) == 0, ownerCid != 0 else { return nil }
+        var pid: pid_t = 0
+        guard getPID(ownerCid, &pid) == 0, pid > 0 else { return nil }
+        return pid
+    }
+}
+
 /// The window server's own answer to "which display is this on", as the
 /// display identifier it files the window's space under.
 enum WindowServerDisplay {

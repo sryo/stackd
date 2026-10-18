@@ -579,12 +579,14 @@ struct WindowElementIndex<Element> {
 }
 
 /// Pure resolution order for a window's owning pid: the AX element cache's
-/// owner map first, then `query`, the single-window CGWindowList fallback.
+/// owner map first, then `query`, the single-window CGWindowList fallback,
+/// then `windowServer` for a window CGWindowList has no dict for.
 enum WindowOwnerLookup {
     static func pid<Element>(for windowID: CGWindowID,
                              cached: WindowElementIndex<Element>,
-                             query: (CGWindowID) -> pid_t?) -> pid_t? {
-        cached.pid(for: windowID) ?? query(windowID)
+                             query: (CGWindowID) -> pid_t?,
+                             windowServer: (CGWindowID) -> pid_t?) -> pid_t? {
+        cached.pid(for: windowID) ?? query(windowID) ?? windowServer(windowID)
     }
 }
 
@@ -741,14 +743,16 @@ enum WindowsByID {
 
     /// Owning pid for a window: the AX element cache already knows it for
     /// every window we've touched, so only an unseen window costs a
-    /// single-window CGWindowList query.
+    /// single-window CGWindowList query, and only a window CGWindowList has
+    /// no dict for asks the window server.
     static func ownerPID(windowID: CGWindowID) -> pid_t? {
         cacheLock.lock()
         let cached = axCache
         cacheLock.unlock()
-        return WindowOwnerLookup.pid(for: windowID, cached: cached) { wid in
-            (windowInfo(windowID: wid)?[kCGWindowOwnerPID as String] as? Int).map { pid_t($0) }
-        }
+        return WindowOwnerLookup.pid(
+            for: windowID, cached: cached,
+            query: { wid in (windowInfo(windowID: wid)?[kCGWindowOwnerPID as String] as? Int).map { pid_t($0) } },
+            windowServer: { WindowServerOwner.pid(of: $0) })
     }
 
     @discardableResult

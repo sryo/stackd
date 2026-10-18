@@ -68,6 +68,8 @@ enum SkyLight {
         "SLSCopyManagedDisplayForWindow",
         "SLSCopyBestManagedDisplayForRect",
         "SLSCopyWindowsWithOptionsAndTags",
+        "SLSGetWindowOwner",
+        "SLSConnectionGetPID",
     ]
 
     static func missingSymbols(resolve: (String) -> Bool = { name in
