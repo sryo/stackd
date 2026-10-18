@@ -382,6 +382,52 @@ struct TurnMemo<Value> {
     }
 }
 
+/// The turn numbers the workspace reads share. One focus change fans out to
+/// every stack back to back, and the first read of the window list costs tens
+/// of milliseconds, so a turn must outlive a slow read: it ages out only after
+/// `maxIdle` with no read starting or finishing, not `maxIdle` after it opened.
+/// The main.async that closes the turn can land behind a long queue of other
+/// blocks, which is what the idle limit guards against.
+struct FanoutTurns {
+    private(set) var turn: UInt64 = 0
+    private var open = false
+    private var lastTouch: CFAbsoluteTime = 0
+    let maxIdle: CFAbsoluteTime
+
+    init(maxIdle: CFAbsoluteTime = 0.010) { self.maxIdle = maxIdle }
+
+    /// The turn a read starting at `now` belongs to; `opened` is true when it
+    /// opened one, so the caller schedules the close.
+    mutating func current(now: CFAbsoluteTime) -> (turn: UInt64, opened: Bool) {
+        if open && now - lastTouch > maxIdle {
+            turn &+= 1
+            lastTouch = now
+        }
+        if !open {
+            open = true
+            lastTouch = now
+            return (turn, true)
+        }
+        lastTouch = now
+        return (turn, false)
+    }
+
+    /// A read that started in this turn finished at `now`.
+    mutating func touch(now: CFAbsoluteTime) { lastTouch = now }
+
+    /// The pass that opened the turn is over.
+    mutating func close() {
+        open = false
+        turn &+= 1
+    }
+
+    /// Drop the open turn without a read, so the next read starts fresh.
+    mutating func advance() {
+        open = false
+        turn &+= 1
+    }
+}
+
 /// Workspace state shared by every stack's workspace pushes. One focus
 /// change fans out synchronously to each stack's closures (several per
 /// stack), so within a single main-queue turn the front app, focused
@@ -389,31 +435,24 @@ struct TurnMemo<Value> {
 /// closure per stack. Per-stack dedupe (`lastState`) and deltas stay in
 /// each Bridge. Main thread only.
 enum WorkspaceFanout {
-    private static var turn: UInt64 = 0
-    private static var turnOpen = false
-    private static var turnOpenedAt: CFAbsoluteTime = 0
-    /// A main.async close lands behind whatever is already queued, which
-    /// during a burst of AX work can be hundreds of ms of other blocks —
-    /// cap how long one snapshot can be reused regardless.
-    private static let maxTurnAge: CFAbsoluteTime = 0.010
+    private static var turns = FanoutTurns()
 
     /// The first read in a turn opens it; a main.async closes it, so the
     /// next event's reads start fresh.
     private static func currentTurn() -> UInt64 {
-        let now = CFAbsoluteTimeGetCurrent()
-        if turnOpen && now - turnOpenedAt > maxTurnAge {
-            turn &+= 1
-            turnOpenedAt = now
-        }
-        if !turnOpen {
-            turnOpen = true
-            turnOpenedAt = now
-            DispatchQueue.main.async {
-                turnOpen = false
-                turn &+= 1
-            }
+        let (turn, opened) = turns.current(now: CFAbsoluteTimeGetCurrent())
+        if opened {
+            DispatchQueue.main.async { turns.close() }
         }
         return turn
+    }
+
+    /// Runs a read that may be slow, then marks the turn as still in use so
+    /// the stacks fanned out after it reuse its result.
+    private static func timed<T>(_ read: () -> T) -> T {
+        let value = read()
+        turns.touch(now: CFAbsoluteTimeGetCurrent())
+        return value
     }
 
     private static var frontAppMemo = TurnMemo<String?>()
@@ -421,7 +460,7 @@ enum WorkspaceFanout {
     private static var allMemo = TurnMemo<(snapshot: [[String: Any]], json: String)>()
 
     static func frontAppJSON() -> String? {
-        frontAppMemo.value(turn: currentTurn()) { App.frontmostApp().map(Bridge.jsonify) }
+        frontAppMemo.value(turn: currentTurn()) { timed { App.frontmostApp().map(Bridge.jsonify) } }
     }
 
     /// nil while a confirmed focused-window read is pending (see
@@ -433,23 +472,26 @@ enum WorkspaceFanout {
     private static func focusedEntry() -> (dict: [String: Any]?, json: String)? {
         if FrontmostWindowObserver.shared.awaitingFocusedRead { return nil }
         return focusedMemo.value(turn: currentTurn()) {
-            let w = Windows.focused()
-            return (w, w.map(Bridge.jsonify) ?? "null")
+            timed {
+                let w = Windows.focused()
+                return (w, w.map(Bridge.jsonify) ?? "null")
+            }
         }
     }
 
     /// A confirmed read resolved: open a fresh turn holding `dict`, so the
     /// fan-out the caller fires next serves it without re-reading AX.
     static func deliverFocused(_ dict: [String: Any]?) {
-        turn &+= 1
-        turnOpen = false
+        turns.advance()
         focusedMemo.seed(turn: currentTurn(), value: (dict, dict.map(Bridge.jsonify) ?? "null"))
     }
 
     static func allWindows() -> (snapshot: [[String: Any]], json: String) {
         allMemo.value(turn: currentTurn()) {
-            let snapshot = Windows.all()
-            return (snapshot, Bridge.jsonify(snapshot))
+            timed {
+                let snapshot = Windows.all()
+                return (snapshot, Bridge.jsonify(snapshot))
+            }
         }
     }
 }
