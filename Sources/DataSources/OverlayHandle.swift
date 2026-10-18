@@ -70,9 +70,6 @@ final class OverlayHandle: NSObject, WKNavigationDelegate {
     /// When the panel last moved at the window server without AppKit.
     private var lastServerMoveAt: Double = 0
     private var released: Bool = false
-    // Target size the panel was last fitted to; read by the event-follow
-    // entry to tell a pure move from a resize.
-    private var lastTargetSize: CGSize = .zero
     // The frame the motion engine last wrote for the target while it
     // animates it. Non-nil means the panel follows these writes instead of
     // reading the target's live bounds, which trail the write by the app's
@@ -193,16 +190,6 @@ final class OverlayHandle: NSObject, WKNavigationDelegate {
         if step() { arm() }
     }
 
-    /// One observation of the target: hide the panel when the target is
-    /// gone or hidden, re-show it when it returns, otherwise follow its
-    /// frame. True when anything visible changed.
-    @discardableResult
-    func step() -> Bool {
-        let changed = observe()
-        publishFollowEntry()
-        return changed
-    }
-
     /// A window-server move/resize for the target reached main: step now
     /// rather than on the next vsync, and keep the tick armed behind it.
     func followEvent() {
@@ -227,22 +214,14 @@ final class OverlayHandle: NSObject, WKNavigationDelegate {
     func releaseCommanded() {
         guard commandedFrame != nil else { return }
         commandedFrame = nil
-        publishFollowEntry()
         arm()
     }
 
-    private func publishFollowEntry() {
-        guard OverlayEventFollow.enabled, !released else { return }
-        OverlayEventFollow.publish(self, OverlayFollowEntry(
-            wid: UInt32(targetWID),
-            panelWID: lastFrame == .zero ? 0 : UInt32(max(panel.windowNumber, 0)),
-            outset: outset,
-            targetSize: lastTargetSize,
-            visible: panel.isVisible,
-            commanded: commandedFrame != nil))
-    }
-
-    private func observe() -> Bool {
+    /// One observation of the target: hide the panel when the target is
+    /// gone or hidden, re-show it when it returns, otherwise follow its
+    /// frame. True when anything visible changed.
+    @discardableResult
+    func step() -> Bool {
         if released { return false }
         let traceStart = CFAbsoluteTimeGetCurrent()
         defer { trace.tickEnded(start: traceStart) }
@@ -313,7 +292,6 @@ final class OverlayHandle: NSObject, WKNavigationDelegate {
             lastFrame = .zero
         }
 
-        lastTargetSize = targetFrame.size
         let resizing = resizeDetector.update(size: targetFrame.size, now: now,
                                              buttonDown: Mouse.isLeftButtonDown)
         let fitted = OverlayGeometry.panelFrame(target: targetFrame, outset: outset).size
@@ -340,9 +318,7 @@ final class OverlayHandle: NSObject, WKNavigationDelegate {
         }
 
         let frameOp = OverlayTickPlan.frameOp(next: appKitFrame, last: lastFrame)
-        let eventMoved = OverlayEventFollow.takeApplied(self)
         var reordered = false
-        var alreadyMoved = false
         switch frameOp {
         case .none:
             if OverlayTickPlan.needsAppKitSync(frameOp: frameOp, appKitStale: appKitStale,
@@ -350,14 +326,7 @@ final class OverlayHandle: NSObject, WKNavigationDelegate {
                 syncAppKitFrame()
             }
         case .move(let origin):
-            if OverlayTickPlan.serverAlreadyAt(panelFrame.origin, applied: eventMoved) {
-                // The event path already moved the panel there (z-order
-                // untouched: a pure target move leaves it above).
-                appKitStale = true
-                lastServerMoveAt = now
-                alreadyMoved = true
-                trace.note("event-moved")
-            } else if moveAndOrderAboveTarget(cgsOrigin: panelFrame.origin) {
+            if moveAndOrderAboveTarget(cgsOrigin: panelFrame.origin) {
                 trace.note("move+order")
                 // Straight to the window server, move + z-order in one
                 // transaction: no AppKit round-trip, and no frame where the
@@ -385,7 +354,7 @@ final class OverlayHandle: NSObject, WKNavigationDelegate {
         // cadence — see OverlayRepinPolicy for why the cadence exists.
         if reordered {
             lastReorderAt = now
-        } else if !alreadyMoved, OverlayRepinPolicy.shouldReorder(frameChanged: frameChanged,
+        } else if OverlayRepinPolicy.shouldReorder(frameChanged: frameChanged,
                                                    sinceReorder: now - lastReorderAt) {
             reorderAboveTarget()
             trace.note("reorder")

@@ -1,12 +1,11 @@
 import Foundation
 import CoreGraphics
 
-// Tests for the pure halves of the window-server event follow path in
-// `Sources/DataSources/Overlay.swift`: `OverlayFollowTargets` (which target
-// wids overlays follow) and
-// `OverlayFollowRoute` (what a 806/807 for a tracked target does: move the
-// panel right there, hand off to the main-thread step, or nothing), plus
-// `WindowFrameInterest` in Windows.swift (the connection-wide list).
+// Tests for the pure halves of the window-server event follow path:
+// `OverlayFollowTargets` (which target wids overlays follow), which events
+// `OverlayEventFollow` takes, `OverlayFrameSource` (commanded vs live
+// frame), plus `WindowFrameInterest` in WindowEvents.swift (the
+// connection-wide list).
 
 func registerOverlayEventFollowTests() {
     // MARK: OverlayFollowTargets
@@ -79,63 +78,6 @@ func registerOverlayEventFollowTests() {
         try expect(!t.contains(wid: 200))
     }
 
-    // MARK: OverlayFollowRoute
-
-    let entry = OverlayFollowEntry(wid: 100, panelWID: 7, outset: 4,
-                                   targetSize: CGSize(width: 400, height: 300),
-                                   visible: true)
-    let same = CGRect(x: 50, y: 60, width: 400, height: 300)
-
-    test("OverlayFollowRoute: a pure move of a visible target moves the panel now") {
-        try expectEqual(OverlayFollowRoute.action(for: .moved(wid: 100), entry: entry, bounds: same),
-                        .moveNow(CGPoint(x: 46, y: 56)))
-    }
-
-    test("OverlayFollowRoute: a move that also changed the size goes to main") {
-        let grown = CGRect(x: 50, y: 60, width: 420, height: 300)
-        try expectEqual(OverlayFollowRoute.action(for: .moved(wid: 100), entry: entry, bounds: grown),
-                        .stepOnMain)
-    }
-
-    test("OverlayFollowRoute: sub-half-point size jitter still counts as a pure move") {
-        let jitter = CGRect(x: 50, y: 60, width: 400.3, height: 299.8)
-        try expectEqual(OverlayFollowRoute.action(for: .moved(wid: 100), entry: entry, bounds: jitter),
-                        .moveNow(CGPoint(x: 46, y: 56)))
-    }
-
-    test("OverlayFollowRoute: resize always goes to main") {
-        try expectEqual(OverlayFollowRoute.action(for: .resized(wid: 100), entry: entry, bounds: same),
-                        .stepOnMain)
-    }
-
-    test("OverlayFollowRoute: a hidden panel goes to main (moving would not re-show it)") {
-        var hidden = entry
-        hidden.visible = false
-        try expectEqual(OverlayFollowRoute.action(for: .moved(wid: 100), entry: hidden, bounds: same),
-                        .stepOnMain)
-    }
-
-    test("OverlayFollowRoute: unreadable bounds go to main") {
-        try expectEqual(OverlayFollowRoute.action(for: .moved(wid: 100), entry: entry, bounds: nil),
-                        .stepOnMain)
-    }
-
-    test("OverlayFollowRoute: a panel never placed yet goes to main") {
-        var unplaced = entry
-        unplaced.panelWID = 0
-        try expectEqual(OverlayFollowRoute.action(for: .moved(wid: 100), entry: unplaced, bounds: same),
-                        .stepOnMain)
-    }
-
-    test("OverlayFollowRoute: a target under a daemon animation ignores window-server moves") {
-        var commanded = entry
-        commanded.commanded = true
-        try expectEqual(OverlayFollowRoute.action(for: .moved(wid: 100), entry: commanded, bounds: same),
-                        .ignore)
-        try expectEqual(OverlayFollowRoute.action(for: .resized(wid: 100), entry: commanded, bounds: same),
-                        .ignore)
-    }
-
     // MARK: OverlayFrameSource
 
     test("OverlayFrameSource: while animating the commanded frame wins and the live read is skipped") {
@@ -155,22 +97,11 @@ func registerOverlayEventFollowTests() {
         try expectEqual(OverlayFrameSource.targetFrame(commanded: nil) { nil }, nil)
     }
 
-    test("OverlayFollowRoute: events for another wid are ignored") {
-        try expectEqual(OverlayFollowRoute.action(for: .moved(wid: 999), entry: entry, bounds: same),
-                        .ignore)
-    }
-
-    test("OverlayFollowRoute: non-frame events are ignored") {
-        try expectEqual(OverlayFollowRoute.action(for: .reordered(wid: 100), entry: entry, bounds: same),
-                        .ignore)
-        try expectEqual(OverlayFollowRoute.action(for: .destroyed(wid: 100), entry: entry, bounds: same),
-                        .ignore)
-    }
-
-    test("OverlayFollowRoute.frameEventWID picks out 806/807 only") {
-        try expectEqual(OverlayFollowRoute.frameEventWID(.moved(wid: 5)), 5)
-        try expectEqual(OverlayFollowRoute.frameEventWID(.resized(wid: 6)), 6)
-        try expectEqual(OverlayFollowRoute.frameEventWID(.reordered(wid: 7)), nil)
+    test("OverlayEventFollow.frameEventWID picks out 806/807 only") {
+        try expectEqual(OverlayEventFollow.frameEventWID(.moved(wid: 5)), 5)
+        try expectEqual(OverlayEventFollow.frameEventWID(.resized(wid: 6)), 6)
+        try expectEqual(OverlayEventFollow.frameEventWID(.reordered(wid: 7)), nil)
+        try expectEqual(OverlayEventFollow.frameEventWID(.destroyed(wid: 8)), nil)
     }
 
     // MARK: WindowFrameInterest
@@ -191,39 +122,5 @@ func registerOverlayEventFollowTests() {
 
     test("OverlayEventFollow.flagEnabled: STACKD_OVERLAY_EVENTS=0 is the kill switch") {
         try expect(!OverlayEventFollow.flagEnabled(["STACKD_OVERLAY_EVENTS": "0"]))
-    }
-
-    // MARK: stale entries
-
-    test("OverlayFollowTargets.wid(for:) is nil once the target was destroyed") {
-        var t = OverlayFollowTargets<Int>()
-        _ = t.set(1, wid: 100)
-        try expectEqual(t.wid(for: 1), 100)
-        _ = t.drop(wid: 100)
-        try expectEqual(t.wid(for: 1), nil)
-    }
-
-    test("OverlayFollowTargets.wid(for:) follows a retarget and forgets a detach") {
-        var t = OverlayFollowTargets<Int>()
-        _ = t.set(1, wid: 100)
-        _ = t.set(1, wid: 200)
-        try expectEqual(t.wid(for: 1), 200)
-        _ = t.remove(1)
-        try expectEqual(t.wid(for: 1), nil)
-    }
-
-    // MARK: off-main move already applied
-
-    test("OverlayTickPlan: a move the event path already applied is skipped") {
-        try expect(OverlayTickPlan.serverAlreadyAt(CGPoint(x: 46, y: 56),
-                                                   applied: CGPoint(x: 46, y: 56)))
-        try expect(OverlayTickPlan.serverAlreadyAt(CGPoint(x: 46.2, y: 55.8),
-                                                   applied: CGPoint(x: 46, y: 56)))
-    }
-
-    test("OverlayTickPlan: a move to anywhere else still runs") {
-        try expect(!OverlayTickPlan.serverAlreadyAt(CGPoint(x: 50, y: 56),
-                                                    applied: CGPoint(x: 46, y: 56)))
-        try expect(!OverlayTickPlan.serverAlreadyAt(CGPoint(x: 46, y: 56), applied: nil))
     }
 }

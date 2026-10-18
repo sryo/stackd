@@ -162,14 +162,6 @@ enum OverlayTickPlan {
         appKitStale && frameOp == .none && sinceLastServerMove >= appKitSyncSettle
     }
 
-    /// True when the window-server event path already moved the panel to
-    /// `cgsOrigin` (`applied`, CGS top-left), so the tick's own move
-    /// transaction would repeat it.
-    static func serverAlreadyAt(_ cgsOrigin: CGPoint, applied: CGPoint?) -> Bool {
-        guard let a = applied else { return false }
-        return abs(a.x - cgsOrigin.x) < 0.5 && abs(a.y - cgsOrigin.y) < 0.5
-    }
-
     /// Whether the panel keeps OverlayHeadroom's spare room instead of being
     /// fitted to the target: during a live resize, and while the motion
     /// engine animates the target. A fitted panel is an AppKit resize on
@@ -522,10 +514,6 @@ struct OverlayFollowTargets<Key: Hashable> {
     var wids: [UInt32] { Array(Set(byKey.values)).sorted() }
 
     func contains(wid: UInt32) -> Bool { byKey.values.contains(wid) }
-
-    /// The wid `key` currently follows; nil once detached or its target
-    /// was destroyed.
-    func wid(for key: Key) -> UInt32? { byKey[key] }
 
     /// Point `key` at `wid` (attach or retarget).
     mutating func set(_ key: Key, wid: UInt32) -> Bool {
