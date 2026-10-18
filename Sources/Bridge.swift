@@ -410,17 +410,7 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         // — gating both the source and the fan-out on the same manifest
         // field was a single point of failure. AX is primary, the poll
         // is the drift sensor.)
-        for (permission, start) in Bridge.channelStarters
-        where manifest.permissions.contains(permission) {
-            start(self)
-        }
-        // Workspace is the one combined starter: "app" and "windows" share
-        // an observer with per-permission payload gating, so it can't be a
-        // single-permission table row.
-        if manifest.permissions.contains("app") || manifest.permissions.contains("windows") {
-            startWorkspace(includeApp: manifest.permissions.contains("app"),
-                           includeWindows: manifest.permissions.contains("windows"))
-        }
+        startChannels(permissions: manifest.permissions)
         if let hks = manifest.hotkeys {
             for hk in hks {
                 let cb = hk.callback

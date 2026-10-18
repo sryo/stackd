@@ -1,48 +1,43 @@
 import AppKit
 
-/// Channel starters — extracted from Bridge.swift in the A8 breakup round.
-/// `channelStarters` is the permission → starter table walked by
-/// `start(manifest:)`; `startChannel` is the generic prime-dedupe-push
-/// helper; the `startXxx()` methods wire each observer to its sd.* channel.
+/// Channel producers run by `start(manifest:)`: `startChannels` starts every
+/// channel the manifest's permissions grant — each `Channel.feed` through
+/// the generic `startChannel` prime-dedupe-push helper, plus the bespoke
+/// starters below for channels a single observer + snapshot can't express.
 /// `replayState()` stays in Bridge.swift (lifecycle, not a starter).
-///
-/// The starters were `private func` in Bridge.swift; `private` doesn't
-/// cross files, so they're internal here. The per-channel caches they
-/// read/write (`lastState`, the delta caches, `channelIntervals`,
-/// `lastChannelPushedAt`, `windowsListPump`) were widened from
-/// private/fileprivate to internal in Bridge.swift for the same reason.
 extension Bridge {
-    /// Permission → channel-starter table walked by `start(manifest:)`.
-    /// One row per channel-vending permission ("app"/"windows" share
-    /// `startWorkspace` and are handled separately). The same-commit guard
-    /// is ChannelStartersTests: every replayable channel in `Channels.all`
-    /// must have its permission here (or be workspace-served) — a new
-    /// `Channel(...)` without a starter would compile fine but silently
-    /// never replay.
-    static let channelStarters: [(permission: String, start: (Bridge) -> Void)] = [
-        ("battery",     { $0.startBattery() }),
-        ("mouse",       { $0.startMouse() }),
-        ("appearance",  { $0.startAppearance() }),
-        ("input",       { $0.startInput() }),
-        ("net",         { $0.startNetwork(); $0.startNetworkThroughput() }),
-        ("audio",       { $0.startAudio() }),
+    /// Permission → bespoke starter for channels without a `Channel.feed`:
+    /// several channels from one observer (net), deltas computed alongside
+    /// the snapshot (display, apps, menubar), or an async snapshot (media).
+    /// "app"/"windows" share `startWorkspace` and are handled separately.
+    /// The same-commit guard is ChannelStartersTests: every replayable
+    /// channel needs a feed or a starter here, or it would compile fine but
+    /// silently never replay.
+    static let customChannelStarters: [(permission: String, start: (Bridge) -> Void)] = [
+        ("net",         { $0.startNetwork() }),
         ("display",     { $0.startDisplay() }),
         ("media",       { $0.startMedia() }),
-        ("calendar",    { $0.startCalendar() }),
-        ("privacy",     { $0.startPrivacy() }),
-        ("pasteboard",  { $0.startPasteboard() }),
         ("apps",        { $0.startApps() }),
-        ("spaces",      { $0.startSpaces() }),
-        ("caffeinate",  { $0.startCaffeinate() }),
-        ("sensors",     { $0.startSensors() }),
-        ("location",    { $0.startLocation() }),
-        ("usb",         { $0.startUSB() }),
-        ("camera",      { $0.startCamera() }),
-        ("host",        { $0.startHost() }),
-        ("touchdevice", { $0.startTouchDevice() }),
-        ("displayLink", { $0.startDisplayLink() }),
         ("menubar",     { $0.startMenubarItems() }),
     ]
+
+    /// Starts every channel producer `permissions` grants.
+    func startChannels(permissions: [String]) {
+        for ch in Channels.all where permissions.contains(ch.permission) {
+            guard let feed = ch.feed else { continue }
+            startChannel(name: ch.name, observer: feed.observer(), snapshot: feed.snapshot)
+        }
+        for (permission, start) in Bridge.customChannelStarters where permissions.contains(permission) {
+            start(self)
+        }
+        // Workspace is the one combined starter: "app" and "windows" share
+        // an observer with per-permission payload gating, so it can't be a
+        // single-permission table row.
+        if permissions.contains("app") || permissions.contains("windows") {
+            startWorkspace(includeApp: permissions.contains("app"),
+                           includeWindows: permissions.contains("windows"))
+        }
+    }
 
     /// Wire a snapshot-driven channel: prime once, then refire on every
     /// observer tick. Returning nil from `snapshot` skips the push — matches
@@ -80,58 +75,6 @@ extension Bridge {
         scope.adopt(observer.subscribe(pushFn))
     }
 
-    func startBattery() {
-        startChannel(name: "battery", observer: BatteryObserver.shared) {
-            // Additive: existing `percent` / `charging` keys keep their shape
-            // and position; the deep IOKit readings (IOPS dict + AppleSmart-
-            // Battery IORegistry) follow as optional fields. Each nil-able
-            // value goes through `?? NSNull()` so the JSON serializer emits
-            // `null` rather than dropping the key — stack authors see the
-            // same field shape on desktops (no battery) and on MacBooks
-            // alike.
-            [
-                "percent": Battery.percent(),
-                "charging": Battery.isCharging(),
-                "cycles": Battery.cycles() as Any? ?? NSNull(),
-                "health": Battery.health() as Any? ?? NSNull(),
-                "designCapacity": Battery.designCapacity() as Any? ?? NSNull(),
-                "maxCapacity": Battery.maxCapacity() as Any? ?? NSNull(),
-                "currentCapacity": Battery.currentCapacity() as Any? ?? NSNull(),
-                "amperage": Battery.amperage() as Any? ?? NSNull(),
-                "voltage": Battery.voltage() as Any? ?? NSNull(),
-                "timeRemaining": Battery.timeRemaining() as Any? ?? NSNull(),
-                "isFinishingCharge": Battery.isFinishingCharge() as Any? ?? NSNull(),
-            ]
-        }
-    }
-
-    func startMouse() {
-        // Truncate to Int for the dedupe — sub-pixel jitter would otherwise
-        // push every tick. Matches the original ad-hoc interpolation.
-        // Enrich with the containing display so stacks don't reimplement the
-        // O(displays) forPoint loop on every tick. Display.forPoint is cheap
-        // (NSScreen.screens iteration, no DDC); on a typical 1-2 display
-        // setup this is sub-microsecond.
-        startChannel(name: "mouse", observer: MouseObserver.shared) {
-            let p = Mouse.location()
-            var payload: [String: Any] = ["x": Int(p.x), "y": Int(p.y)]
-            if let d = Display.forPoint(p) { payload["display"] = d }
-            return payload
-        }
-    }
-
-    func startAppearance() {
-        startChannel(name: "appearance", observer: AppearanceObserver.shared) {
-            Appearance.current()
-        }
-    }
-
-    func startInput() {
-        startChannel(name: "inputLayout", observer: InputObserver.shared) {
-            Input.currentLayout()
-        }
-    }
-
     // Multi-channel: one observer (NetworkObserver) feeds three sd.net.*
     // channels. Each branch independently dedupes against lastState so a wifi
     // SSID change doesn't refire lan / path. Keeps its bespoke shape rather
@@ -165,40 +108,6 @@ extension Bridge {
         }
         pushFn()
         scope.adopt(NetworkObserver.shared.subscribe(pushFn))
-    }
-
-    // Aggregate throughput across non-loopback interfaces. Replaces the
-    // `netstat -ib` setInterval(1s) in bar/items/throughput.js — observer
-    // owns the diff math + previous-sample cache so multiple stack
-    // subscribers all read the same rate per tick (the previous JS-side
-    // version recomputed per stack, drifting its baseline each call).
-    func startNetworkThroughput() {
-        startChannel(name: "netThroughput", observer: NetworkThroughputObserver.shared) {
-            NetworkThroughputObserver.shared.current
-        }
-    }
-
-    func startAudio() {
-        startChannel(name: "audioOutput", observer: AudioObserver.shared) {
-            Audio.current()
-        }
-        // Mirror channel for the default input device. Separate observer
-        // because each AudioObserver / AudioInputObserver owns its own
-        // listener-block refs and default-device selector — splitting keeps
-        // an input device change from re-firing the output channel and vice
-        // versa.
-        startChannel(name: "audioInput", observer: AudioInputObserver.shared) {
-            Audio.currentInput()
-        }
-        // Per-process audio enumeration (CoreAudio process objects, 14.4+).
-        // AudioProcessesObserver is hybrid: event-driven on the process list
-        // (add/remove), 1s poll on per-process IsRunningOutput (CoreAudio's
-        // listener for that property doesn't fire reliably). Pairs with
-        // sd.media.nowPlaying for the rich-active-pill + bare-secondary-
-        // pill multi-client bar UI.
-        startChannel(name: "audioProcesses", observer: AudioProcessesObserver.shared) {
-            AudioProcesses.snapshot()
-        }
     }
 
     func startDisplay() {
@@ -257,35 +166,6 @@ extension Bridge {
         scope.adopt(MediaObserver.shared.subscribe(pushFn))
     }
 
-    // Store-change ping channel: EKEventStoreChanged fires when any app
-    // (Calendar.app, Reminders, an MDM sync, this daemon's own createEvent)
-    // writes to the EventKit database. Apple's docs note the notification's
-    // userInfo dict is always empty — there's no delta to ship. We push a
-    // monotonic timestamp so the channel's dedupe (lastState string compare)
-    // doesn't suppress repeat changes; JS subscribers re-fetch on every
-    // signal. Cheap fire-and-forget for stacks that want to keep an agenda
-    // view live without polling.
-    func startCalendar() {
-        startChannel(name: "calendarChanged", observer: CalendarObserver.shared) {
-            // Payload is just a fresh timestamp so re-emission dedupe never
-            // suppresses a real store change. JS doesn't read the value —
-            // the channel is treated as a bell, not a snapshot.
-            ["ts": Date().timeIntervalSince1970]
-        }
-    }
-
-    // Privacy — polled 2s observer pushes the cross-categorical
-    // "what's recording" snapshot whenever the active set changes.
-    // startChannel's lastState dedupe handles the steady-state case
-    // (nothing recording → same payload tick after tick → no push).
-    // The snapshot itself reads AVCaptureDevice + CoreAudio property
-    // APIs; neither triggers a TCC prompt.
-    func startPrivacy() {
-        startChannel(name: "privacy", observer: PrivacyObserver.shared) {
-            Privacy.recording()
-        }
-    }
-
     // sd.menubar.observe — AX-walk the menubar every 2s, diff against the
     // last push, fire on change. AX has no reliable push notification for
     // status-item add/remove, so this is poll-and-diff via startChannel's
@@ -324,16 +204,6 @@ extension Bridge {
         scope.adopt(MenubarItemsObserver.shared.subscribe(pushFn))
     }
 
-    func startPasteboard() {
-        startChannel(name: "pasteboard", observer: PasteboardObserver.shared) {
-            // The signal payload is the current string (or null) — that's what
-            // every consumer (CloudPad URL copy, Palette clipboard verbs,
-            // Muse paste-at-caret) actually wants.
-            let s = Pasteboard.getString() ?? ""
-            return ["text": s, "changeCount": Pasteboard.changeCount]
-        }
-    }
-
     // Custom: snapshot has a side effect (computing the apps.changed delta
     // vs lastAppsByBundle) and emits a second channel. Doesn't fit
     // startChannel.
@@ -364,70 +234,6 @@ extension Bridge {
         }
         pushFn()
         scope.adopt(AppsObserver.shared.subscribe(pushFn))
-    }
-
-    func startSpaces() {
-        startChannel(name: "spaces", observer: SpacesObserver.shared) {
-            Spaces.all()
-        }
-    }
-
-    func startCaffeinate() {
-        startChannel(name: "caffeinate", observer: CaffeinateObserver.shared) {
-            Caffeinate.snapshot()
-        }
-    }
-
-    func startDisplayLink() {
-        // First-tick nil (vsync hasn't landed yet) → snapshot returns nil →
-        // startChannel skips the push.
-        startChannel(name: "displayLink", observer: DisplayLinkObserver.shared) {
-            DisplayLink.snapshot()
-        }
-    }
-
-    func startSensors() {
-        startChannel(name: "sensors", observer: SensorsObserver.shared) {
-            Sensors.snapshot()
-        }
-    }
-
-    func startLocation() {
-        // snapshot() is nil until authorization + first fix; emit an explicit
-        // "null" so the JS channel sees that initial state instead of staying
-        // un-fired. Wrap in [NSNull()] sentinel to flow through jsonify as
-        // "null".
-        startChannel(name: "location", observer: LocationObserver.shared) {
-            return Location.snapshot() ?? NSNull()
-        }
-    }
-
-    func startUSB() {
-        startChannel(name: "usb", observer: USBObserver.shared) {
-            USB.snapshot()
-        }
-    }
-
-    func startCamera() {
-        startChannel(name: "camera", observer: CameraObserver.shared) {
-            Camera.snapshot()
-        }
-    }
-
-    func startHost() {
-        // First tick returns nil — CPU fractions need a prior sample to diff
-        // against. startChannel skips the push; the next 2s tick has the value.
-        startChannel(name: "hostLoad", observer: HostObserver.shared) {
-            Host.loadSnapshot()
-        }
-    }
-
-    func startTouchDevice() {
-        // No-frame state (untouched trackpad before first event) → nil →
-        // startChannel skips. JS sees the channel stay at its null initial.
-        startChannel(name: "touchdevice", observer: TouchDeviceObserver.shared) {
-            TouchDevice.snapshot()
-        }
     }
 
     // Dual-observer: NSWorkspace activations + per-pid FrontmostWindowObserver

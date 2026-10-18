@@ -21,6 +21,21 @@ func registerPermissionsRegistryTests() {
             "Bridge.primitives declares permissions absent from Permissions.all: \(missing.sorted())")
     }
 
+    test("Permissions.all is exactly the primitive, channel and composite permissions") {
+        // A permission nothing gates is dead weight the doctor would accept;
+        // a gate missing from the registry could never be granted.
+        let gated = Bridge.primitivePermissions
+            .union(Channels.all.map(\.permission))
+            .union(Permissions.composite)
+        try expectEqual(Permissions.all.sorted(), gated.sorted())
+    }
+
+    test("composite permissions are never inferred") {
+        try expect(!Permissions.composite.isEmpty, "menubar.item is the shipped composite")
+        try expectEqual(Permissions.inferable.intersection(Permissions.composite).sorted(), [])
+        try expectEqual(Permissions.inferable.union(Permissions.composite).sorted(), Permissions.all.sorted())
+    }
+
     test("StackDoctor accepts every permission in Permissions.all") {
         // Whole-pipeline check: feed each registry entry through the doctor
         // and assert it's accepted. Catches the bug where someone narrows
