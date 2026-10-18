@@ -13,3 +13,6 @@ aaa0cd4	guarded	Tests/PermissionsRegistryTests.swift: StackDoctor accepts every 
 30ac049	guarded	Tests/PermissionsRegistryTests.swift: StackDoctor accepts every permission in Permissions.all
 4edb8be	guarded	Tests/SafePredicateTests.swift
 583eb44	obsolete	the CGContext overlay was replaced by WebKit overlay panels
+bbd6439	guarded	Tests/SourceInvariantTests.swift: HotkeyRegistry.bind shares one Carbon registration per chord and only the last release unregisters (source check)
+d109864	guarded	Tests/SourceInvariantTests.swift: every lastState write is Bridge.jsonify output, never a literal marker (source check)
+872c746	guarded	Tests/SourceInvariantTests.swift: every activate(options:) call includes .activateIgnoringOtherApps (source check)

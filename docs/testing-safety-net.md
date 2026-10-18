@@ -74,10 +74,12 @@ test in the same commit. `scripts/regression-ledger.guards` is the hand-kept
 part: fixes guarded since by a later test, or whose code is gone. Everything
 else is **unguarded** and ranks by file in `docs/regression-ledger.md`.
 
-At `2d6df7b`: 60 fixes, 47 with a same-commit test, 4 guarded since or
-obsolete (`6a11d14` and `a142a3e` by the two tests below), 9 unguarded, 6 of
-them in code. Paths are as of the fix: `Sources/Bridge.swift` fixes may live
-in `Sources/BridgeOverlay.swift` now.
+At `acff315`: 61 fixes, 52 with a same-commit test, 5 guarded since or
+obsolete, 4 unguarded, 1 of them in code (`dc867a5`, signing). The window is
+the last 200 commits; `a6098df` (setFrameProbed readback) and `a2f7b15`
+(synchronous detach) are older than it now and are still unguarded. Paths
+are as of the fix: `Sources/Bridge.swift` fixes may live in
+`Sources/BridgeOverlay.swift` now.
 
 The five unguarded areas that pure logic can cover, and the test each needs:
 
@@ -94,27 +96,38 @@ The five unguarded areas that pure logic can cover, and the test each needs:
 3. **Hotkey chord sharing** (`bbd6439`: N per-display instances binding one
    chord; `e2f8a73`: `excludeApps`). Not testable through
    `HotkeyRegistry.bind` without registering a live Carbon hotkey, which
-   `InputTests` rules out. Extract the combo ref-count into a value type
+   `InputTests` rules out. Written: `Tests/SourceInvariantTests.swift` — a
+   source check that `bind` looks up an existing registration of the chord
+   before it calls `RegisterEventHotKey`, that every Token it returns
+   releases through the reference count, and that only the last release
+   calls `unbind(id:)`. It sees the shape of the code, not the behavior;
+   the stronger test needs the combo ref-count extracted into a value type
    (`bind(combo) → .register | .share`, `release(combo) → .keep |
-   .unregister`) and test: two binds of one chord register once; the first
-   release keeps it; the last release unregisters; a different modifier set
-   is a different chord. Same extraction for the app gate:
-   `apps`/`excludeApps` compose (both must pass).
+   .unregister`) so two binds of one chord register once, the first
+   release keeps it, the last unregisters, and a different modifier set is
+   a different chord. Same extraction for the app gate: `apps`/`excludeApps`
+   compose (both must pass).
 4. **Replay payloads are JSON** (`d109864`: a non-JSON `"primed"` marker in
-   `lastState` became a ReferenceError on every replay). Extract replay's
-   payload selection into a pure function of `(lastState, permissions)`
-   and test that every pushed payload parses with `JSONSerialization`, that
-   a channel without a snapshot pushes nothing, and that `windowsChanged`
+   `lastState` became a ReferenceError on every replay). Written:
+   `Tests/SourceInvariantTests.swift` — a source check that every
+   `lastState[...] =` write stores a variable or `Bridge.jsonify(...)`
+   result, never a literal. The stronger test extracts replay's payload
+   selection into a pure function of `(lastState, permissions)` and checks
+   that every pushed payload parses with `JSONSerialization`, that a
+   channel without a snapshot pushes nothing, and that `windowsChanged`
    pushes nothing before its first real delta.
 5. **Never activate stackd** (`52db285`, and CLAUDE.md's "no
-   `NSApp.activate` anywhere"). A source check like (2): no
-   `NSApp.activate` / `activate(ignoringOtherApps:)` on the daemon's own
-   app in `Sources/`. `apps.focus` activating *another* app (`872c746`)
-   stays a live check.
+   `NSApp.activate` anywhere"; `872c746`: `focus()` needs
+   `.activateIgnoringOtherApps` to move another app forward from an
+   accessory process). Written: `Tests/SourceInvariantTests.swift` — no
+   `NSApp.activate`, `activate(ignoringOtherApps:)` or
+   `NSRunningApplication.current.activate` in `Sources/`, the only
+   activation policy is `.accessory`, and every `activate(options:)` on
+   another app includes `.activateIgnoringOtherApps`.
 
 The remaining unguarded fixes (`a6098df` setFrameProbed readback,
-`a2f7b15` synchronous detach, `872c746` focus activation, `dc867a5`
-signing) touch AX, AppKit or codesign; L5 covers them.
+`a2f7b15` synchronous detach, `dc867a5` signing) touch AX, AppKit or
+codesign; L5 covers them.
 
 ## L3 — stack compatibility
 
