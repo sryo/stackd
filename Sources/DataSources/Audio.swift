@@ -92,11 +92,7 @@ enum Audio {
     /// `sd.audio.devices` — id is the AudioDeviceID as Int so JS can pass
     /// it back through `setDefaultDevice`.
     static func devices(scope: Scope) -> [[String: Any]] {
-        var addr = AudioObjectPropertyAddress(
-            mSelector: kAudioHardwarePropertyDevices,
-            mScope:    kAudioObjectPropertyScopeGlobal,
-            mElement:  kAudioObjectPropertyElementMain
-        )
+        var addr = address(kAudioHardwarePropertyDevices)
         var dataSize: UInt32 = 0
         guard AudioObjectGetPropertyDataSize(
                 AudioObjectID(kAudioObjectSystemObject), &addr, 0, nil, &dataSize) == noErr,
@@ -139,11 +135,7 @@ enum Audio {
 
     @discardableResult
     static func setDefaultDevice(id: AudioDeviceID, scope: Scope) -> Bool {
-        var addr = AudioObjectPropertyAddress(
-            mSelector: scope.defaultDeviceSelector,
-            mScope:    kAudioObjectPropertyScopeGlobal,
-            mElement:  kAudioObjectPropertyElementMain
-        )
+        var addr = address(scope.defaultDeviceSelector)
         var deviceID = id
         let err = AudioObjectSetPropertyData(
             AudioObjectID(kAudioObjectSystemObject), &addr, 0, nil,
@@ -164,11 +156,7 @@ enum Audio {
     private static func defaultDevice(scope: Scope) -> AudioDeviceID? {
         var id: AudioDeviceID = 0
         var size = UInt32(MemoryLayout.size(ofValue: id))
-        var addr = AudioObjectPropertyAddress(
-            mSelector: scope.defaultDeviceSelector,
-            mScope:    kAudioObjectPropertyScopeGlobal,
-            mElement:  kAudioObjectPropertyElementMain
-        )
+        var addr = address(scope.defaultDeviceSelector)
         let err = AudioObjectGetPropertyData(
             AudioObjectID(kAudioObjectSystemObject), &addr, 0, nil, &size, &id)
         return (err == noErr && id != 0) ? id : nil
@@ -212,42 +200,26 @@ enum Audio {
     }
 
     static func name(of id: AudioDeviceID) -> String? {
-        var name: Unmanaged<CFString>?
-        var size = UInt32(MemoryLayout<Unmanaged<CFString>>.size)
-        var addr = AudioObjectPropertyAddress(
-            mSelector: kAudioObjectPropertyName,
-            mScope:    kAudioObjectPropertyScopeGlobal,
-            mElement:  kAudioObjectPropertyElementMain
-        )
-        let err = AudioObjectGetPropertyData(id, &addr, 0, nil, &size, &name)
-        guard err == noErr, let n = name?.takeRetainedValue() else { return nil }
-        return n as String
+        string(of: id, selector: kAudioObjectPropertyName)
     }
 
     private static func manufacturer(of id: AudioDeviceID) -> String? {
-        var name: Unmanaged<CFString>?
-        var size = UInt32(MemoryLayout<Unmanaged<CFString>>.size)
-        var addr = AudioObjectPropertyAddress(
-            mSelector: kAudioObjectPropertyManufacturer,
-            mScope:    kAudioObjectPropertyScopeGlobal,
-            mElement:  kAudioObjectPropertyElementMain
-        )
-        let err = AudioObjectGetPropertyData(id, &addr, 0, nil, &size, &name)
-        guard err == noErr, let n = name?.takeRetainedValue() else { return nil }
-        return n as String
+        string(of: id, selector: kAudioObjectPropertyManufacturer)
     }
 
     private static func uid(of id: AudioDeviceID) -> String? {
-        var name: Unmanaged<CFString>?
+        string(of: id, selector: kAudioDevicePropertyDeviceUID)
+    }
+
+    /// Reads a CFString-valued global-scope property off `id`. CoreAudio
+    /// hands back a retained reference, so ownership transfers to the caller.
+    private static func string(of id: AudioDeviceID, selector: AudioObjectPropertySelector) -> String? {
+        var value: Unmanaged<CFString>?
         var size = UInt32(MemoryLayout<Unmanaged<CFString>>.size)
-        var addr = AudioObjectPropertyAddress(
-            mSelector: kAudioDevicePropertyDeviceUID,
-            mScope:    kAudioObjectPropertyScopeGlobal,
-            mElement:  kAudioObjectPropertyElementMain
-        )
-        let err = AudioObjectGetPropertyData(id, &addr, 0, nil, &size, &name)
-        guard err == noErr, let n = name?.takeRetainedValue() else { return nil }
-        return n as String
+        var addr = address(selector)
+        let err = AudioObjectGetPropertyData(id, &addr, 0, nil, &size, &value)
+        guard err == noErr, let s = value?.takeRetainedValue() else { return nil }
+        return s as String
     }
 
     /// Decoded transport type (USB / Bluetooth / Built-in / Aggregate / HDMI / ...).
@@ -256,11 +228,7 @@ enum Audio {
     private static func transportType(of id: AudioDeviceID) -> String? {
         var t: UInt32 = 0
         var size = UInt32(MemoryLayout.size(ofValue: t))
-        var addr = AudioObjectPropertyAddress(
-            mSelector: kAudioDevicePropertyTransportType,
-            mScope:    kAudioObjectPropertyScopeGlobal,
-            mElement:  kAudioObjectPropertyElementMain
-        )
+        var addr = address(kAudioDevicePropertyTransportType)
         guard AudioObjectHasProperty(id, &addr),
               AudioObjectGetPropertyData(id, &addr, 0, nil, &size, &t) == noErr else { return nil }
         switch t {
@@ -288,55 +256,74 @@ enum Audio {
     /// every device under the system object regardless of direction, so this
     /// filter is what makes `devices(scope: .input)` return only mics.
     private static func hasStreams(id: AudioDeviceID, scope: Scope) -> Bool {
-        var addr = AudioObjectPropertyAddress(
-            mSelector: kAudioDevicePropertyStreams,
-            mScope:    scope.coreAudioScope,
-            mElement:  kAudioObjectPropertyElementMain
-        )
+        var addr = address(kAudioDevicePropertyStreams, scope: scope.coreAudioScope)
         var size: UInt32 = 0
         guard AudioObjectGetPropertyDataSize(id, &addr, 0, nil, &size) == noErr else { return false }
         return size > 0
     }
 
-    // Per-scope address builders. AudioObjectPropertyAddress is a value
-    // type — building one inline is cheap, and avoiding the two cached
-    // statics keeps the input/output paths from accidentally sharing a
-    // mutable address that one of them then races to change.
-    static func volumeAddress(scope: Scope) -> AudioObjectPropertyAddress {
+    /// A property address with CoreAudio's usual defaults: global scope, main
+    /// element. A value type, so each call site builds its own rather than
+    /// sharing a mutable address that CoreAudio calls take `inout`.
+    static func address(
+        _ selector: AudioObjectPropertySelector,
+        scope: AudioObjectPropertyScope = kAudioObjectPropertyScopeGlobal
+    ) -> AudioObjectPropertyAddress {
         AudioObjectPropertyAddress(
-            mSelector: kAudioHardwareServiceDeviceProperty_VirtualMainVolume,
-            mScope:    scope.coreAudioScope,
-            mElement:  kAudioObjectPropertyElementMain
-        )
-    }
-    static func muteAddress(scope: Scope) -> AudioObjectPropertyAddress {
-        AudioObjectPropertyAddress(
-            mSelector: kAudioDevicePropertyMute,
-            mScope:    scope.coreAudioScope,
+            mSelector: selector,
+            mScope:    scope,
             mElement:  kAudioObjectPropertyElementMain
         )
     }
 
-    // Back-compat statics for AudioObserver's listener-block remove path,
-    // which compares property-address selector+scope at unbind time. Kept
-    // as `static var` (rather than recomputed inline) so
-    // `&Audio.mainVolumeAddress` can be passed directly to CoreAudio,
-    // preserving the same call shape for the output observer.
-    static var mainVolumeAddress = AudioObjectPropertyAddress(
-        mSelector: kAudioHardwareServiceDeviceProperty_VirtualMainVolume,
-        mScope:    kAudioDevicePropertyScopeOutput,
-        mElement:  kAudioObjectPropertyElementMain
-    )
-    static var muteAddress = AudioObjectPropertyAddress(
-        mSelector: kAudioDevicePropertyMute,
-        mScope:    kAudioDevicePropertyScopeOutput,
-        mElement:  kAudioObjectPropertyElementMain
+    static func volumeAddress(scope: Scope) -> AudioObjectPropertyAddress {
+        address(kAudioHardwareServiceDeviceProperty_VirtualMainVolume, scope: scope.coreAudioScope)
+    }
+    static func muteAddress(scope: Scope) -> AudioObjectPropertyAddress {
+        address(kAudioDevicePropertyMute, scope: scope.coreAudioScope)
+    }
+}
+
+/// The CoreAudio calls a default-device observer makes. Injectable so the
+/// listener add/remove pairing can be exercised without real devices.
+struct AudioListenerHost {
+    var defaultDevice: (Audio.Scope) -> AudioDeviceID?
+    var add:    (AudioObjectID, AudioObjectPropertyAddress, DispatchQueue, @escaping AudioObjectPropertyListenerBlock) -> Void
+    var remove: (AudioObjectID, AudioObjectPropertyAddress, DispatchQueue, @escaping AudioObjectPropertyListenerBlock) -> Void
+
+    static let coreAudio = AudioListenerHost(
+        defaultDevice: { scope in
+            switch scope {
+            case .input:  return Audio.defaultInputDevice()
+            case .output: return Audio.defaultOutputDevice()
+            }
+        },
+        add: { object, address, queue, block in
+            var addr = address
+            AudioObjectAddPropertyListenerBlock(object, &addr, queue, block)
+        },
+        remove: { object, address, queue, block in
+            var addr = address
+            AudioObjectRemovePropertyListenerBlock(object, &addr, queue, block)
+        }
     )
 }
 
+/// Watches the default device of one direction: a listener on the system
+/// object for default-device changes, plus volume and mute listeners on
+/// whichever device is currently the default (re-bound on every change).
+/// `AudioObserver.shared` watches output; `AudioInputObserver.shared` input.
 final class AudioObserver: RefCountedObserver {
-    static let shared = AudioObserver()
-    private override init() { super.init() }
+    static let shared = AudioObserver(scope: .output)
+
+    let scope: Audio.Scope
+    private let host: AudioListenerHost
+
+    init(scope: Audio.Scope, host: AudioListenerHost = .coreAudio) {
+        self.scope = scope
+        self.host = host
+        super.init()
+    }
 
     // CoreAudio listener blocks live as class properties so the SAME Swift→
     // ObjC bridged block reference is passed to both Add and Remove. The
@@ -354,46 +341,34 @@ final class AudioObserver: RefCountedObserver {
     private let lock = NSLock()
     private let listenerQueue = DispatchQueue.global(qos: .utility)
 
+    private var systemObject: AudioObjectID { AudioObjectID(kAudioObjectSystemObject) }
+
     private func notify() {
         DispatchQueue.main.async { [weak self] in self?.fire() }
     }
 
     override func install() -> Token? {
-        // Default-output-device change → re-bind volume / mute listeners onto
-        // the new device and notify subscribers.
+        // Default-device change → re-bind volume / mute listeners onto the
+        // new device and notify subscribers.
         let dev: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
             self?.rebind()
             self?.notify()
         }
-        var devAddr = AudioObjectPropertyAddress(
-            mSelector: kAudioHardwarePropertyDefaultOutputDevice,
-            mScope:    kAudioObjectPropertyScopeGlobal,
-            mElement:  kAudioObjectPropertyElementMain
-        )
+        let devAddr = Audio.address(scope.defaultDeviceSelector)
         lock.lock()
         deviceChangeBlock = dev
-        AudioObjectAddPropertyListenerBlock(
-            AudioObjectID(kAudioObjectSystemObject), &devAddr,
-            listenerQueue, dev)
+        host.add(systemObject, devAddr, listenerQueue, dev)
         lock.unlock()
 
         rebind()
 
         // Capture the exact `dev` reference in the Token's closure so the
-        // pointer passed to AudioObjectRemovePropertyListenerBlock is the same
-        // one CoreAudio retained at Add time — surviving any later mutation
-        // of self.deviceChangeBlock.
+        // pointer passed to the remove is the same one CoreAudio retained at
+        // add time — surviving any later mutation of self.deviceChangeBlock.
         return Token { [weak self] in
             guard let self = self else { return }
-            var devAddr = AudioObjectPropertyAddress(
-                mSelector: kAudioHardwarePropertyDefaultOutputDevice,
-                mScope:    kAudioObjectPropertyScopeGlobal,
-                mElement:  kAudioObjectPropertyElementMain
-            )
             self.lock.lock()
-            AudioObjectRemovePropertyListenerBlock(
-                AudioObjectID(kAudioObjectSystemObject), &devAddr,
-                self.listenerQueue, dev)
+            self.host.remove(self.systemObject, devAddr, self.listenerQueue, dev)
             self.deviceChangeBlock = nil
             self.lock.unlock()
             self.unbindDevice()
@@ -403,18 +378,16 @@ final class AudioObserver: RefCountedObserver {
     private func rebind() {
         // Drop volume/mute listeners on the previous device first.
         unbindDevice()
-        guard let id = Audio.defaultOutputDevice() else { return }
+        guard let id = host.defaultDevice(scope) else { return }
 
         let vol: AudioObjectPropertyListenerBlock = { [weak self] _, _ in self?.notify() }
         let mute: AudioObjectPropertyListenerBlock = { [weak self] _, _ in self?.notify() }
-        var volAddr  = Audio.mainVolumeAddress
-        var muteAddr = Audio.muteAddress
         lock.lock()
         boundDevice = id
         volumeBlock = vol
         muteBlock   = mute
-        AudioObjectAddPropertyListenerBlock(id, &volAddr,  listenerQueue, vol)
-        AudioObjectAddPropertyListenerBlock(id, &muteAddr, listenerQueue, mute)
+        host.add(id, Audio.volumeAddress(scope: scope), listenerQueue, vol)
+        host.add(id, Audio.muteAddress(scope: scope),   listenerQueue, mute)
         lock.unlock()
     }
 
@@ -428,107 +401,14 @@ final class AudioObserver: RefCountedObserver {
         muteBlock = nil
         lock.unlock()
         guard let id = id else { return }
-        var volAddr  = Audio.mainVolumeAddress
-        var muteAddr = Audio.muteAddress
-        if let vol  = vol  { AudioObjectRemovePropertyListenerBlock(id, &volAddr,  listenerQueue, vol)  }
-        if let mute = mute { AudioObjectRemovePropertyListenerBlock(id, &muteAddr, listenerQueue, mute) }
+        if let vol  = vol  { host.remove(id, Audio.volumeAddress(scope: scope), listenerQueue, vol)  }
+        if let mute = mute { host.remove(id, Audio.muteAddress(scope: scope),   listenerQueue, mute) }
     }
 }
 
-// MARK: - Input observer
-
-/// Mirror of `AudioObserver` for the default input device. Separate class
-/// (rather than parameterizing AudioObserver by scope) because each Observer
-/// owns a single set of listener-block references — the input + output
-/// listeners need independent lifetime + lock state, and the install path
-/// uses a different default-device selector. Keeping them split also keeps
-/// the install/unbind code paths obvious vs. a parameterized factory.
-final class AudioInputObserver: RefCountedObserver {
-    static let shared = AudioInputObserver()
-    private override init() { super.init() }
-
-    private var deviceChangeBlock: AudioObjectPropertyListenerBlock?
-    private var volumeBlock:       AudioObjectPropertyListenerBlock?
-    private var muteBlock:         AudioObjectPropertyListenerBlock?
-    private var boundDevice: AudioDeviceID?
-    private let lock = NSLock()
-    private let listenerQueue = DispatchQueue.global(qos: .utility)
-
-    private func notify() {
-        DispatchQueue.main.async { [weak self] in self?.fire() }
-    }
-
-    override func install() -> Token? {
-        // Default-input-device change → re-bind volume / mute listeners onto
-        // the new device and notify subscribers. Same shape as the output
-        // observer; only the property selector differs.
-        let dev: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
-            self?.rebind()
-            self?.notify()
-        }
-        var devAddr = AudioObjectPropertyAddress(
-            mSelector: kAudioHardwarePropertyDefaultInputDevice,
-            mScope:    kAudioObjectPropertyScopeGlobal,
-            mElement:  kAudioObjectPropertyElementMain
-        )
-        lock.lock()
-        deviceChangeBlock = dev
-        AudioObjectAddPropertyListenerBlock(
-            AudioObjectID(kAudioObjectSystemObject), &devAddr,
-            listenerQueue, dev)
-        lock.unlock()
-
-        rebind()
-
-        return Token { [weak self] in
-            guard let self = self else { return }
-            var devAddr = AudioObjectPropertyAddress(
-                mSelector: kAudioHardwarePropertyDefaultInputDevice,
-                mScope:    kAudioObjectPropertyScopeGlobal,
-                mElement:  kAudioObjectPropertyElementMain
-            )
-            self.lock.lock()
-            AudioObjectRemovePropertyListenerBlock(
-                AudioObjectID(kAudioObjectSystemObject), &devAddr,
-                self.listenerQueue, dev)
-            self.deviceChangeBlock = nil
-            self.lock.unlock()
-            self.unbindDevice()
-        }
-    }
-
-    private func rebind() {
-        unbindDevice()
-        guard let id = Audio.defaultInputDevice() else { return }
-
-        let vol: AudioObjectPropertyListenerBlock = { [weak self] _, _ in self?.notify() }
-        let mute: AudioObjectPropertyListenerBlock = { [weak self] _, _ in self?.notify() }
-        var volAddr  = Audio.volumeAddress(scope: .input)
-        var muteAddr = Audio.muteAddress(scope: .input)
-        lock.lock()
-        boundDevice = id
-        volumeBlock = vol
-        muteBlock   = mute
-        AudioObjectAddPropertyListenerBlock(id, &volAddr,  listenerQueue, vol)
-        AudioObjectAddPropertyListenerBlock(id, &muteAddr, listenerQueue, mute)
-        lock.unlock()
-    }
-
-    private func unbindDevice() {
-        lock.lock()
-        let id = boundDevice
-        let vol = volumeBlock
-        let mute = muteBlock
-        boundDevice = nil
-        volumeBlock = nil
-        muteBlock = nil
-        lock.unlock()
-        guard let id = id else { return }
-        var volAddr  = Audio.volumeAddress(scope: .input)
-        var muteAddr = Audio.muteAddress(scope: .input)
-        if let vol  = vol  { AudioObjectRemovePropertyListenerBlock(id, &volAddr,  listenerQueue, vol)  }
-        if let mute = mute { AudioObjectRemovePropertyListenerBlock(id, &muteAddr, listenerQueue, mute) }
-    }
+/// Namespace for the input-direction singleton; see `AudioObserver`.
+enum AudioInputObserver {
+    static let shared = AudioObserver(scope: .input)
 }
 
 // MARK: - Audio processes (per-app output enumeration)
@@ -701,11 +581,7 @@ enum AudioProcesses {
     // MARK: - CoreAudio plumbing (private)
 
     private static func enumerateProcessObjects() -> [AudioObjectID] {
-        var addr = AudioObjectPropertyAddress(
-            mSelector: kAudioHardwarePropertyProcessObjectList,
-            mScope:    kAudioObjectPropertyScopeGlobal,
-            mElement:  kAudioObjectPropertyElementMain
-        )
+        var addr = Audio.address(kAudioHardwarePropertyProcessObjectList)
         var dataSize: UInt32 = 0
         guard AudioObjectGetPropertyDataSize(
                 AudioObjectID(kAudioObjectSystemObject), &addr, 0, nil, &dataSize) == noErr,
@@ -719,11 +595,7 @@ enum AudioProcesses {
     }
 
     private static func pid(of obj: AudioObjectID) -> Int32? {
-        var addr = AudioObjectPropertyAddress(
-            mSelector: kAudioProcessPropertyPID,
-            mScope:    kAudioObjectPropertyScopeGlobal,
-            mElement:  kAudioObjectPropertyElementMain
-        )
+        var addr = Audio.address(kAudioProcessPropertyPID)
         var pid: Int32 = 0
         var size = UInt32(MemoryLayout<Int32>.size)
         guard AudioObjectGetPropertyData(obj, &addr, 0, nil, &size, &pid) == noErr else { return nil }
@@ -731,11 +603,7 @@ enum AudioProcesses {
     }
 
     private static func bundleID(of obj: AudioObjectID) -> String? {
-        var addr = AudioObjectPropertyAddress(
-            mSelector: kAudioProcessPropertyBundleID,
-            mScope:    kAudioObjectPropertyScopeGlobal,
-            mElement:  kAudioObjectPropertyElementMain
-        )
+        var addr = Audio.address(kAudioProcessPropertyBundleID)
         var cf: CFString = "" as CFString
         var size = UInt32(MemoryLayout<CFString?>.size)
         let err = withUnsafeMutablePointer(to: &cf) { ptr -> OSStatus in
@@ -749,11 +617,7 @@ enum AudioProcesses {
     }
 
     private static func isRunningOutput(_ obj: AudioObjectID) -> Bool {
-        var addr = AudioObjectPropertyAddress(
-            mSelector: kAudioProcessPropertyIsRunningOutput,
-            mScope:    kAudioObjectPropertyScopeGlobal,
-            mElement:  kAudioObjectPropertyElementMain
-        )
+        var addr = Audio.address(kAudioProcessPropertyIsRunningOutput)
         var running: UInt32 = 0
         var size = UInt32(MemoryLayout<UInt32>.size)
         guard AudioObjectGetPropertyData(obj, &addr, 0, nil, &size, &running) == noErr else { return false }
@@ -792,11 +656,7 @@ final class AudioProcessesObserver: RefCountedObserver {
 
     override func install() -> Token? {
         // List listener. Fires on add/remove of process objects.
-        var listAddr = AudioObjectPropertyAddress(
-            mSelector: kAudioHardwarePropertyProcessObjectList,
-            mScope:    kAudioObjectPropertyScopeGlobal,
-            mElement:  kAudioObjectPropertyElementMain
-        )
+        var listAddr = Audio.address(kAudioHardwarePropertyProcessObjectList)
         let list: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
             self?.pollAndFire()
         }
@@ -820,11 +680,7 @@ final class AudioProcessesObserver: RefCountedObserver {
 
         return Token { [weak self] in
             guard let self = self else { return }
-            var listAddr = AudioObjectPropertyAddress(
-                mSelector: kAudioHardwarePropertyProcessObjectList,
-                mScope:    kAudioObjectPropertyScopeGlobal,
-                mElement:  kAudioObjectPropertyElementMain
-            )
+            var listAddr = Audio.address(kAudioHardwarePropertyProcessObjectList)
             self.lock.lock()
             if let lb = self.listBlock {
                 AudioObjectRemovePropertyListenerBlock(

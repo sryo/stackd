@@ -10,9 +10,9 @@ import CoreAudio
 //     run would flip the user's volume / mute / default device. The clamp
 //     math lives inside a private setter, so it can't be exercised through
 //     the public API without mutating state — left uncovered intentionally.
-//   - AudioObserver / AudioInputObserver / MediaObserver — observer
-//     lifecycle drives real CoreAudio listener blocks. Covered by integration
-//     reality, not unit tests.
+//   - MediaObserver — observer lifecycle drives real MediaRemote
+//     registrations. Covered by integration reality, not unit tests.
+//     (AudioObserver's listener pairing is covered in AudioObserverTests.)
 //
 // In scope:
 //   - Scope enum mapping → CoreAudio scope + default-device selector constants.
@@ -61,14 +61,6 @@ func registerAudioTests() {
         try expectEqual(inAddr.mSelector,  kAudioDevicePropertyMute)
         try expectEqual(outAddr.mScope, kAudioDevicePropertyScopeOutput)
         try expectEqual(inAddr.mScope,  kAudioDevicePropertyScopeInput)
-    }
-
-    test("static mainVolumeAddress is scoped to output (back-compat for AudioObserver)") {
-        // AudioObserver passes &Audio.mainVolumeAddress directly into
-        // CoreAudio Add/Remove pairs. If this scope flips, the output
-        // observer silently watches the wrong direction.
-        try expectEqual(Audio.mainVolumeAddress.mSelector, kAudioHardwareServiceDeviceProperty_VirtualMainVolume)
-        try expectEqual(Audio.mainVolumeAddress.mScope, kAudioDevicePropertyScopeOutput)
     }
 
     // MARK: - current() / currentInput() dict shape
