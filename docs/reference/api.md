@@ -1,6 +1,6 @@
 # `sd.*` API reference
 
-The complete author-facing JavaScript API. Everything is on the global `sd`. Source of truth: `Runtime/api.js`; permissions cross-checked against `Sources/Permissions.swift` and `Sources/Channels.swift`.
+The complete author-facing JavaScript API. Everything is on the global `sd`. Source of truth: `Runtime/src/` (concatenated into the generated, served `Runtime/api.js`); permissions cross-checked against `Sources/Permissions.swift` and `Sources/Channels.swift`.
 
 > **Prefer templates?** For zero-config, declarative use, `{{ }}` placeholders with `sd-each` / `sd-if` bind channels straight into the DOM — no `subscribe` call per element, and permissions are inferred. This page is for explicit, programmatic control. See [The template engine](template-engine.md).
 

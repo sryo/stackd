@@ -1,36 +1,24 @@
 # AGENTS.md — start here
 
-A 30-line pointer for any agent landing in this repo. The authority is [CLAUDE.md](CLAUDE.md); this file is the "if you only read one thing" version.
+A pointer for any agent landing in this repo. The authority is [CLAUDE.md](CLAUDE.md); read it before changing anything.
 
-## Build & verify (the contract)
-- `./build.sh` → `.build/stackd` (production binary).
-- `./tests.sh` → `.build/stackd-tests` (derives sources from `build.sh`; the two cannot drift).
-- Daemon ownership: rebuild, launch, kill, reload — you own it. Use `/stackd-rebuild-restart` (or `scripts/daemonctl.sh`) instead of ad-hoc `pkill stackd`.
+## Build and verify
+- `./build.sh` builds the daemon.
+- `./tests.sh` builds and runs the whole suite; `./tests.sh --filter <regex>` runs a subset by test name. Exit status: 0 passed, 1 failures, 2 usage error (bad pattern, no test matched, duplicate test name).
+- Both scripts glob the Swift sources, so a new file needs no list edit.
+- `Runtime/api.js` is generated from `Runtime/src/` and gitignored: edit `Runtime/src/*.js`, never `api.js`.
+- The daemon is yours to rebuild, kill and relaunch; `scripts/daemonctl.sh rebuild` does it safely.
 
-## The four locked rules (see CLAUDE.md → Architecture)
-1. **Hammerspoon is the inspiration — and the project stackd aims to replace.** `hs.<x>` names/coverage are the bar (parity or better, never worse); call semantics go web-native where the async bridge demands (Promises, batch-first). HS is a reference to consult, never a runtime dependency.
-2. **WebKit is the only rendering surface** — click-through `NSPanel` + `WKWebView`; no `CGContext` DSLs, no SVG path strings, no native canvas.
-3. **Primaries in respective sources** — window things in `Windows.swift`, AX walks for window properties in `Windows.swift`, not in callers.
-4. **Observe and set, nothing else** — daemon doesn't render, decide, diff, latch, or curate. Stacks do.
+## The four locked rules
+1. Hammerspoon is the reference and the project stackd aims to replace: match `hs.<x>` names and coverage, go web-native (Promises, batch-first) where the async bridge demands it, and never depend on HS at runtime.
+2. WebKit is the only rendering surface: a click-through `NSPanel` + `WKWebView`, no `CGContext` drawing, no native canvas.
+3. Primaries live in their respective sources: window and AX-window things in `Windows.swift`, even when another file consumes them.
+4. Observe and set, nothing else: rendering, decisions, diffing and latching belong in stacks.
 
-## Same-commit doctrine (non-negotiable)
-- New `sd.X` primitive → same commit ships: `Sources/DataSources/<X>.swift`, `Sources/Bridge.swift` registration, `Sources/Channels.swift` entry, `Sources/Permissions.swift` entry, `Runtime/api.js` namespace, `build.sh` if new sources/frameworks, **and a test** in `Tests/`.
-- New channel → one `Channel(...)` entry in `Sources/Channels.swift`; that's the single source of truth for both `Bridge.replayState()` and the JS `__sdSignalPaths` lookup.
-- Use the `tdd` skill's red-green-refactor loop. Tests written after the fact pin down the *shape* of the implementation, not the behavior.
+## Before you commit
+- Every new daemon-side behavior ships with a test in the same commit.
+- A new `sd.X` primitive also ships its `Sources/Permissions.swift`, `Sources/Channels.swift`, `Sources/Bridge.swift` and `Runtime/src` entries; CLAUDE.md lists the full set.
+- `./tests.sh` passes, and so does `docs/sync.py --check` (`tests.sh` runs it).
+- Never add `NSApp.activate`, and never use CSS `backdrop-filter` in stack HTML.
 
-## Pre-commit checks (in this order)
-1. `/stackd-channel-check <permission>` — runs the `channel-registry-auditor` on one permission. Catches drift before CI.
-2. `./tests.sh` — full suite, or `.build/stackd-tests --filter <regex>` for a focused subset.
-3. `docs/sync.py --check` — verifies `<!-- include: ... -->` blocks still match their source files (already wired into `tests.sh`).
-
-## Stack locations (this trips up new agents)
-- `examples/` → demo/test scaffolding (in repo).
-- `~/stackd/stacks/` → the user's day-to-day stacks (NOT in repo).
-- Cross-stack changes touch BOTH if both have the stack.
-
-## Don't do this
-- Don't add backwards-compatibility shims; just change the code.
-- Don't add `NSApp.activate` anywhere — `.accessory` policy + `.nonactivatingPanel` mask are load-bearing.
-- Don't use CSS `backdrop-filter` in stack HTML — daemon owns chrome via manifest `material:`.
-- Don't trust SourceKit cross-file errors; only `./build.sh` non-zero exit signals a real error.
-- Don't poll where an event source exists (`AudioObjectAddPropertyListenerBlock`, `NotificationCenter`, FSEvents, AX observers, `CGEventTap`, kqueue). And **verify the listener actually fires** before trusting it (CoreAudio silently no-ops some registrations).
+The user's day-to-day stacks live in `~/stackd/stacks/`, outside this repo; `examples/` is the in-repo reference set. A cross-stack change touches both when both have the stack.

@@ -287,7 +287,7 @@ When a stack's HTML fails to load, the panel stays visible-but-empty instead of 
 
 ## Examples
 
-`examples/` ships ~30 working stacks covering most of the surface above. A few starting points:
+`examples/` holds <!-- count: examples/**/stack.json -->47<!-- /count --> working stacks covering most of the surface above. A few starting points:
 
 - **`hello`** — the scaffolder output, three-file template panel.
 - **`menubar-item`** — `sd.menubar.addItem` for NSStatusItem widgets with submenus.
@@ -315,7 +315,6 @@ Open items: STT (`sd.speech.listen`), AirPods battery, camera stream, calendar w
 ```
 ~/stackd/                     ← user content
   defaults.json               ← global manifest defaults
-  Runtime/api.js              ← (symlinked from .build/Runtime/ in dev; bundled in prod)
   stacks/
     <id>/
       stack.json
@@ -324,10 +323,13 @@ Open items: STT (`sd.speech.listen`), AirPods battery, camera stream, calendar w
 
 ~/Documents/stackd/           ← project source (this repo)
   Sources/                    ← Swift host + data sources
-  Runtime/                    ← stdlib (api.js) — ships next to the binary
+  Runtime/src/                ← the sd.* JavaScript runtime, one module per area;
+                                build.sh concatenates it into the generated Runtime/api.js
+                                that the daemon serves next to the binary
+  Tests/                      ← test suite (./tests.sh)
   build.sh                    ← swiftc one-shot
   .build/stackd               ← binary
-  examples/                   ← ~30 reference stacks
+  examples/                   ← reference stacks, one folder each
 
 ~/Library/Application Support/stackd/
   daemon.sock                 ← CLI ↔ daemon Unix socket

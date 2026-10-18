@@ -7,11 +7,17 @@
 # immediately followed (whitespace-skipped) by a fenced code block. The
 # block's body must match the file at that path exactly.
 #
+# A second marker keeps a number in prose honest:
+#
+#     <!-- count: examples/**/stack.json -->47<!-- /count -->
+#
+# The number between the markers must equal how many files the glob matches.
+#
 # Modes:
 #   --check  exit nonzero on drift, print a diff
-#   --fix    rewrite the markdown so the block matches the file
+#   --fix    rewrite the markdown so the block (or number) matches the source
 #
-# Path is resolved relative to the repo root (the parent of docs/).
+# Paths and globs are resolved relative to the repo root (the parent of docs/).
 
 import argparse
 import difflib
@@ -49,6 +55,11 @@ INCLUDE_RE = re.compile(
     r"(.*?)"                                        # body (non-greedy)
     r"(^```\s*$)",                                  # closing fence on its own line
     re.DOTALL | re.MULTILINE,
+)
+
+
+COUNT_RE = re.compile(
+    r"(<!--\s*count:\s*([^\s>]+)\s*-->)(\d+)(<!--\s*/count\s*-->)"
 )
 
 
@@ -92,7 +103,18 @@ def check_or_fix(md_path: Path, fix: bool) -> tuple[bool, str]:
             return f"<!-- include: {rel} -->\n{fence_open}{expected}{fence_close}"
         return match.group(0)
 
-    new_text = INCLUDE_RE.sub(replace, text)
+    def recount(match: re.Match) -> str:
+        nonlocal ok
+        open_marker, pattern, written, close_marker = match.groups()
+        actual = sum(1 for p in REPO_ROOT.glob(pattern) if p.is_file())
+        if int(written) != actual:
+            ok = False
+            drift_reports.append(
+                f"{md_path.name}: says {written} for {pattern}, the repo has {actual}"
+            )
+        return f"{open_marker}{actual}{close_marker}" if fix else match.group(0)
+
+    new_text = COUNT_RE.sub(recount, INCLUDE_RE.sub(replace, text))
     for report in drift_reports:
         print(report, file=sys.stderr)
     return ok, new_text
@@ -111,7 +133,7 @@ def main() -> int:
         if not md.exists():
             continue
         before = md.read_text()
-        blocks_seen += len(INCLUDE_RE.findall(before))
+        blocks_seen += len(INCLUDE_RE.findall(before)) + len(COUNT_RE.findall(before))
         ok, new_text = check_or_fix(md, fix=args.fix)
         if not ok:
             all_ok = False
@@ -120,11 +142,11 @@ def main() -> int:
             print(f"updated {md.relative_to(REPO_ROOT)}")
 
     if blocks_seen == 0:
-        print("docs/sync.py: no <!-- include: ... --> markers found", file=sys.stderr)
+        print("docs/sync.py: no <!-- include: ... --> or <!-- count: ... --> markers found", file=sys.stderr)
 
     if args.check:
         if all_ok:
-            print(f"docs/sync.py: {blocks_seen} block(s) in sync")
+            print(f"docs/sync.py: {blocks_seen} marker(s) in sync")
             return 0
         print("docs/sync.py: drift detected (see above)", file=sys.stderr)
         return 1

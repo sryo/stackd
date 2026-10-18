@@ -52,4 +52,4 @@ A stack is a folder in `~/stackd/stacks/<id>/`. The minimum is two files:
 
 ---
 
-*Generated against the source (`Runtime/api.js`, `Sources/Channels.swift`, `Sources/Permissions.swift`, the manifest parser). If anything here disagrees with the daemon, the daemon is right — please file it.*
+*Generated against the source (`Runtime/src/`, `Sources/Channels.swift`, `Sources/Permissions.swift`, the manifest parser). If anything here disagrees with the daemon, the daemon is right — please file it.*
