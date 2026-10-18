@@ -154,4 +154,20 @@ func registerWindowAnimationTests() {
         try expect(!w.isAnimating(1, now: 0.21))
         try expect(w.isAnimating(2, now: 0.21))
     }
+
+    test("a window's own bounds come from the one SLSGetWindowBounds binding in WindowServerReads.swift") {
+        // The animation watch compares the listed bounds against the same
+        // read the overlay tick and live-resize tracking use, on the
+        // connection that doesn't wait on stackd's own panel transactions.
+        let sources = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("Sources")
+        var binders: [String] = []
+        let files = FileManager.default.enumerator(at: sources, includingPropertiesForKeys: nil)
+        while let url = files?.nextObject() as? URL {
+            guard url.pathExtension == "swift", let text = try? String(contentsOf: url, encoding: .utf8) else { continue }
+            let hits = text.components(separatedBy: "SkyLight.sym(\"SLSGetWindowBounds\")").count - 1
+            binders += Array(repeating: url.lastPathComponent, count: hits)
+        }
+        try expectEqual(binders, ["WindowServerReads.swift"])
+    }
 }

@@ -594,11 +594,6 @@ final class WindowAnimationObserver {
     static let shared = WindowAnimationObserver()
     private init() {}
 
-    // SLSGetWindowBounds(cid, wid, &rect) → CGError. The window's own
-    // frame, top-left global coordinates like kCGWindowBounds.
-    private typealias GetWindowBoundsFn = @convention(c) (Int32, UInt32, UnsafeMutablePointer<CGRect>) -> Int32
-    private static let getWindowBounds: GetWindowBoundsFn? = SkyLight.sym("SLSGetWindowBounds")
-
     private var watch = WindowAnimationWatch()
     private var clock: Token?
 
@@ -669,9 +664,9 @@ final class WindowAnimationObserver {
         ])
     }
 
+    /// The window's own frame (SLSGetWindowBounds), top-left global
+    /// coordinates like kCGWindowBounds; the genie never warps it.
     private static func ownBounds(_ wid: CGWindowID) -> CGRect? {
-        guard let fn = getWindowBounds, SkyLight.cid != 0 else { return nil }
-        var rect = CGRect.zero
-        return fn(SkyLight.cid, UInt32(wid), &rect) == 0 ? rect : nil
+        Overlay.bounds(of: wid)
     }
 }
