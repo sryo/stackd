@@ -79,49 +79,58 @@ extension Bridge {
         scope.adopt(observer.subscribe(pushFn))
     }
 
+    /// A list snapshot and its JSON, read once per `observer` fan-out under
+    /// `key` and shared by every stack the fire reaches — the list-plus-delta
+    /// starters' counterpart to `startChannel`'s `perFire`. Each stack still
+    /// dedupes and diffs against its own previous list.
+    static func sharedList(_ observer: RefCountedObserver, _ key: String,
+                           _ read: () -> [[String: Any]]) -> (snapshot: [[String: Any]], json: String) {
+        observer.perFire(key) {
+            let snapshot = read()
+            return (snapshot, Bridge.jsonify(snapshot))
+        }
+    }
+
+    /// The sd.net.* channels NetworkObserver produces, in push order, each
+    /// with its snapshot. sd.net.path derives from the same NWPathMonitor
+    /// (no parallel monitor): NetworkObserver caches the latest NWPath, and a
+    /// priming fire before any path callback lands sees nil, so the snapshot
+    /// is nil — no push — until the first real update arrives. That matches
+    /// sd.host.load / sd.touchdevice's "no data yet" handling.
+    static let networkSnapshots: [(channel: String, snapshot: () -> Any?)] = [
+        ("netLan",  { NetLAN.current() }),
+        ("netWifi", { NetWiFi.current() }),
+        ("netPath", { NetworkObserver.shared.latestPath.map(NetPath.snapshot(from:)) }),
+    ]
+
     // Multi-channel: one observer (NetworkObserver) feeds three sd.net.*
     // channels. Each branch independently dedupes against lastState so a wifi
     // SSID change doesn't refire lan / path. Keeps its bespoke shape rather
     // than splitting into three observers — the underlying NWPathMonitor is
     // shared.
-    func startNetwork() {
+    func startNetwork(observer: RefCountedObserver = NetworkObserver.shared,
+                      snapshots: [(channel: String, snapshot: () -> Any?)] = Bridge.networkSnapshots) {
         let pushFn: () -> Void = { [weak self] in
             guard let self = self else { return }
-            let lanJson = Bridge.jsonify(NetLAN.current())
-            if lanJson != self.lastState["netLan"] {
-                self.lastState["netLan"] = lanJson
-                self.push(channel: "netLan", json: lanJson)
-            }
-            let wifiJson = Bridge.jsonify(NetWiFi.current())
-            if wifiJson != self.lastState["netWifi"] {
-                self.lastState["netWifi"] = wifiJson
-                self.push(channel: "netWifi", json: wifiJson)
-            }
-            // sd.net.path — derived from the same NWPathMonitor (no parallel
-            // monitor). NetworkObserver caches the latest NWPath; the priming
-            // fire() before any path callback can land sees nil, so skip the
-            // push until the first real update arrives. That matches
-            // sd.host.load / sd.touchdevice's "no data yet" handling.
-            if let path = NetworkObserver.shared.latestPath {
-                let pathJson = Bridge.jsonify(NetPath.snapshot(from: path))
-                if pathJson != self.lastState["netPath"] {
-                    self.lastState["netPath"] = pathJson
-                    self.push(channel: "netPath", json: pathJson)
-                }
+            for (name, snapshot) in snapshots {
+                guard let json = observer.perFire(name, { snapshot().map(Bridge.jsonify) }) else { continue }
+                if json == self.lastState[name] { continue }
+                self.lastState[name] = json
+                self.push(channel: name, json: json)
             }
         }
         pushFn()
-        scope.adopt(NetworkObserver.shared.subscribe(pushFn))
+        scope.adopt(observer.subscribe(pushFn))
     }
 
-    func startDisplay() {
+    func startDisplay(observer: RefCountedObserver = DisplayObserver.shared,
+                      snapshot readDisplays: @escaping () -> [[String: Any]] = Display.all) {
         // Custom push instead of startChannel so we can compute the
         // sd.displays.changed delta inside the same dedupe branch — same
         // shape as startApps / startWorkspace's windowsAll path.
         let pushFn: () -> Void = { [weak self] in
             guard let self = self else { return }
-            let snapshot = Display.all()
-            let json = Bridge.jsonify(snapshot)
+            let (snapshot, json) = Bridge.sharedList(observer, "displays", readDisplays)
             if json == self.lastState["displays"] { return }
             self.lastState["displays"] = json
             self.push(channel: "displays", json: json)
@@ -142,7 +151,7 @@ extension Bridge {
             self.displaysChangedPrimed = true
         }
         pushFn()
-        scope.adopt(DisplayObserver.shared.subscribe(pushFn))
+        scope.adopt(observer.subscribe(pushFn))
     }
 
     // Async snapshot: Media.nowPlaying delivers the dict on a background
@@ -177,14 +186,14 @@ extension Bridge {
     // sd.channel.setInterval. The MenubarItemsObserver keeps a per-PID
     // owner-name cache alive across polls so the NSRunningApplication
     // lookup (the slow part) doesn't repeat for steady-state items.
-    func startMenubarItems() {
+    func startMenubarItems(observer: RefCountedObserver = MenubarItemsObserver.shared,
+                           snapshot readItems: @escaping () -> [[String: Any]] = { MenubarItemsObserver.shared.snapshot() }) {
         // Custom push instead of startChannel so we can compute the
         // sd.menubar.changed delta inside the same dedupe branch —
         // same shape as startDisplay / startApps.
         let pushFn: () -> Void = { [weak self] in
             guard let self = self else { return }
-            let snapshot = MenubarItemsObserver.shared.snapshot()
-            let json = Bridge.jsonify(snapshot)
+            let (snapshot, json) = Bridge.sharedList(observer, "menubarItems", readItems)
             if json == self.lastState["menubarItems"] { return }
             self.lastState["menubarItems"] = json
             self.push(channel: "menubarItems", json: json)
@@ -205,17 +214,17 @@ extension Bridge {
             self.menubarChangedPrimed = true
         }
         pushFn()
-        scope.adopt(MenubarItemsObserver.shared.subscribe(pushFn))
+        scope.adopt(observer.subscribe(pushFn))
     }
 
     // Custom: snapshot has a side effect (computing the apps.changed delta
     // vs lastAppsByBundle) and emits a second channel. Doesn't fit
     // startChannel.
-    func startApps() {
+    func startApps(observer: RefCountedObserver = AppsObserver.shared,
+                   snapshot readApps: @escaping () -> [[String: Any]] = Apps.running) {
         let pushFn: () -> Void = { [weak self] in
             guard let self = self else { return }
-            let snapshot = Apps.running()
-            let json = Bridge.jsonify(snapshot)
+            let (snapshot, json) = Bridge.sharedList(observer, "apps", readApps)
             if json == self.lastState["apps"] { return }
 
             // Delta vs last snapshot before updating the cache. Consumers that
@@ -237,7 +246,7 @@ extension Bridge {
             }
         }
         pushFn()
-        scope.adopt(AppsObserver.shared.subscribe(pushFn))
+        scope.adopt(observer.subscribe(pushFn))
     }
 
     // Dual-observer: NSWorkspace activations + per-pid FrontmostWindowObserver
