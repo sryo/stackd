@@ -584,8 +584,63 @@ struct WindowAnimationWatch {
         return now < anim.until
     }
 
+    /// Windows reading animating at `now`, ascending.
+    func animating(now: Double) -> [CGWindowID] {
+        anims.filter { now < $0.value.until }.keys.sorted()
+    }
+
     mutating func prune(now: Double) {
         anims = anims.filter { now < $0.value.until }
+    }
+}
+
+/// One frame of the animation watch, read from the window-list
+/// descriptions of just the windows it concerns: the AX-tracked ones and
+/// any still reading animating (a window can stop being tracked mid
+/// animation). Pure.
+struct WindowAnimationFrame {
+    /// The described windows on screen this frame.
+    let listed: Set<CGWindowID>
+    /// Tracked app-level windows on screen whose listed size differs from
+    /// their own (`ownBounds`).
+    let warped: [CGWindowID: (own: CGRect, listed: CGRect)]
+
+    static func ids(tracked: Set<CGWindowID>, animating: [CGWindowID]) -> [CGWindowID] {
+        tracked.union(animating).sorted()
+    }
+
+    init(descriptions: [[String: Any]], tracked: Set<CGWindowID>, ownBounds: (CGWindowID) -> CGRect?) {
+        var listed = Set<CGWindowID>()
+        var warped: [CGWindowID: (own: CGRect, listed: CGRect)] = [:]
+        for entry in descriptions {
+            guard let wid = entry[kCGWindowNumber as String] as? CGWindowID,
+                  entry[kCGWindowIsOnscreen as String] as? Bool == true else { continue }
+            listed.insert(wid)
+            guard tracked.contains(wid),
+                  (entry[kCGWindowLayer as String] as? Int).map(Windows.isAppWindowLevel) == true,
+                  let dict = entry[kCGWindowBounds as String] as? NSDictionary,
+                  let bounds = CGRect(dictionaryRepresentation: dict),
+                  let own = ownBounds(wid),
+                  WindowAnimationWatch.isAnimating(listed: bounds, own: own)
+            else { continue }
+            warped[wid] = (own, bounds)
+        }
+        self.listed = listed
+        self.warped = warped
+    }
+
+    /// Window-list descriptions of `ids` alone, on screen or not.
+    static func describe(_ ids: [CGWindowID]) -> [[String: Any]] {
+        guard !ids.isEmpty else { return [] }
+        // The array holds the window ids themselves as its values, not
+        // CFNumbers: CGWindowListCreateDescriptionFromArray reads them as
+        // CGWindowID-sized integers.
+        let values = ids.map { UnsafeRawPointer(bitPattern: UInt($0)) }
+        let array = values.withUnsafeBufferPointer { buf in
+            CFArrayCreate(nil, UnsafeMutablePointer(mutating: buf.baseAddress), buf.count, nil)
+        }
+        guard let array = array else { return [] }
+        return CGWindowListCreateDescriptionFromArray(array) as? [[String: Any]] ?? []
     }
 }
 
@@ -636,25 +691,12 @@ final class WindowAnimationObserver {
             watch.prune(now: now)
             return
         }
-        guard let info = CGWindowListCopyWindowInfo(
-            [.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]]
-        else { return }
-        var listed = Set<CGWindowID>()
-        var warped: [CGWindowID: (own: CGRect, listed: CGRect)] = [:]
-        for entry in info {
-            guard let wid = entry[kCGWindowNumber as String] as? CGWindowID else { continue }
-            listed.insert(wid)
-            guard (entry[kCGWindowLayer as String] as? Int).map(Windows.isAppWindowLevel) == true,
-                  WindowsAXObserver.shared.pidFor(wid: wid) != nil,
-                  let dict = entry[kCGWindowBounds as String] as? NSDictionary,
-                  let bounds = CGRect(dictionaryRepresentation: dict),
-                  let own = Self.ownBounds(wid),
-                  WindowAnimationWatch.isAnimating(listed: bounds, own: own)
-            else { continue }
-            warped[wid] = (own, bounds)
-        }
-        for wid in watch.sample(warped: Set(warped.keys), listed: listed, now: now) {
-            guard let w = warped[wid] else { continue }
+        let tracked = Set(WindowsAXObserver.shared.trackedWIDs)
+        let ids = WindowAnimationFrame.ids(tracked: tracked, animating: watch.animating(now: now))
+        let frame = WindowAnimationFrame(descriptions: WindowAnimationFrame.describe(ids), tracked: tracked,
+                                         ownBounds: Self.ownBounds)
+        for wid in watch.sample(warped: Set(frame.warped.keys), listed: frame.listed, now: now) {
+            guard let w = frame.warped[wid] else { continue }
             announce(wid, frame: w.own, visualFrame: w.listed)
         }
     }

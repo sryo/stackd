@@ -155,6 +155,63 @@ func registerWindowAnimationTests() {
         try expect(w.isAnimating(2, now: 0.21))
     }
 
+    // MARK: - WindowAnimationFrame: one frame's window-list reading
+
+    test("an animation frame reads the tracked windows plus the ones still animating, and no others") {
+        var w = WindowAnimationWatch()
+        _ = w.begin(now: 0)
+        _ = w.sample(warped: [9], listed: [9], now: 0)
+        try expectEqual(w.animating(now: 0.05), [9])
+        try expectEqual(WindowAnimationFrame.ids(tracked: [3, 1], animating: w.animating(now: 0.05)), [1, 3, 9])
+        try expectEqual(WindowAnimationFrame.ids(tracked: [1], animating: [1]), [1], "an id is read once")
+        try expectEqual(w.animating(now: 0.5), [], "an expired sighting is not read")
+    }
+
+    test("an animation frame lists on-screen windows and warps only tracked app windows read on screen") {
+        // Shaped like CoreGraphics' own: numbers arrive as NSNumber, and
+        // kCGWindowIsOnscreen is present only for on-screen windows.
+        func desc(_ wid: Int, listed: CGRect, onscreen: Bool = true,
+                  layer: Int = Int(CGWindowLevelForKey(.normalWindow))) -> [String: Any] {
+            var d: [String: Any] = [kCGWindowNumber as String: NSNumber(value: wid),
+                                    kCGWindowLayer as String: NSNumber(value: layer),
+                                    kCGWindowBounds as String: listed.dictionaryRepresentation]
+            if onscreen { d[kCGWindowIsOnscreen as String] = kCFBooleanTrue }
+            return d
+        }
+        let warp = CGRect(x: 120, y: 300, width: 640, height: 420)
+        let descriptions = [
+            desc(1, listed: warp),                        // tracked, warped
+            desc(2, listed: own),                         // tracked, sizes match
+            desc(3, listed: warp, onscreen: false),       // tracked, off screen
+            desc(4, listed: warp),                        // animating, no longer tracked
+            desc(5, listed: warp, layer: Int(CGWindowLevelForKey(.statusWindow))),
+            desc(6, listed: warp),                        // tracked, own frame unreadable
+        ]
+        let frame = WindowAnimationFrame(descriptions: descriptions, tracked: [1, 2, 3, 5, 6]) { wid in
+            wid == 6 ? nil : own
+        }
+        try expectEqual(frame.listed, [1, 2, 4, 5, 6])
+        try expectEqual(Set(frame.warped.keys), [1])
+        try expectEqual(frame.warped[1]?.own, own)
+        try expectEqual(frame.warped[1]?.listed, warp)
+    }
+
+    test("WindowAnimationFrame.describe returns the window list's own rows for exactly the asked ids") {
+        try expectEqual(WindowAnimationFrame.describe([]).count, 0)
+        let onscreen = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] ?? []
+        let sample = Array(onscreen.prefix(3))
+        let ids = sample.compactMap { $0[kCGWindowNumber as String] as? CGWindowID }
+        guard !ids.isEmpty else { return }   // no windows in this session to describe
+        let described = WindowAnimationFrame.describe(ids)
+        try expectEqual(Set(described.compactMap { $0[kCGWindowNumber as String] as? CGWindowID }), Set(ids))
+        for row in described {
+            let wid = row[kCGWindowNumber as String] as? CGWindowID
+            let listedRow = sample.first { $0[kCGWindowNumber as String] as? CGWindowID == wid }
+            try expectEqual(row[kCGWindowLayer as String] as? Int, listedRow?[kCGWindowLayer as String] as? Int)
+            try expectEqual(row[kCGWindowIsOnscreen as String] as? Bool, true)
+        }
+    }
+
     test("a window's own bounds come from the one SLSGetWindowBounds binding in WindowServerReads.swift") {
         // The animation watch compares the listed bounds against the same
         // read the overlay tick and live-resize tracking use, on the
