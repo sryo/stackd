@@ -285,7 +285,8 @@ enum Windows {
         probe: (pid_t, CGWindowID) -> WindowAddressabilityCache.Probe = {
             WindowAddressabilityCache.probe(pid: $0, windowID: $1)
         },
-        display: (CGWindowID?, CGRect) -> [String: Any]? = WindowDisplay.liveResolver()
+        display: (CGWindowID?, CGRect) -> [String: Any]? = WindowDisplay.liveResolver(),
+        spaces: (CGWindowID) -> Set<UInt64> = { Set(Spaces.windowSpaces(windowID: $0)) }
     ) -> [[String: Any]] {
         var bundleIds: [Int: String?] = [:]
         func bundleId(_ pid: Int) -> String? {
@@ -294,7 +295,7 @@ enum Windows {
             bundleIds[pid] = bid
             return bid
         }
-        return list.compactMap { info -> [String: Any]? in
+        let rows = list.compactMap { info -> [String: Any]? in
             guard let num   = info[kCGWindowNumber as String]    as? Int,
                   let layer = info[kCGWindowLayer  as String]    as? Int,
                   Windows.isAppWindowLevel(layer),
@@ -350,6 +351,8 @@ enum Windows {
             if let t = verdict.traits { out.merge(t.fields) { $1 } }
             return out
         }
+        let tabs = WindowTabs.siblingIDs(in: rows, spacesOf: { spaces(CGWindowID($0)) })
+        return tabs.isEmpty ? rows : rows.filter { !tabs.contains(($0["id"] as? Int) ?? -1) }
     }
 }
 
