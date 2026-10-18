@@ -61,7 +61,41 @@ class RefCountedObserver {
             DispatchQueue.main.async { [weak self] in self?.fire() }
             return
         }
+        fanoutGeneration &+= 1
+        fanoutDepth += 1
+        defer {
+            fanoutDepth -= 1
+            if fanoutDepth == 0 { fanoutMemo.removeAll() }
+        }
         for cb in Array(subs.values) { cb() }
+    }
+
+    /// Values shared by the subscribers of one `fire()` fan-out, keyed by the
+    /// caller's key and stamped with the fan-out they belong to. Emptied when
+    /// the outermost fan-out returns.
+    private var fanoutGeneration: UInt64 = 0
+    private var fanoutDepth = 0
+    private var fanoutMemo: [String: (generation: UInt64, box: AnyObject)] = [:]
+    private final class Box<T> {
+        let value: T
+        init(_ value: T) { self.value = value }
+    }
+
+    /// `compute()` once per `fire()` fan-out for `key`: the first subscriber
+    /// to ask computes it, every later one in the same fan-out (including a
+    /// subscriber added during it, on its priming call) gets that value. A
+    /// fire nested inside a fan-out computes afresh. Outside a fan-out — a
+    /// new subscriber's priming call — it always computes, so a prime never
+    /// sees an earlier fire's value. Main thread only, like `fire()`.
+    func perFire<T>(_ key: String, _ compute: () -> T) -> T {
+        guard fanoutDepth > 0 else { return compute() }
+        if let hit = fanoutMemo[key], hit.generation == fanoutGeneration,
+           let box = hit.box as? Box<T> {
+            return box.value
+        }
+        let value = compute()
+        fanoutMemo[key] = (fanoutGeneration, Box(value))
+        return value
     }
 
     /// Lazy fire: only fan out if the supplied hash differs from the last one

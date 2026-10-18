@@ -48,6 +48,11 @@ extension Bridge {
     /// pure overhead (WebKit roundtrip + signal subscribers re-running), and
     /// most observers (Battery, Audio, Display) fire on broad notifications
     /// where the underlying snapshot often hasn't actually changed.
+    ///
+    /// One observer fire reaches every stack holding the permission; the
+    /// snapshot and its JSON are produced once per fire (`perFire`) and
+    /// shared, so stacks also see the same reading from snapshots that diff
+    /// against their previous call.
     func startChannel(
         name: String,
         observer: RefCountedObserver,
@@ -64,8 +69,7 @@ extension Bridge {
                Date().timeIntervalSince(last) < interval {
                 return
             }
-            guard let value = snapshot() else { return }
-            let json = Bridge.jsonify(value)
+            guard let json = observer.perFire(name, { snapshot().map(Bridge.jsonify) }) else { return }
             guard json != self.lastState[name] else { return }
             self.lastState[name] = json
             self.lastChannelPushedAt[name] = Date()

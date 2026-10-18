@@ -222,6 +222,94 @@ func registerRefCountedObserverTests() {
         try expectEqual(callCount, 3, "duplicates under each key remain suppressed")
     }
 
+    // MARK: - perFire (one value per fan-out)
+
+    test("perFire: every subscriber of one fire shares a single compute") {
+        let obs = StubObserver()
+        var computes = 0
+        var seen: [String] = []
+        var tokens: [Token] = []
+        for _ in 0..<3 {
+            tokens.append(obs.subscribe {
+                seen.append(obs.perFire("k") { () -> String in computes += 1; return "v\(computes)" })
+            })
+        }
+        defer { for t in tokens { t.cancel() }; spin(for: 0.05) }
+        try expectEqual(computes, 3, "each subscribe-time prime computes on its own")
+
+        seen = []
+        obs.fire()
+        try expectEqual(computes, 4, "one compute for the whole fan-out")
+        try expectEqual(seen, ["v4", "v4", "v4"])
+
+        seen = []
+        obs.fire()
+        try expectEqual(computes, 5, "the next fire computes again")
+        try expectEqual(seen, ["v5", "v5", "v5"])
+    }
+
+    test("perFire: keys are memoized independently within a fire") {
+        let obs = StubObserver()
+        var a = 0, b = 0
+        let t1 = obs.subscribe { _ = obs.perFire("a") { a += 1 }; _ = obs.perFire("b") { b += 1 } }
+        let t2 = obs.subscribe { _ = obs.perFire("a") { a += 1 }; _ = obs.perFire("b") { b += 1 } }
+        defer { t1.cancel(); t2.cancel(); spin(for: 0.05) }
+        a = 0; b = 0
+        obs.fire()
+        try expectEqual(a, 1)
+        try expectEqual(b, 1)
+    }
+
+    test("perFire: outside a fire it always computes, so a later prime is fresh") {
+        let obs = StubObserver()
+        var computes = 0
+        let t1 = obs.subscribe { _ = obs.perFire("k") { computes += 1 } }
+        defer { t1.cancel(); spin(for: 0.05) }
+        obs.fire()
+        computes = 0
+        let t2 = obs.subscribe { _ = obs.perFire("k") { computes += 1 } }
+        defer { t2.cancel() }
+        try expectEqual(computes, 1, "the new subscriber's prime computed instead of reusing the fire's value")
+        _ = obs.perFire("k") { computes += 1 }
+        try expectEqual(computes, 2)
+    }
+
+    test("perFire: a subscriber added during a fire is primed with that fire's value") {
+        let obs = StubObserver()
+        var computes = 0
+        var late: Token?
+        var lateSaw: Int?
+        var armed = false
+        let t1 = obs.subscribe {
+            _ = obs.perFire("k") { () -> Int in computes += 1; return computes }
+            if armed && late == nil {
+                late = obs.subscribe { lateSaw = obs.perFire("k") { () -> Int in computes += 1; return computes } }
+            }
+        }
+        defer { t1.cancel(); late?.cancel(); spin(for: 0.05) }
+        armed = true
+        obs.fire()
+        try expect(late != nil, "the subscriber was added mid-fire")
+        try expectEqual(lateSaw, 2, "primed with the fire's shared value")
+        try expectEqual(computes, 2, "prime + the fire's single compute")
+    }
+
+    test("perFire: a fire nested inside a fire computes afresh") {
+        let obs = StubObserver()
+        var computes = 0
+        var nested = false
+        var values: [Int] = []
+        let t = obs.subscribe {
+            values.append(obs.perFire("k") { () -> Int in computes += 1; return computes })
+            if nested { nested = false; obs.fire() }
+        }
+        defer { t.cancel(); spin(for: 0.05) }
+        values = []
+        nested = true
+        obs.fire()
+        try expectEqual(values, [2, 3])
+    }
+
     // MARK: - Off-main trampoline
     //
     // Native callbacks (CoreAudio HAL listeners, IOKit, FSEvents) arrive on
