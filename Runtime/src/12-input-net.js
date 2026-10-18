@@ -13,6 +13,10 @@
   //   await sd.input.setSelectedText("hello");        // replace current selection
   //   await sd.input.setSelectedRange(loc, len);      // change selection / move caret
   //
+  //   await sd.input.isSecureInputEnabled();          // hs.eventtap.isSecureInputEnabled
+  //   // → true while a password field (or another secure-input client)
+  //   //   holds the keyboard; key events then never reach event taps.
+  //
   // Known limitation: Safari / Mail / Firefox WebViews leave
   // kAXSelectedTextAttribute empty even when there's text in the field —
   // selectedText comes back as "" in those cases (the rest of the dict
@@ -27,7 +31,8 @@ sd.input = {
         location: location | 0,
         length:   length   | 0
       });
-    }
+    },
+    isSecureInputEnabled() { return request({ type: "input.isSecureInputEnabled" }); }
   };
 sd.net = {
     wifi: channel("netWifi"),

@@ -220,6 +220,7 @@ httpserver.stop perm=httpserver deny=false
 icons.app perm=icons deny=null
 icons.file perm=icons deny=null
 input.focusedText perm=input deny=null
+input.isSecureInputEnabled perm=input deny=false
 input.setSelectedRange perm=input deny=false
 input.setSelectedText perm=input deny=false
 media.command perm=media deny=false
@@ -491,6 +492,7 @@ sd.icons.app fn/2
 sd.icons.file fn/2
 sd.input object
 sd.input.focusedText fn/0
+sd.input.isSecureInputEnabled fn/0
 sd.input.layout signal
 sd.input.setSelectedRange fn/2
 sd.input.setSelectedText fn/1

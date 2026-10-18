@@ -960,6 +960,9 @@ final class Bridge: NSObject, WKScriptMessageHandler {
                 length:   (body["length"]   as? Int) ?? 0
             )
         },
+        .sync("input.isSecureInputEnabled", permission: "input", denyValue: false) { _ in
+            Input.isSecureInputEnabled()
+        },
 
         // Icons
         .sync("icons.app",  permission: "icons") { body in

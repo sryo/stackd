@@ -15,6 +15,13 @@ enum Input {
         return ["name": name, "id": id]
     }
 
+    /// hs.eventtap.isSecureInputEnabled: true while a password field or
+    /// another secure-input client holds the keyboard, when macOS withholds
+    /// key events from event taps.
+    static func isSecureInputEnabled() -> Bool {
+        IsSecureEventInputEnabled()
+    }
+
     private static func cfStringProp(_ source: TISInputSource, _ key: CFString) -> String? {
         guard let ptr = TISGetInputSourceProperty(source, key) else { return nil }
         return Unmanaged<CFString>.fromOpaque(ptr).takeUnretainedValue() as String
