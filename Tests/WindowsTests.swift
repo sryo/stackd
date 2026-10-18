@@ -123,6 +123,24 @@ func registerWindowsTests() {
         try expectEqual(detail["title"] as? String, "")
     }
 
+    test("createdDetail adds the left-button state to the detail, and only that") {
+        // AeroSpace's tell for a tab dragged out of a window: the new
+        // window appears while the left button is still held.
+        let snap = WindowsLifecycleObserver.Snap(
+            id: 42, pid: 314, app: "Safari", title: "Tab",
+            frame: CGRect(x: 100, y: 200, width: 800, height: 600))
+        let base = WindowsLifecycleObserver.detail(snap)
+        let held = WindowsLifecycleObserver.createdDetail(snap, mouseDown: true)
+        let released = WindowsLifecycleObserver.createdDetail(snap, mouseDown: false)
+        try expectEqual(held["mouseDown"] as? Bool, true)
+        try expectEqual(released["mouseDown"] as? Bool, false)
+        try expectEqual(Set(held.keys), Set(base.keys).union(["mouseDown"]))
+        try expectEqual(held["id"] as? Int, 42)
+        try expectEqual(held["title"] as? String, "Tab")
+        try expectEqual(held["frame"] as? [String: Int], base["frame"] as? [String: Int])
+        try expect(base["mouseDown"] == nil, "destroyed and titleChanged details stay as they were")
+    }
+
     // MARK: - Windows.all() — public CGWindowList shape contract
 
     test("Windows.all rows carry the documented keys and an Int x/y/w/h frame") {

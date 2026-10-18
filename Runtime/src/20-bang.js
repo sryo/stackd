@@ -5,7 +5,9 @@
   //
   // System-fired window bangs (see Sources/DataSources/WindowEvents.swift +
   // Sources/DataSources/Windows.swift):
-  //   sd.window.created        { id, pid, app, title, frame } — CGS + 1Hz poll
+  //   sd.window.created        { id, pid, app, title, frame, mouseDown } — CGS + 1Hz poll
+  //                            mouseDown: left button held when the window
+  //                            appeared (a tab dragged out of a window)
   //   sd.window.destroyed      { id }                         — CGS + 1Hz poll
   //   sd.window.titleChanged   { id, app, title, oldTitle, frame, pid } — 1Hz poll
   //   sd.window.moved          { id, frame }                  — CGS (high rate during drag)

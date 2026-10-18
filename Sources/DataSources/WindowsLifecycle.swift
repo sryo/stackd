@@ -242,6 +242,16 @@ final class WindowsLifecycleObserver {
         ]
     }
 
+    /// The `sd.window.created` detail: `detail` plus `mouseDown`, whether
+    /// the left button was held when the window was announced. A window
+    /// that appears mid-drag is usually a tab being dragged out of another
+    /// window rather than a new one.
+    static func createdDetail(_ s: Snap, mouseDown: Bool) -> [String: Any] {
+        var d = detail(s)
+        d["mouseDown"] = mouseDown
+        return d
+    }
+
     /// Attach per-window observers to listed windows that have none (see
     /// PerWindowCoverage). Logged plainly: every hit means some attach
     /// path dropped a window, and until now it was deaf to minimize,
@@ -377,7 +387,10 @@ enum WindowLifecycleFanout {
         announcements.announcedRecently(id: id, now: Date().timeIntervalSince1970)
     }
 
-    static func fireCreated(host: WindowLifecycleHost?, snap: WindowsLifecycleObserver.Snap, attempt: Int = 0) {
+    /// `mouseDown` is the left-button state for the detail; nil samples it
+    /// now, at the announcement, and retries carry that sample.
+    static func fireCreated(host: WindowLifecycleHost?, snap: WindowsLifecycleObserver.Snap,
+                            attempt: Int = 0, mouseDown: Bool? = nil) {
         // Single-owner dedup at the funnel: announcers classify ("is this
         // a create at all?"); WHETHER it was already announced is decided
         // here, once. Retries (attempt > 0) are the same announcement.
@@ -386,27 +399,30 @@ enum WindowLifecycleFanout {
             WindowDebug.log("created fan-out: wid=\(snap.id) already announced — deduped")
             return
         }
+        let held = mouseDown ?? Mouse.isLeftButtonDown()
         let ids = Set(Windows.all().compactMap { $0["id"] as? Int })
         if WindowsPumpRetry.satisfied(ids: ids, expectation: .present(snap.id)) {
-            dispatch(host: host, snap: snap, attempt: attempt)
+            dispatch(host: host, snap: snap, attempt: attempt, mouseDown: held)
             return
         }
         guard let delay = WindowsPumpRetry.delay(attempt: attempt) else {
             WindowDebug.log("created fan-out: wid=\(snap.id) (\(snap.app)) never appeared in Windows.all() after \(attempt) retries — firing anyway")
-            dispatch(host: host, snap: snap, attempt: attempt)
+            dispatch(host: host, snap: snap, attempt: attempt, mouseDown: held)
             return
         }
         WindowDebug.log("created fan-out: wid=\(snap.id) not in Windows.all() yet — retry in \(Int(delay * 1000))ms")
         // Strong capture of `host` is fine: the chain is bounded (<1s) and
         // the StackHost lives for the daemon's lifetime anyway.
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
-            WindowLifecycleFanout.fireCreated(host: host, snap: snap, attempt: attempt + 1)
+            WindowLifecycleFanout.fireCreated(host: host, snap: snap, attempt: attempt + 1, mouseDown: held)
         }
     }
 
-    private static func dispatch(host: WindowLifecycleHost?, snap: WindowsLifecycleObserver.Snap, attempt: Int) {
+    private static func dispatch(host: WindowLifecycleHost?, snap: WindowsLifecycleObserver.Snap,
+                                 attempt: Int, mouseDown: Bool) {
         WindowDebug.log("created fan-out: wid=\(snap.id) dispatch (attempt=\(attempt))")
         host?.pumpWindowsListForAllStacks()
-        host?.bang(name: "sd.window.created", detail: WindowsLifecycleObserver.detail(snap))
+        host?.bang(name: "sd.window.created",
+                   detail: WindowsLifecycleObserver.createdDetail(snap, mouseDown: mouseDown))
     }
 }

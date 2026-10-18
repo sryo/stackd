@@ -14,11 +14,13 @@ import Foundation
 private final class RecordingHost: WindowLifecycleHost {
     var events: [String] = []
     var createdIDs: [Int] = []
+    var details: [[String: Any]] = []
 
     func pumpWindowsListForAllStacks() { events.append("pump") }
 
     func bang(name: String, detail: [String: Any]) -> Int {
         events.append(name)
+        details.append(detail)
         if let id = detail["id"] as? Int { createdIDs.append(id) }
         return 0
     }
@@ -42,6 +44,16 @@ func registerWindowLifecycleFanoutTests() {
         drainMainQueue()
         try expectEqual(host.events, ["pump", "sd.window.created"])
         try expectEqual(host.createdIDs, [id])
+        try expect(host.details.first?["mouseDown"] is Bool, "the created detail carries mouseDown")
+    }
+
+    test("created fan-out: mouseDown is the left-button state at the announcement, kept through the ladder") {
+        let host = RecordingHost()
+        let id = 4_294_000_102
+        WindowLifecycleFanout.fireCreated(host: host, snap: snap(id), mouseDown: true)
+        let ladder = WindowsPumpRetry.delays.reduce(0, +)
+        try expect(spin(timeout: ladder + 10) { host.events.count >= 2 }, "never announced")
+        try expectEqual(host.details.last?["mouseDown"] as? Bool, true)
     }
 
     test("created fan-out: a window the list already shows is announced at once, pump before bang") {
