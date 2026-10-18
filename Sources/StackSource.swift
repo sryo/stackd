@@ -96,62 +96,50 @@ enum ChannelInference {
         "gesture.spring": "displayLink",
     ]
 
+    /// Every path the scanner looks for after `sd.`, with the permission it
+    /// implies: each top-level permission names itself, each sub-path maps
+    /// to the permission its helper relies on.
+    private static let candidates: [(path: [Character], permission: String)] =
+        topLevelChannels.map { (Array($0), $0) }
+        + subPathChannels.map { (Array($0.key), $0.value) }
+
     /// Scan `text` (an HTML/JS/CSS source blob) for sd-channel references
     /// and return the implied permission set. Matches both `{{ sd.x.y }}`
     /// template expressions and `sd.x.y.subscribe(...)` / `sd.bind(_, sd.x, …)`
     /// JS usage — they share the same `sd.<path>` prefix shape.
+    ///
+    /// One pass over the text's characters finds every `sd.` that starts a
+    /// reference; only those positions are compared against the candidate
+    /// paths. Comparison is per `Character`, so a combining mark after a
+    /// path's last letter (or before `sd`) belongs to that letter.
     static func infer(from text: String) -> Set<String> {
-        var out = Set<String>()
-        for ch in topLevelChannels {
-            if containsReference(text, path: ch) { out.insert(ch) }
-        }
-        for (subPath, perm) in subPathChannels {
-            if containsReference(text, path: subPath) { out.insert(perm) }
-        }
-        return out
-    }
-
-    /// True if `text` contains `sd.<path>` as an actual reference (not a
-    /// substring of a longer identifier). Uses a manual scan because
-    /// NSRegularExpression with `\b` doesn't treat `.` as a word boundary
-    /// the way we want and the alternative (full character-class lookbehind)
-    /// is more code than this loop.
-    private static func containsReference(_ text: String, path: String) -> Bool {
-        let needle = "sd." + path
         let chars = Array(text)
-        let nchars = Array(needle)
-        guard chars.count >= nchars.count else { return false }
-        let maxI = chars.count - nchars.count
+        var out = Set<String>()
         var i = 0
-        while i <= maxI {
+        while i + 3 <= chars.count {
+            defer { i += 1 }
+            guard chars[i] == "s", chars[i + 1] == "d", chars[i + 2] == "." else { continue }
             // Left boundary: previous char must not be a continuation of an
             // identifier (letter/digit/_/$/.). Prevents `xsd.battery` or
             // `notsd.battery` from matching.
             if i > 0 {
                 let prev = chars[i - 1]
-                if prev.isLetter || prev.isNumber || prev == "_" || prev == "$" || prev == "." {
-                    i += 1; continue
-                }
+                if prev.isLetter || prev.isNumber || prev == "_" || prev == "$" || prev == "." { continue }
             }
-            var match = true
-            for j in 0..<nchars.count where chars[i + j] != nchars[j] {
-                match = false; break
-            }
-            if match {
+            let start = i + 3
+            for (path, permission) in candidates where !out.contains(permission) {
+                let end = start + path.count
+                guard end <= chars.count, chars[start..<end].elementsEqual(path) else { continue }
                 // Right boundary: next char (if any) must not continue the
                 // identifier. Lets `sd.battery.percent` match the "battery"
                 // top-level while `sd.batteryFoo` does not.
-                let after = i + nchars.count
-                if after >= chars.count {
-                    return true
+                if end < chars.count {
+                    let next = chars[end]
+                    if next.isLetter || next.isNumber || next == "_" || next == "$" { continue }
                 }
-                let next = chars[after]
-                if !(next.isLetter || next.isNumber || next == "_" || next == "$") {
-                    return true
-                }
+                out.insert(permission)
             }
-            i += 1
         }
-        return false
+        return out
     }
 }

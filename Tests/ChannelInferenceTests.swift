@@ -63,6 +63,47 @@ func registerChannelInferenceTests() {
         try expect(!perms.contains("menubar.item"), "composite should require explicit declaration")
     }
 
+    test("overlapping names infer only the one each reference spells") {
+        try expectEqual(ChannelInference.infer(from: "sd.displayLink.subscribe(f)"), ["displayLink"])
+        try expectEqual(ChannelInference.infer(from: "sd.display.all"), ["display"])
+        try expectEqual(ChannelInference.infer(from: "sd.app,sd.apps;sd.applescript"), ["app", "apps", "applescript"])
+        try expectEqual(ChannelInference.infer(from: "sd.windows.focused"), ["windows"])
+    }
+
+    test("a reference at the very end or start of the text still counts") {
+        try expectEqual(ChannelInference.infer(from: "sd.battery"), ["battery"])
+        try expectEqual(ChannelInference.infer(from: "x = sd.usb"), ["usb"])
+        try expectEqual(ChannelInference.infer(from: "sd."), [])
+        try expectEqual(ChannelInference.infer(from: "sd"), [])
+        try expectEqual(ChannelInference.infer(from: ""), [])
+    }
+
+    test("a rejected occurrence doesn't hide a later valid one") {
+        try expectEqual(ChannelInference.infer(from: "xsd.battery; sd.batteryX; sd.battery.percent"), ["battery"])
+        try expectEqual(ChannelInference.infer(from: "sd.sd.battery"), [])
+        try expectEqual(ChannelInference.infer(from: "$sd.usb _sd.usb 1sd.usb"), [])
+        try expectEqual(ChannelInference.infer(from: "(sd.usb)[sd.camera]{sd.mouse}"), ["usb", "camera", "mouse"])
+    }
+
+    test("boundaries are judged on whole characters, unicode included") {
+        // Non-ASCII punctuation and symbols are boundaries; letters are not.
+        try expectEqual(ChannelInference.infer(from: "→sd.battery✓"), ["battery"])
+        try expectEqual(ChannelInference.infer(from: "🔋sd.battery🔋"), ["battery"])
+        try expectEqual(ChannelInference.infer(from: "«sd.usb»"), ["usb"])
+        try expectEqual(ChannelInference.infer(from: "ésd.battery"), [])
+        try expectEqual(ChannelInference.infer(from: "sd.batteryé"), [])
+        try expectEqual(ChannelInference.infer(from: "sd.battery日本"), [])
+        try expectEqual(ChannelInference.infer(from: "日本sd.battery"), [])
+        try expectEqual(ChannelInference.infer(from: "sd.battery٣"), [])
+        // A combining mark joins the character before it, so `y` + U+0301
+        // is not the `y` that ends "battery".
+        try expectEqual(ChannelInference.infer(from: "sd.battery\u{301}.percent"), [])
+        // ...and an accented letter before `sd` is still a letter.
+        try expectEqual(ChannelInference.infer(from: "e\u{301}sd.battery"), [])
+        // CRLF is one character and a boundary.
+        try expectEqual(ChannelInference.infer(from: "\r\nsd.usb\r\n"), ["usb"])
+    }
+
     test("multiple references in one source accumulate") {
         let src = """
         sd.fs.read('~/x'); sd.windows.focused.subscribe(w => sd.notify.show({title: w.title}));
