@@ -554,18 +554,12 @@ enum WindowsByID {
     // first-seen order preserved. Pure struct so the bookkeeping is testable
     // without any window server.
     struct BatchFrameLedger {
-        private var entries: [(id: CGWindowID, frame: CGRect)] = []
+        private var frames = LatestWinsQueue<CGWindowID, CGRect>()
         mutating func record(id: CGWindowID, frame: CGRect) {
-            if let i = entries.firstIndex(where: { $0.id == id }) {
-                entries[i].frame = frame
-            } else {
-                entries.append((id: id, frame: frame))
-            }
+            frames.offer(id, frame) { _, newer in newer }
         }
         mutating func drain() -> [(id: CGWindowID, frame: CGRect)] {
-            let out = entries
-            entries = []
-            return out
+            frames.take().map { (id: $0.key, frame: $0.value) }
         }
     }
     private static var pendingFrames = BatchFrameLedger()
