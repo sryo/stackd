@@ -124,32 +124,7 @@ enum Apps {
     // Element keyed by its kAXMenuBarAttribute (the app's AXMenuBar). Apps
     // that don't surface a menu bar (background helpers, agents) return nil.
     private static func menuBarElement(pid: pid_t) -> AXUIElement? {
-        let appEl = AXUIElementCreateApplication(pid)
-        AXUIElementSetMessagingTimeout(appEl, 0.1)
-        var ref: AnyObject?
-        guard AXUIElementCopyAttributeValue(appEl, kAXMenuBarAttribute as CFString, &ref) == .success,
-              let bar = ref else { return nil }
-        // swiftlint:disable:next force_cast
-        return (bar as! AXUIElement)
-    }
-
-    private static func axString(_ el: AXUIElement, _ attr: String) -> String? {
-        var ref: AnyObject?
-        guard AXUIElementCopyAttributeValue(el, attr as CFString, &ref) == .success else { return nil }
-        return ref as? String
-    }
-
-    private static func axBool(_ el: AXUIElement, _ attr: String) -> Bool? {
-        var ref: AnyObject?
-        guard AXUIElementCopyAttributeValue(el, attr as CFString, &ref) == .success else { return nil }
-        return (ref as? NSNumber)?.boolValue
-    }
-
-    private static func axChildren(_ el: AXUIElement) -> [AXUIElement] {
-        var ref: AnyObject?
-        guard AXUIElementCopyAttributeValue(el, kAXChildrenAttribute as CFString, &ref) == .success,
-              let arr = ref as? [AXUIElement] else { return [] }
-        return arr
+        AX.element(of: AX.appElement(pid: pid, timeout: 0.1), kAXMenuBarAttribute)
     }
 
     /// Recursive walk producing nested `{title, role, enabled?, marked?,
@@ -170,28 +145,21 @@ enum Apps {
         // on happy path: invisible (AX responds in <10ms when responsive).
         AXUIElementSetMessagingTimeout(el, 1.0)
         var out: [String: Any] = [:]
-        if let title = axString(el, kAXTitleAttribute) { out["title"] = title }
-        if let role  = axString(el, kAXRoleAttribute)  { out["role"]  = role }
-        if let enabled = axBool(el, kAXEnabledAttribute) { out["enabled"] = enabled }
+        if let title = AX.string(of: el, kAXTitleAttribute) { out["title"] = title }
+        if let role  = AX.string(of: el, kAXRoleAttribute)  { out["role"]  = role }
+        if let enabled = AX.bool(of: el, kAXEnabledAttribute) { out["enabled"] = enabled }
         // AXMenuItemMarkChar is unset (kAXErrorNoValue) when the item isn't
         // ticked; presence of any value means marked. We surface this as a
         // bool so JS consumers don't have to special-case the ✓ character.
-        var markRef: AnyObject?
-        if AXUIElementCopyAttributeValue(el, kAXMenuItemMarkCharAttribute as CFString, &markRef) == .success,
-           markRef != nil {
+        if AX.hasValue(el, kAXMenuItemMarkCharAttribute) {
             out["marked"] = true
         }
         // Keyboard shortcut as a short string ("⌘S"). cmdChar is the key
         // glyph; cmdModifiers is the modifier mask (kAXMenuItemModifierNoCommand
         // means no shortcut). Best-effort — apps without shortcut attributes
         // simply omit the key.
-        if let cmdChar = axString(el, kAXMenuItemCmdCharAttribute), !cmdChar.isEmpty {
-            var modsRef: AnyObject?
-            var mods: Int = 0
-            if AXUIElementCopyAttributeValue(el, kAXMenuItemCmdModifiersAttribute as CFString, &modsRef) == .success,
-               let n = modsRef as? NSNumber {
-                mods = n.intValue
-            }
+        if let cmdChar = AX.string(of: el, kAXMenuItemCmdCharAttribute), !cmdChar.isEmpty {
+            let mods = AX.int(of: el, kAXMenuItemCmdModifiersAttribute) ?? 0
             // kAXMenuItemModifierNoCommand = 0x1 means "no shortcut". The
             // remaining bits are shift (0x4), option/alt (0x2), control (0x8);
             // cmd is always present unless NoCommand is set.
@@ -209,13 +177,13 @@ enum Apps {
         // Unwrap it the way Hammerspoon does so the JSON tree matches the
         // user's mental model ("File" -> ["New", "Open", ...] not
         // ["File" -> [AXMenu -> [...]]]).
-        let kids = axChildren(el)
+        let kids = AX.children(of: el)
         if !kids.isEmpty {
             var effective = kids
             if kids.count == 1,
-               let firstRole = axString(kids[0], kAXRoleAttribute),
+               let firstRole = AX.string(of: kids[0], kAXRoleAttribute),
                firstRole == (kAXMenuRole as String) {
-                effective = axChildren(kids[0])
+                effective = AX.children(of: kids[0])
             }
             // Only emit `children` when the element actually has menu structure.
             // Leaves (AXMenuItem with no submenu) keep the key absent.
@@ -280,16 +248,16 @@ enum Apps {
         while !remaining.isEmpty && guardLoop > 0 {
             guardLoop -= 1
             AXUIElementSetMessagingTimeout(current, 0.1)
-            var kids = axChildren(current)
+            var kids = AX.children(of: current)
             if kids.count == 1,
-               let role = axString(kids[0], kAXRoleAttribute),
+               let role = AX.string(of: kids[0], kAXRoleAttribute),
                role == (kAXMenuRole as String) {
-                kids = axChildren(kids[0])
+                kids = AX.children(of: kids[0])
             }
             let target = remaining.removeFirst()
             var matched: AXUIElement?
             for child in kids {
-                if axString(child, kAXTitleAttribute) == target {
+                if AX.string(of: child, kAXTitleAttribute) == target {
                     matched = child
                     break
                 }
@@ -307,12 +275,10 @@ enum Apps {
         guard let el = resolveMenuPath(pid: pid, path: path) else { return nil }
         AXUIElementSetMessagingTimeout(el, 0.1)
         var out: [String: Any] = [:]
-        if let t = axString(el, kAXTitleAttribute) { out["title"] = t }
-        if let r = axString(el, kAXRoleAttribute)  { out["role"]  = r }
-        if let e = axBool(el, kAXEnabledAttribute) { out["enabled"] = e }
-        var markRef: AnyObject?
-        if AXUIElementCopyAttributeValue(el, kAXMenuItemMarkCharAttribute as CFString, &markRef) == .success,
-           markRef != nil {
+        if let t = AX.string(of: el, kAXTitleAttribute) { out["title"] = t }
+        if let r = AX.string(of: el, kAXRoleAttribute)  { out["role"]  = r }
+        if let e = AX.bool(of: el, kAXEnabledAttribute) { out["enabled"] = e }
+        if AX.hasValue(el, kAXMenuItemMarkCharAttribute) {
             out["marked"] = true
         }
         return out
@@ -365,17 +331,7 @@ enum Apps {
     /// no focused window (background-only, all minimized, etc.) or the SPI
     /// shim is unavailable. Mirrors hs.application:focusedWindow.
     static func focusedWindow(pid: pid_t) -> Int? {
-        guard let getWindow = AXShim.getWindow else { return nil }
-        let appEl = AXUIElementCreateApplication(pid)
-        AXUIElementSetMessagingTimeout(appEl, 0.1)
-        var ref: AnyObject?
-        guard AXUIElementCopyAttributeValue(appEl, kAXFocusedWindowAttribute as CFString, &ref) == .success,
-              let win = ref else { return nil }
-        // swiftlint:disable:next force_cast
-        let el = win as! AXUIElement
-        var wid: CGWindowID = 0
-        guard getWindow(el, &wid) == .success else { return nil }
-        return Int(wid)
+        windowID(pid: pid, attribute: kAXFocusedWindowAttribute)
     }
 
     /// CGWindowID of the AX main window for `pid`, or nil. The main window
@@ -383,16 +339,16 @@ enum Apps {
     /// focused window (e.g. a focused inspector/palette atop a main doc).
     /// Mirrors hs.application:mainWindow.
     static func mainWindow(pid: pid_t) -> Int? {
-        guard let getWindow = AXShim.getWindow else { return nil }
-        let appEl = AXUIElementCreateApplication(pid)
-        AXUIElementSetMessagingTimeout(appEl, 0.1)
-        var ref: AnyObject?
-        guard AXUIElementCopyAttributeValue(appEl, kAXMainWindowAttribute as CFString, &ref) == .success,
-              let win = ref else { return nil }
-        // swiftlint:disable:next force_cast
-        let el = win as! AXUIElement
+        windowID(pid: pid, attribute: kAXMainWindowAttribute)
+    }
+
+    /// CGWindowID of the window element `attribute` names on the app, nil
+    /// when the app has none or the SPI shim is unavailable.
+    private static func windowID(pid: pid_t, attribute: String) -> Int? {
+        guard let getWindow = AXShim.getWindow,
+              let win = AX.element(of: AX.appElement(pid: pid, timeout: 0.1), attribute) else { return nil }
         var wid: CGWindowID = 0
-        guard getWindow(el, &wid) == .success else { return nil }
+        guard getWindow(win, &wid) == .success else { return nil }
         return Int(wid)
     }
 
@@ -401,12 +357,8 @@ enum Apps {
     /// SPI shim is unavailable. Mirrors hs.application:allWindows but
     /// returns ids only.
     static func allWindows(pid: pid_t) -> [Int] {
-        guard let getWindow = AXShim.getWindow else { return [] }
-        let appEl = AXUIElementCreateApplication(pid)
-        AXUIElementSetMessagingTimeout(appEl, 0.1)
-        var ref: AnyObject?
-        guard AXUIElementCopyAttributeValue(appEl, kAXWindowsAttribute as CFString, &ref) == .success,
-              let arr = ref as? [AXUIElement] else { return [] }
+        guard let getWindow = AXShim.getWindow,
+              let arr = AX.elements(of: AX.appElement(pid: pid, timeout: 0.1), kAXWindowsAttribute) else { return [] }
         var out: [Int] = []
         out.reserveCapacity(arr.count)
         for el in arr {
@@ -505,9 +457,7 @@ enum AXEnhancedUI {
 
     /// Current value, nil when the app doesn't expose it.
     static func read(_ appEl: AXUIElement) -> Bool? {
-        var ref: AnyObject?
-        guard AXUIElementCopyAttributeValue(appEl, attribute, &ref) == .success else { return nil }
-        return (ref as? NSNumber)?.boolValue
+        AX.bool(of: appEl, attribute as String)
     }
 
     /// Run `body` with the attribute at `want`, then put back what `prior`

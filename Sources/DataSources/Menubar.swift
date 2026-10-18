@@ -439,9 +439,9 @@ enum MenubarItems {
                 return (app.bundleIdentifier, app.localizedName)
             }
 
-            let title = axStringAttr(child, kAXTitleAttribute as String) ?? ""
-            let position = axPointAttr(child, kAXPositionAttribute as String) ?? .zero
-            let size     = axSizeAttr(child,  kAXSizeAttribute     as String) ?? .zero
+            let title    = AX.string(of: child, kAXTitleAttribute) ?? ""
+            let position = AX.point(of: child, kAXPositionAttribute) ?? .zero
+            let size     = AX.size(of: child, kAXSizeAttribute) ?? .zero
             let x        = Double(position.x)
             let width    = Double(size.width)
             let hidden   = isHidden(itemX: x, itemWidth: width,
@@ -468,15 +468,9 @@ enum MenubarItems {
     private static func systemWideExtras() -> [AXUIElement]? {
         let systemWide = AXUIElementCreateSystemWide()
         AXUIElementSetMessagingTimeout(systemWide, 0.5)
-        var menuBarRef: AnyObject?
-        guard AXUIElementCopyAttributeValue(systemWide, "AXExtrasMenuBar" as CFString, &menuBarRef) == .success,
-              let menuBar = menuBarRef else { return nil }
-        let menuBarEl = menuBar as! AXUIElement
-        AXUIElementSetMessagingTimeout(menuBarEl, 0.5)
-        var childrenRef: AnyObject?
-        guard AXUIElementCopyAttributeValue(menuBarEl, kAXChildrenAttribute as CFString, &childrenRef) == .success,
-              let children = childrenRef as? [AXUIElement] else { return [] }
-        return children
+        guard let menuBar = AX.element(of: systemWide, "AXExtrasMenuBar") else { return nil }
+        AXUIElementSetMessagingTimeout(menuBar, 0.5)
+        return AX.children(of: menuBar)
     }
 
     /// The status items gathered process by process. A process with none
@@ -504,45 +498,9 @@ enum MenubarItems {
 
     /// One process's status items; nil when it has no extras menubar.
     private static func extrasChildren(of pid: pid_t) -> [AXUIElement]? {
-        let app = AXUIElementCreateApplication(pid)
-        AXUIElementSetMessagingTimeout(app, 0.1)
-        var barRef: AnyObject?
-        guard AXUIElementCopyAttributeValue(app, "AXExtrasMenuBar" as CFString, &barRef) == .success,
-              let bar = barRef else { return nil }
-        let barEl = bar as! AXUIElement
-        AXUIElementSetMessagingTimeout(barEl, 0.1)
-        var childrenRef: AnyObject?
-        guard AXUIElementCopyAttributeValue(barEl, kAXChildrenAttribute as CFString, &childrenRef) == .success,
-              let children = childrenRef as? [AXUIElement] else { return [] }
-        return children
-    }
-
-    // MARK: - AX attribute helpers (file-local)
-
-    private static func axStringAttr(_ el: AXUIElement, _ key: String) -> String? {
-        var ref: AnyObject?
-        guard AXUIElementCopyAttributeValue(el, key as CFString, &ref) == .success else { return nil }
-        return ref as? String
-    }
-
-    private static func axPointAttr(_ el: AXUIElement, _ key: String) -> CGPoint? {
-        var ref: AnyObject?
-        guard AXUIElementCopyAttributeValue(el, key as CFString, &ref) == .success,
-              let value = ref else { return nil }
-        let axVal = value as! AXValue
-        var point = CGPoint.zero
-        guard AXValueGetValue(axVal, .cgPoint, &point) else { return nil }
-        return point
-    }
-
-    private static func axSizeAttr(_ el: AXUIElement, _ key: String) -> CGSize? {
-        var ref: AnyObject?
-        guard AXUIElementCopyAttributeValue(el, key as CFString, &ref) == .success,
-              let value = ref else { return nil }
-        let axVal = value as! AXValue
-        var size = CGSize.zero
-        guard AXValueGetValue(axVal, .cgSize, &size) else { return nil }
-        return size
+        guard let bar = AX.element(of: AX.appElement(pid: pid, timeout: 0.1), "AXExtrasMenuBar") else { return nil }
+        AXUIElementSetMessagingTimeout(bar, 0.1)
+        return AX.children(of: bar)
     }
 }
 

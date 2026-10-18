@@ -15,29 +15,24 @@ enum AX {
 
     static func focusedElement() -> [String: Any]? {
         guard let app = NSWorkspace.shared.frontmostApplication else { return nil }
-        let appEl = AXUIElementCreateApplication(app.processIdentifier)
-        AXUIElementSetMessagingTimeout(appEl, 0.1)
-
-        var ref: AnyObject?
-        let err = AXUIElementCopyAttributeValue(appEl, kAXFocusedUIElementAttribute as CFString, &ref)
-        guard err == .success, let focused = ref else { return nil }
-        let el = focused as! AXUIElement
+        let appEl = appElement(pid: app.processIdentifier, timeout: 0.1)
+        guard let el = element(of: appEl, kAXFocusedUIElementAttribute) else { return nil }
 
         var out: [String: Any] = [
             "app":  app.localizedName ?? "",
             "pid":  Int(app.processIdentifier),
-            "role": stringAttr(el, kAXRoleAttribute) ?? ""
+            "role": string(of: el, kAXRoleAttribute) ?? ""
         ]
-        if let role = stringAttr(el, kAXRoleDescriptionAttribute) {
+        if let role = string(of: el, kAXRoleDescriptionAttribute) {
             out["roleDescription"] = role
         }
-        if let value = stringAttr(el, kAXValueAttribute) {
+        if let value = string(of: el, kAXValueAttribute) {
             out["value"] = value
         }
-        if let selectedText = stringAttr(el, kAXSelectedTextAttribute) {
+        if let selectedText = string(of: el, kAXSelectedTextAttribute) {
             out["selectedText"] = selectedText
         }
-        if let range = rangeAttr(el, kAXSelectedTextRangeAttribute) {
+        if let range = range(of: el, kAXSelectedTextRangeAttribute) {
             out["selectedRange"] = ["location": range.location, "length": range.length]
             if let bounds = boundsForRange(el, range: range) {
                 out["caretBounds"] = [
@@ -100,12 +95,9 @@ enum AX {
 
     static func focusedElementHandle(store: HandleStore) -> Int? {
         guard let app = NSWorkspace.shared.frontmostApplication else { return nil }
-        let appEl = AXUIElementCreateApplication(app.processIdentifier)
-        AXUIElementSetMessagingTimeout(appEl, 0.1)
-        var ref: AnyObject?
-        let err = AXUIElementCopyAttributeValue(appEl, kAXFocusedUIElementAttribute as CFString, &ref)
-        guard err == .success, let focused = ref else { return nil }
-        return store.mint(focused as! AXUIElement)
+        let appEl = appElement(pid: app.processIdentifier, timeout: 0.1)
+        guard let focused = element(of: appEl, kAXFocusedUIElementAttribute) else { return nil }
+        return store.mint(focused)
     }
 
     /// System-wide focused element — mirrors HS's
@@ -119,10 +111,8 @@ enum AX {
     static func focusedElementSystemWideHandle(store: HandleStore) -> Int? {
         let sys = AXUIElementCreateSystemWide()
         AXUIElementSetMessagingTimeout(sys, 0.1)
-        var ref: AnyObject?
-        let err = AXUIElementCopyAttributeValue(sys, kAXFocusedUIElementAttribute as CFString, &ref)
-        guard err == .success, let focused = ref else { return nil }
-        return store.mint(focused as! AXUIElement)
+        guard let focused = element(of: sys, kAXFocusedUIElementAttribute) else { return nil }
+        return store.mint(focused)
     }
 
     // MARK: - Introspection
@@ -149,9 +139,7 @@ enum AX {
     }
 
     static func attribute(handle: Int, name: String, store: HandleStore) -> Any? {
-        guard let el = store.get(handle) else { return nil }
-        var ref: AnyObject?
-        guard AXUIElementCopyAttributeValue(el, name as CFString, &ref) == .success, let v = ref else { return nil }
+        guard let el = store.get(handle), let v = value(of: el, name) else { return nil }
         return marshal(v, store: store)
     }
 
@@ -210,24 +198,18 @@ enum AX {
     // MARK: - Convenience walks
 
     static func children(handle: Int, store: HandleStore) -> [Int]? {
-        guard let el = store.get(handle) else { return nil }
-        var ref: AnyObject?
-        guard AXUIElementCopyAttributeValue(el, kAXChildrenAttribute as CFString, &ref) == .success,
-              let arr = ref as? [AXUIElement] else { return nil }
+        guard let el = store.get(handle), let arr = elements(of: el, kAXChildrenAttribute) else { return nil }
         return arr.map { store.mint($0) }
     }
 
     static func parent(handle: Int, store: HandleStore) -> Int? {
-        guard let el = store.get(handle) else { return nil }
-        var ref: AnyObject?
-        guard AXUIElementCopyAttributeValue(el, kAXParentAttribute as CFString, &ref) == .success,
-              let parent = ref else { return nil }
-        return store.mint(parent as! AXUIElement)
+        guard let el = store.get(handle), let parent = element(of: el, kAXParentAttribute) else { return nil }
+        return store.mint(parent)
     }
 
     static func role(handle: Int, store: HandleStore) -> String? {
         guard let el = store.get(handle) else { return nil }
-        return stringAttr(el, kAXRoleAttribute)
+        return string(of: el, kAXRoleAttribute)
     }
 
     // MARK: - Marshalling (CFType → JSON-able Any)
@@ -352,22 +334,77 @@ enum AX {
         return nil
     }
 
-    // MARK: - Focused-element AX helpers (used by focusedElement() above)
+    // MARK: - Attribute reads
+    //
+    // The one place an AX attribute becomes a typed value. Every `of:` reader
+    // is `from:` applied to the raw copy, and returns nil when the read fails
+    // or the value has a different type — a wedged or incompatible app reads
+    // as "no value", never as a trap. Callers set the messaging timeout that
+    // suits their walk on the element before reading.
 
-    private static func stringAttr(_ el: AXUIElement, _ key: String) -> String? {
-        var ref: AnyObject?
-        guard AXUIElementCopyAttributeValue(el, key as CFString, &ref) == .success else { return nil }
-        return ref as? String
+    /// An application element whose AX calls give up after `timeout` seconds.
+    static func appElement(pid: pid_t, timeout: Float) -> AXUIElement {
+        let el = AXUIElementCreateApplication(pid)
+        AXUIElementSetMessagingTimeout(el, timeout)
+        return el
     }
 
-    private static func rangeAttr(_ el: AXUIElement, _ key: String) -> CFRange? {
+    static func value(of el: AXUIElement, _ attribute: String) -> AnyObject? {
         var ref: AnyObject?
-        guard AXUIElementCopyAttributeValue(el, key as CFString, &ref) == .success,
-              let value = ref else { return nil }
-        let axVal = value as! AXValue
+        guard AXUIElementCopyAttributeValue(el, attribute as CFString, &ref) == .success else { return nil }
+        return ref
+    }
+
+    /// True when the attribute holds any value; an unset attribute (such as a
+    /// menu item's mark character when it isn't ticked) reports no value.
+    static func hasValue(_ el: AXUIElement, _ attribute: String) -> Bool {
+        value(of: el, attribute) != nil
+    }
+
+    static func string(of el: AXUIElement, _ attribute: String) -> String? { string(from: value(of: el, attribute)) }
+    static func bool(of el: AXUIElement, _ attribute: String) -> Bool? { bool(from: value(of: el, attribute)) }
+    static func int(of el: AXUIElement, _ attribute: String) -> Int? { int(from: value(of: el, attribute)) }
+    static func element(of el: AXUIElement, _ attribute: String) -> AXUIElement? { element(from: value(of: el, attribute)) }
+    static func elements(of el: AXUIElement, _ attribute: String) -> [AXUIElement]? { elements(from: value(of: el, attribute)) }
+    /// The element's children; empty when the read fails or it has none.
+    static func children(of el: AXUIElement) -> [AXUIElement] { elements(of: el, kAXChildrenAttribute) ?? [] }
+    static func point(of el: AXUIElement, _ attribute: String) -> CGPoint? { point(from: value(of: el, attribute)) }
+    static func size(of el: AXUIElement, _ attribute: String) -> CGSize? { size(from: value(of: el, attribute)) }
+    static func range(of el: AXUIElement, _ attribute: String) -> CFRange? { range(from: value(of: el, attribute)) }
+
+    static func string(from value: AnyObject?) -> String? { value as? String }
+    static func bool(from value: AnyObject?) -> Bool? { (value as? NSNumber)?.boolValue }
+    static func int(from value: AnyObject?) -> Int? { (value as? NSNumber)?.intValue }
+
+    static func element(from value: AnyObject?) -> AXUIElement? {
+        guard let value = value, CFGetTypeID(value) == AXUIElementGetTypeID() else { return nil }
+        return (value as! AXUIElement)
+    }
+
+    static func elements(from value: AnyObject?) -> [AXUIElement]? { value as? [AXUIElement] }
+
+    static func point(from value: AnyObject?) -> CGPoint? {
+        var point = CGPoint.zero
+        guard let boxed = typedAXValue(value, .cgPoint), AXValueGetValue(boxed, .cgPoint, &point) else { return nil }
+        return point
+    }
+
+    static func size(from value: AnyObject?) -> CGSize? {
+        var size = CGSize.zero
+        guard let boxed = typedAXValue(value, .cgSize), AXValueGetValue(boxed, .cgSize, &size) else { return nil }
+        return size
+    }
+
+    static func range(from value: AnyObject?) -> CFRange? {
         var range = CFRange(location: 0, length: 0)
-        guard AXValueGetValue(axVal, .cfRange, &range) else { return nil }
+        guard let boxed = typedAXValue(value, .cfRange), AXValueGetValue(boxed, .cfRange, &range) else { return nil }
         return range
+    }
+
+    private static func typedAXValue(_ value: AnyObject?, _ type: AXValueType) -> AXValue? {
+        guard let value = value, CFGetTypeID(value) == AXValueGetTypeID() else { return nil }
+        let axValue = value as! AXValue
+        return AXValueGetType(axValue) == type ? axValue : nil
     }
 
     private static func boundsForRange(_ el: AXUIElement, range: CFRange) -> CGRect? {
