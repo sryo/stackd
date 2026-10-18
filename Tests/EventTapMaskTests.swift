@@ -48,6 +48,37 @@ func registerEventTapMaskTests() {
                         1 << 29)
     }
 
+    // MARK: - neededObserverMask
+
+    test("neededObserverMask: no handlers needs no events") {
+        try expectEqual(EventTapRegistry.neededObserverMask(handlers: []), 0)
+    }
+
+    test("neededObserverMask: key handlers alone never wake the tap for pointer, scroll or gesture events") {
+        let mask = EventTapRegistry.neededObserverMask(handlers: [.keyDown])
+        try expectEqual(mask, bit(.keyDown))
+        for type in [CGEventType.mouseMoved, .leftMouseDragged, .rightMouseDragged, .scrollWheel,
+                     Gesture.cgEventType] {
+            try expectEqual(mask & bit(type), 0, "type \(type.rawValue)")
+        }
+    }
+
+    test("neededObserverMask: one bit per handled type") {
+        try expectEqual(EventTapRegistry.neededObserverMask(handlers: [.mouseMoved, .scrollWheel]),
+                        bit(.mouseMoved) | bit(.scrollWheel))
+    }
+
+    test("neededObserverMask: every event name a stack can tap is covered") {
+        let names = ["keyDown", "keyUp", "flagsChanged", "leftMouseDown", "leftMouseUp", "rightMouseDown",
+                     "rightMouseUp", "otherMouseDown", "otherMouseUp", "leftMouseDragged", "rightMouseDragged",
+                     "mouseMoved", "scrollWheel", "gesture"]
+        let types = Set(names.compactMap { EventTapRegistry.parse($0) })
+        try expectEqual(types.count, 14)
+        let mask = EventTapRegistry.neededObserverMask(handlers: types)
+        try expectEqual(mask.nonzeroBitCount, 14)
+        for type in types { try expect(mask & bit(type) != 0, "type \(type.rawValue)") }
+    }
+
     // MARK: - tapMaskAction
 
     test("tapMaskAction: an installed, enabled tap with nothing needed is disabled") {
