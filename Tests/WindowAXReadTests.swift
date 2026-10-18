@@ -96,6 +96,35 @@ func registerWindowAXReadTests() {
         try expect(swapped.frame == nil, "a size in the position slot is not a position")
     }
 
+    test("WindowAXRead.frameOrZero keeps the half that read and zeroes the other") {
+        let noSize = WindowAXRead(attributes: [position, size],
+                                  values: [axValue(point: CGPoint(x: 10, y: 20)), axErrorSlot(.cannotComplete)],
+                                  callError: .success)
+        try expectEqual(noSize.frameOrZero, CGRect(x: 10, y: 20, width: 0, height: 0))
+        let failed = WindowAXRead(attributes: [position, size], values: nil, callError: .cannotComplete)
+        try expectEqual(failed.frameOrZero, .zero)
+    }
+
+    test("WindowAXRead.frame(of:) is nil for an element that cannot be read") {
+        try expect(WindowAXRead.frame(of: AX.appElement(pid: unreachablePid, timeout: 0.05)) == nil)
+    }
+
+    test("WindowMotionEngine.animate completes unsettled when the window has no readable frame") {
+        var settled: Bool?
+        WindowMotionEngine.shared.animate(windowID: 0, to: CGRect(x: 0, y: 0, width: 100, height: 100),
+                                          duration: 0.2, easing: .linear) { settled = $0 }
+        try expectEqual(settled, false, "no element, no from-frame: nothing animates")
+        try expect(!WindowMotionEngine.shared.isAnimating(windowID: 0))
+    }
+
+    test("WindowsByID frame write steps leave an unreadable element untouched") {
+        // The lift and keep-inside steps read the current frame first; with
+        // no frame to read they write nothing and must not trap.
+        let el = AX.appElement(pid: unreachablePid, timeout: 0.05)
+        WindowsByID.liftIfOverhanging(element: el, target: CGRect(x: 0, y: 0, width: 100, height: 100))
+        WindowsByID.keepInsideIfHeldLarger(element: el, target: CGRect(x: 0, y: 0, width: 100, height: 100))
+    }
+
     test("WindowAXRead of an unreachable element fails every slot and never traps") {
         let el = AX.appElement(pid: unreachablePid, timeout: 0.05)
         let read = WindowAXRead(el, [minimized, subrole, position, size])

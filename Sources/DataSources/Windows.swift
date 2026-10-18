@@ -385,7 +385,14 @@ struct WindowAXRead {
 
     private let slots: [String: Slot]
 
-    static let titleAndFrame = [kAXTitleAttribute, kAXPositionAttribute, kAXSizeAttribute]
+    static let positionAndSize = [kAXPositionAttribute, kAXSizeAttribute]
+    static let titleAndFrame = [kAXTitleAttribute] + positionAndSize
+
+    /// The element's frame in one round trip; nil unless position and size
+    /// both read. Thread-agnostic.
+    static func frame(of el: AXUIElement) -> CGRect? {
+        WindowAXRead(el, positionAndSize).frame
+    }
 
     /// Blocks for up to the element's AX messaging timeout. Thread-agnostic.
     init(_ el: AXUIElement, _ attributes: [String]) {
@@ -727,7 +734,7 @@ enum WindowsByID {
     /// size writes, which AppKit otherwise refuses. Thread-agnostic.
     static func liftIfOverhanging(element el: AXUIElement, target: CGRect) {
         guard let display = displayBounds(for: target),
-              let current = axFrame(element: el),
+              let current = WindowAXRead.frame(of: el),
               case .position(var lift)? = FrameWriteSteps.plan(current: current, target: target, display: display).first,
               let liftVal = AXValueCreate(.cgPoint, &lift) else { return }
         _ = AXUIElementSetAttributeValue(el, kAXPositionAttribute as CFString, liftVal)
@@ -736,7 +743,7 @@ enum WindowsByID {
     /// The keepInside step of FrameWriteSteps: a window the app held larger
     /// than the target moves back onto the target's display. Thread-agnostic.
     static func keepInsideIfHeldLarger(element el: AXUIElement, target: CGRect) {
-        guard let landed = axFrame(element: el),
+        guard let landed = WindowAXRead.frame(of: el),
               var origin = FrameWriteSteps.keepInside(target: target, landed: landed,
                                                       display: displayBounds(for: target)),
               let val = AXValueCreate(.cgPoint, &origin) else { return }
@@ -747,19 +754,6 @@ enum WindowsByID {
         let displays = MotionClock.activeDisplays()
         guard let id = MotionClock.display(for: target, displays: displays) else { return nil }
         return displays.first(where: { $0.id == id })?.bounds
-    }
-
-    private static func axFrame(element el: AXUIElement) -> CGRect? {
-        var posRef: CFTypeRef?, sizeRef: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(el, kAXPositionAttribute as CFString, &posRef) == .success,
-              AXUIElementCopyAttributeValue(el, kAXSizeAttribute as CFString, &sizeRef) == .success,
-              let p = posRef, let z = sizeRef else { return nil }
-        var pos = CGPoint.zero, size = CGSize.zero
-        // swiftlint:disable force_cast
-        guard AXValueGetValue(p as! AXValue, .cgPoint, &pos),
-              AXValueGetValue(z as! AXValue, .cgSize, &size) else { return nil }
-        // swiftlint:enable force_cast
-        return CGRect(origin: pos, size: size)
     }
 
     static func settleFrameAX(element el: AXUIElement, frame: CGRect, order: FrameWriteOrder) -> Bool {
@@ -778,14 +772,7 @@ enum WindowsByID {
             sOK = AXUIElementSetAttributeValue(el, kAXSizeAttribute as CFString, szVal)
             pOK = AXUIElementSetAttributeValue(el, kAXPositionAttribute as CFString, posVal)
         }
-        var readRef: CFTypeRef?
-        var readBack: CGSize?
-        if AXUIElementCopyAttributeValue(el, kAXSizeAttribute as CFString, &readRef) == .success,
-           let v = readRef {
-            var s = CGSize.zero
-            // swiftlint:disable:next force_cast
-            if AXValueGetValue(v as! AXValue, .cgSize, &s) { readBack = s }
-        }
+        let readBack = AX.size(of: el, kAXSizeAttribute)
         if FrameWriteOrder.needsSizeReassert(target: frame, readBack: readBack) {
             sOK = AXUIElementSetAttributeValue(el, kAXSizeAttribute as CFString, szVal)
             keepInsideIfHeldLarger(element: el, target: frame)
@@ -975,17 +962,10 @@ enum WindowsByID {
     }
 
     /// Current frame from AX (in the same Cocoa coords sd.windows.all returns).
+    /// An unreadable half reads as zero once the element resolved.
     static func frame(windowID: CGWindowID) -> CGRect? {
         guard let el = elementFor(windowID: windowID) else { return nil }
-        var posRef: AnyObject?
-        var sizeRef: AnyObject?
-        AXUIElementCopyAttributeValue(el, kAXPositionAttribute as CFString, &posRef)
-        AXUIElementCopyAttributeValue(el, kAXSizeAttribute as CFString, &sizeRef)
-        var pt = CGPoint.zero
-        var sz = CGSize.zero
-        if let p = posRef { AXValueGetValue(p as! AXValue, .cgPoint, &pt) }
-        if let s = sizeRef { AXValueGetValue(s as! AXValue, .cgSize, &sz) }
-        return CGRect(origin: pt, size: sz)
+        return WindowAXRead(el, WindowAXRead.positionAndSize).frameOrZero
     }
 
     static func isMinimized(windowID: CGWindowID) -> Bool {
@@ -1159,35 +1139,27 @@ enum WindowsByID {
     /// on the native dots (e.g. windowscape routes the yellow dot to its
     /// snapshot subsystem instead of the OS genie).
     ///
-    /// One AX lookup per button (three round-trips to the app) batched into
-    /// a single RPC. AX timeout 100ms — same gate as `cornerHints` / `info`.
+    /// One round trip resolves the three buttons, then one per button reads
+    /// its frame. AX timeout 100ms — same gate as `cornerHints` / `info`.
     static func buttonFrames(windowID: CGWindowID) -> [String: Any]? {
         guard let el = elementFor(windowID: windowID) else { return nil }
         AXUIElementSetMessagingTimeout(el, 0.1)
-        func rect(_ attr: String) -> Any {
-            var btnRef: AnyObject?
-            guard AXUIElementCopyAttributeValue(el, attr as CFString, &btnRef) == .success,
-                  let btn = btnRef else { return NSNull() }
-            // swiftlint:disable:next force_cast
-            let button = btn as! AXUIElement
-            var posRef: AnyObject?, sizeRef: AnyObject?
-            AXUIElementCopyAttributeValue(button, kAXPositionAttribute as CFString, &posRef)
-            AXUIElementCopyAttributeValue(button, kAXSizeAttribute     as CFString, &sizeRef)
-            var pt = CGPoint.zero, sz = CGSize.zero
-            if let p = posRef { AXValueGetValue(p as! AXValue, .cgPoint, &pt) }
-            if let s = sizeRef { AXValueGetValue(s as! AXValue, .cgSize,  &sz) }
-            if sz.width <= 0 || sz.height <= 0 { return NSNull() }
-            return [
-                "x": Int(pt.x), "y": Int(pt.y),
-                "w": Int(sz.width), "h": Int(sz.height)
-            ] as [String: Int]
+        let buttons = WindowAXRead(el, buttonAttributes.map(\.attribute))
+        var out: [String: Any] = [:]
+        for (key, attribute) in buttonAttributes {
+            let rect = buttons.element(attribute).flatMap { button -> [String: Int]? in
+                let f = WindowAXRead(button, WindowAXRead.positionAndSize).frameOrZero
+                guard f.size.width > 0, f.size.height > 0 else { return nil }
+                return ["x": Int(f.origin.x), "y": Int(f.origin.y), "w": Int(f.size.width), "h": Int(f.size.height)]
+            }
+            out[key] = rect.map { $0 as Any } ?? NSNull()
         }
-        return [
-            "close":    rect("AXCloseButton"),
-            "zoom":     rect("AXZoomButton"),
-            "minimize": rect("AXMinimizeButton")
-        ]
+        return out
     }
+
+    private static let buttonAttributes: [(key: String, attribute: String)] = [
+        ("close", "AXCloseButton"), ("zoom", "AXZoomButton"), ("minimize", "AXMinimizeButton"),
+    ]
 
     /// Per-window tab list. Walks the window's direct children for an
     /// `AXTabGroup` (browsers, Finder, terminals all use it); returns

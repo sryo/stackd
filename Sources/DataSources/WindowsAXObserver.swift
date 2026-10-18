@@ -964,7 +964,7 @@ final class WindowsAXObserver {
     private func startFrameBangRead(_ key: FrameBangKey, _ start: FrameBangReads<FrameBangTarget>.Start) {
         let window = start.source.window
         AXAppQueues.queue(for: start.source.pid).async { [weak self] in
-            let frame = WindowsAXObserver.readWindowFrame(window) ?? .zero
+            let frame = WindowAXRead.frame(of: window) ?? .zero
             let readAt = CFAbsoluteTimeGetCurrent()
             DispatchQueue.main.async {
                 self?.frameBangReadResolved(key, generation: start.generation, frame: frame, readAt: readAt)
@@ -1036,10 +1036,4 @@ final class WindowsAXObserver {
     /// flag and subrole that decide whether it is a window at all, plus the
     /// title and frame its created payload carries.
     private static let createAttributes = [kAXMinimizedAttribute, kAXSubroleAttribute] + WindowAXRead.titleAndFrame
-
-    /// Thread-agnostic: the moved/resized path calls it from the app's AX
-    /// queue.
-    private static func readWindowFrame(_ el: AXUIElement) -> CGRect? {
-        WindowAXRead(el, [kAXPositionAttribute, kAXSizeAttribute]).frame
-    }
 }

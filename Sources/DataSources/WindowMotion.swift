@@ -950,8 +950,11 @@ final class WindowMotionEngine {
         // directly. WindowsByID.frame(windowID:) would repeat the full
         // CGWindowList walk elementFor just paid — twice per window at
         // the exact moment the first animation frame should render.
+        // Reading AX here is fine: at animate() time no write is in flight
+        // for this window, so the AX-cached-requested-value staleness that
+        // makes probe read-backs use CG bounds doesn't apply.
         guard let el = WindowsByID.elementFor(windowID: windowID),
-              let current = Self.axFrame(of: el)
+              let current = WindowAXRead.frame(of: el)
         else {
             completion(false)
             return
@@ -992,24 +995,6 @@ final class WindowMotionEngine {
 
     func isAnimating(windowID: CGWindowID) -> Bool {
         planner.isAnimating(windowID)
-    }
-
-    /// Frame read straight off an already-resolved element. Fine as the
-    /// animation's from-frame: at animate() time no write is in flight for
-    /// this window, so the AX-cached-requested-value staleness that makes
-    /// probe read-backs use CG bounds doesn't apply.
-    private static func axFrame(of element: AXUIElement) -> CGRect? {
-        var posRef: CFTypeRef?
-        var sizeRef: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(element, kAXPositionAttribute as CFString, &posRef) == .success,
-              AXUIElementCopyAttributeValue(element, kAXSizeAttribute as CFString, &sizeRef) == .success
-        else { return nil }
-        var pos = CGPoint.zero
-        var size = CGSize.zero
-        guard let posVal = posRef, AXValueGetValue(posVal as! AXValue, .cgPoint, &pos),
-              let sizeVal = sizeRef, AXValueGetValue(sizeVal as! AXValue, .cgSize, &size)
-        else { return nil }
-        return CGRect(origin: pos, size: size)
     }
 
     /// The all-displays link on a single display (where it is the same
