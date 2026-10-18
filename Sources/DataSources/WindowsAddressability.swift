@@ -271,15 +271,10 @@ enum WindowAddressabilityCache {
     static func readAX(pid: pid_t, windowID: CGWindowID) -> Reading? {
         for attempt in 0..<2 {
             guard let e = WindowsByID.elementFor(windowID: windowID, pid: pid) else { return nil }
-            var isMin = false
-            var minRef: AnyObject?
-            if AXUIElementCopyAttributeValue(e, kAXMinimizedAttribute as CFString, &minRef) == .success,
-               let b = minRef as? Bool {
-                isMin = b
-            }
-            var subroleRef: AnyObject?
-            let subroleErr = AXUIElementCopyAttributeValue(e, kAXSubroleAttribute as CFString, &subroleRef)
-            let isStd = standardVerdict(subrole: subroleRef as? String, isMinimized: isMin)
+            let read = WindowAXRead(e, [kAXMinimizedAttribute, kAXSubroleAttribute])
+            let isMin = read.bool(kAXMinimizedAttribute) ?? false
+            let subroleErr = read.error(kAXSubroleAttribute)
+            let isStd = standardVerdict(subrole: read.string(kAXSubroleAttribute), isMinimized: isMin)
             let reading = Reading(isStandard: isStd, isMinimized: isMin,
                                   traits: isStd ? WindowTraits.read(e) : nil,
                                   subroleError: subroleErr.rawValue)

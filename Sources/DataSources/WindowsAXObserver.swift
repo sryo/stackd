@@ -708,9 +708,10 @@ final class WindowsAXObserver {
         // conflated with "definitely not standard" — kAXWindowCreated won't
         // re-fire, so a wrong drop here is permanent. Unknown AND
         // un-minimized non-standard both get a bounded recheck before
-        // giving up.
-        let isMin = axWindowBool(window, kAXMinimizedAttribute as String) ?? false
-        let verdict = axSubroleVerdict(window)
+        // giving up. Title and frame ride the same AX round trip.
+        let read = WindowAXRead(window, WindowsAXObserver.createAttributes)
+        let isMin = read.bool(kAXMinimizedAttribute) ?? false
+        let verdict = WindowSubroleVerdict(read.slot(kAXSubroleAttribute))
         switch verdict {
         case .standard:
             break
@@ -751,8 +752,8 @@ final class WindowsAXObserver {
         // in response to this create.
         WindowAddressabilityCache.confirm(pid: pid, windowID: wid, isStandard: true, isMinimized: isMin)
 
-        let title = axWindowString(window, kAXTitleAttribute as String) ?? ""
-        let frame = axWindowFrame(window) ?? .zero
+        let title = read.string(kAXTitleAttribute) ?? ""
+        let frame = read.frame ?? .zero
         let snap = WindowsLifecycleObserver.Snap(
             id: Int(wid), pid: Int(pid), app: app, title: title, frame: frame
         )
@@ -843,8 +844,9 @@ final class WindowsAXObserver {
     private func startTitleRead(wid: CGWindowID, generation: UInt64) {
         guard let target = titleTargets[wid] else { return }
         AXAppQueues.queue(for: target.pid).async { [weak self] in
-            let title = Self.readString(target.window, kAXTitleAttribute as String) ?? ""
-            let frame = Self.readWindowFrame(target.window) ?? .zero
+            let read = WindowAXRead(target.window, WindowAXRead.titleAndFrame)
+            let title = read.string(kAXTitleAttribute) ?? ""
+            let frame = read.frame ?? .zero
             DispatchQueue.main.async {
                 self?.titleReadResolved(wid: wid, generation: generation, target: target,
                                         newTitle: title, frame: frame)
@@ -1028,54 +1030,16 @@ final class WindowsAXObserver {
         AppDelegate.shared?.host?.bang(name: "sd.window.focused", detail: ["id": Int(wid), "pid": Int(pid), "app": app])
     }
 
-    // MARK: - AX helpers (window-scoped, to avoid colliding with the
-    // app-scoped helpers used by FrontmostWindowObserver)
+    // MARK: - AX reads
 
-    private func axWindowString(_ el: AXUIElement, _ attr: String) -> String? { Self.readString(el, attr) }
+    /// What a window's create gate reads, in one round trip: the minimized
+    /// flag and subrole that decide whether it is a window at all, plus the
+    /// title and frame its created payload carries.
+    private static let createAttributes = [kAXMinimizedAttribute, kAXSubroleAttribute] + WindowAXRead.titleAndFrame
 
-    /// Thread-agnostic: the title path calls it from the app's AX queue.
-    private static func readString(_ el: AXUIElement, _ attr: String) -> String? {
-        var ref: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(el, attr as CFString, &ref) == .success else { return nil }
-        return ref as? String
-    }
-
-    /// Three-way subrole classification — same gate
-    /// `WindowAddressabilityCache.probe` applies when enriching
-    /// `Windows.all()`, but with the read-error case kept distinct so
-    /// `installPerWindow` can retry instead of permanently dropping a
-    /// window whose subrole read merely timed out.
-    /// `.nonStandard` is a single-sample reading, not a final verdict: mid
-    /// minimize/deminimize a real window reads AXDialog, so callers must
-    /// recheck (or consult isMinimized) before dropping a window on it.
-    private enum SubroleVerdict { case standard, nonStandard, unknown }
-
-    private func axSubroleVerdict(_ el: AXUIElement) -> SubroleVerdict {
-        var ref: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(el, kAXSubroleAttribute as CFString, &ref) == .success,
-              let s = ref as? String else { return .unknown }
-        return s == (kAXStandardWindowSubrole as String) ? .standard : .nonStandard
-    }
-
-    private func axWindowBool(_ el: AXUIElement, _ attr: String) -> Bool? {
-        var ref: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(el, attr as CFString, &ref) == .success else { return nil }
-        return ref as? Bool
-    }
-
-    /// Thread-agnostic (static, touches no observer state): the moved/
-    /// resized path calls it from the app's AX queue.
-    private func axWindowFrame(_ el: AXUIElement) -> CGRect? { Self.readWindowFrame(el) }
-
+    /// Thread-agnostic: the moved/resized path calls it from the app's AX
+    /// queue.
     private static func readWindowFrame(_ el: AXUIElement) -> CGRect? {
-        var posRef: CFTypeRef?
-        var sizeRef: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(el, kAXPositionAttribute as CFString, &posRef) == .success,
-              AXUIElementCopyAttributeValue(el, kAXSizeAttribute as CFString, &sizeRef) == .success,
-              let posCF = posRef, let sizeCF = sizeRef else { return nil }
-        var pt = CGPoint.zero, sz = CGSize.zero
-        AXValueGetValue(posCF as! AXValue, .cgPoint, &pt)
-        AXValueGetValue(sizeCF as! AXValue, .cgSize, &sz)
-        return CGRect(origin: pt, size: sz)
+        WindowAXRead(el, [kAXPositionAttribute, kAXSizeAttribute]).frame
     }
 }

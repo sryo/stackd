@@ -136,18 +136,8 @@ enum Windows {
         guard err == .success, let focused = focusedRef else { return nil }
         // swiftlint:disable:next force_cast
         let win = focused as! AXUIElement
-
-        var titleRef: AnyObject?
-        _ = AXUIElementCopyAttributeValue(win, kAXTitleAttribute as CFString, &titleRef)
-
-        var posRef: AnyObject?
-        var sizeRef: AnyObject?
-        _ = AXUIElementCopyAttributeValue(win, kAXPositionAttribute as CFString, &posRef)
-        _ = AXUIElementCopyAttributeValue(win, kAXSizeAttribute as CFString, &sizeRef)
-        var pt = CGPoint.zero
-        var sz = CGSize.zero
-        if let p = posRef { AXValueGetValue(p as! AXValue, .cgPoint, &pt) }
-        if let s = sizeRef { AXValueGetValue(s as! AXValue, .cgSize, &sz) }
+        let read = WindowAXRead(win, WindowAXRead.titleAndFrame)
+        let frame = read.frameOrZero
 
         // Recover CGWindowID via the private SPI so per-window-id consumers
         // (sd.windows.byId, tiler-style stacks) can target this exact window.
@@ -156,7 +146,8 @@ enum Windows {
         if let getWindow = AXShim.getWindow, getWindow(win, &winId) == .success {
             id = winId
         }
-        return FocusedWindowRead(title: (titleRef as? String) ?? "", origin: pt, size: sz, id: id)
+        return FocusedWindowRead(title: read.string(kAXTitleAttribute) ?? "",
+                                 origin: frame.origin, size: frame.size, id: id)
     }
 
     /// The sd.windows.focused payload for a read of `app`'s focused window.
@@ -375,6 +366,108 @@ enum AXShim {
         }
         return unsafeBitCast(sym, to: GetWindowFn.self)
     }()
+}
+
+// MARK: - WindowAXRead: several window attributes in one AX round trip
+
+/// A window's attributes read with one AXUIElementCopyMultipleAttributeValues
+/// call, so N attributes cost the app one IPC instead of N. The app answers
+/// each attribute independently: a slot it could not read holds an AXValue
+/// of type .axError (or kCFNull for an attribute with no value) in place of
+/// the value, and decodes to `.failure` with that error. A call that fails
+/// outright (dead element, messaging timeout) fails every slot with the
+/// call's error.
+struct WindowAXRead {
+    enum Slot {
+        case value(AnyObject)
+        case failure(AXError)
+    }
+
+    private let slots: [String: Slot]
+
+    static let titleAndFrame = [kAXTitleAttribute, kAXPositionAttribute, kAXSizeAttribute]
+
+    /// Blocks for up to the element's AX messaging timeout. Thread-agnostic.
+    init(_ el: AXUIElement, _ attributes: [String]) {
+        var values: CFArray?
+        let err = AXUIElementCopyMultipleAttributeValues(
+            el, attributes as CFArray, AXCopyMultipleAttributeOptions(rawValue: 0), &values)
+        self.init(attributes: attributes, values: err == .success ? values as? [AnyObject] : nil, callError: err)
+    }
+
+    /// Decodes one call's result: `values` is the returned array (nil when
+    /// the call failed), `callError` what the call returned.
+    init(attributes: [String], values: [AnyObject]?, callError: AXError) {
+        var slots: [String: Slot] = [:]
+        for (i, name) in attributes.enumerated() {
+            guard let values = values else {
+                slots[name] = .failure(callError == .success ? .failure : callError)
+                continue
+            }
+            slots[name] = i < values.count ? Self.decode(values[i]) : .failure(.noValue)
+        }
+        self.slots = slots
+    }
+
+    private static func decode(_ raw: AnyObject) -> Slot {
+        if raw === kCFNull { return .failure(.noValue) }
+        if CFGetTypeID(raw) == AXValueGetTypeID() {
+            let v = raw as! AXValue
+            if AXValueGetType(v) == .axError {
+                var code: Int32 = AXError.failure.rawValue
+                _ = AXValueGetValue(v, .axError, &code)
+                return .failure(AXError(rawValue: code) ?? .failure)
+            }
+        }
+        return .value(raw)
+    }
+
+    /// An attribute that was not asked for reads as a failure.
+    func slot(_ attribute: String) -> Slot { slots[attribute] ?? .failure(.noValue) }
+
+    func value(_ attribute: String) -> AnyObject? {
+        if case .value(let v) = slot(attribute) { return v }
+        return nil
+    }
+
+    /// `.success` for a slot that holds a value.
+    func error(_ attribute: String) -> AXError {
+        if case .failure(let e) = slot(attribute) { return e }
+        return .success
+    }
+
+    func string(_ attribute: String) -> String? { value(attribute) as? String }
+    func bool(_ attribute: String) -> Bool? { value(attribute) as? Bool }
+    func point(_ attribute: String) -> CGPoint? { AX.point(from: value(attribute)) }
+    func size(_ attribute: String) -> CGSize? { AX.size(from: value(attribute)) }
+    func element(_ attribute: String) -> AXUIElement? { AX.element(from: value(attribute)) }
+
+    /// kAXPosition + kAXSize as one rect; nil unless both read.
+    var frame: CGRect? {
+        guard let origin = point(kAXPositionAttribute), let size = size(kAXSizeAttribute) else { return nil }
+        return CGRect(origin: origin, size: size)
+    }
+
+    /// kAXPosition + kAXSize with an unreadable half left at zero, the shape
+    /// the frame readers report for a window whose element resolved.
+    var frameOrZero: CGRect {
+        CGRect(origin: point(kAXPositionAttribute) ?? .zero, size: size(kAXSizeAttribute) ?? .zero)
+    }
+}
+
+/// A window's AXSubrole as one sample: AXStandardWindow, some other subrole,
+/// or no readable subrole. A read that errored (app still building the
+/// window, AX timeout under load) stays `.unknown`, apart from
+/// `.nonStandard`, so a gate can recheck it instead of dropping the window.
+/// `.nonStandard` is not final either: mid minimize/deminimize a real window
+/// reads AXDialog.
+enum WindowSubroleVerdict: Equatable {
+    case standard, nonStandard, unknown
+
+    init(_ slot: WindowAXRead.Slot) {
+        guard case .value(let v) = slot, let s = v as? String else { self = .unknown; return }
+        self = WindowsByID.isStandardSubrole(s) ? .standard : .nonStandard
+    }
 }
 
 // MARK: - WindowsByID: per-window actions targeting a CGWindowID
@@ -934,11 +1027,14 @@ enum WindowsByID {
             return ["toolbarPresent": false, "role": NSNull(), "subrole": NSNull(), "radii": radii]
         }
         AXUIElementSetMessagingTimeout(el, 0.1)
-        let role    = axStringAttribute(el, kAXRoleAttribute)
-        let subrole = axStringAttribute(el, kAXSubroleAttribute)
-        let toolbarPresent = elementHasToolbar(el)
-        return [
-            "toolbarPresent": toolbarPresent,
+        let read = WindowAXRead(el, [kAXRoleAttribute, kAXSubroleAttribute])
+        return cornerHints(el, role: read.string(kAXRoleAttribute), subrole: read.string(kAXSubroleAttribute),
+                           radii: radii)
+    }
+
+    private static func cornerHints(_ el: AXUIElement, role: String?, subrole: String?, radii: Any) -> [String: Any] {
+        [
+            "toolbarPresent": elementHasToolbar(el),
             "role":           role    as Any? ?? NSNull(),
             "subrole":        subrole as Any? ?? NSNull(),
             "radii":          radii
@@ -1016,53 +1112,44 @@ enum WindowsByID {
     /// Batch reader — one AXUIElement lookup, all properties returned.
     /// Replaces 4-9 individual round-trips when a stack wants several
     /// curated readers for the same window (overlay-border at attach time:
-    /// isStandard + cornerHints + frame + title — was 4 RPCs, now 1).
+    /// isStandard + cornerHints + frame + title — was 4 RPCs, now 1). The
+    /// window's own attributes arrive in one multi-attribute read.
     ///
     /// Returns nil when the window is unaddressable. Each field is best-
     /// effort: a missing property is null/false, not a hard failure.
     static func info(windowID: CGWindowID) -> [String: Any]? {
         guard let el = elementFor(windowID: windowID) else { return nil }
         AXUIElementSetMessagingTimeout(el, 0.1)
-        // frame
-        var posRef: AnyObject?, sizeRef: AnyObject?
-        AXUIElementCopyAttributeValue(el, kAXPositionAttribute as CFString, &posRef)
-        AXUIElementCopyAttributeValue(el, kAXSizeAttribute as CFString, &sizeRef)
-        var pt = CGPoint.zero, sz = CGSize.zero
-        if let p = posRef { AXValueGetValue(p as! AXValue, .cgPoint, &pt) }
-        if let s = sizeRef { AXValueGetValue(s as! AXValue, .cgSize,  &sz) }
+        let read = WindowAXRead(el, infoAttributes)
+        let f = read.frameOrZero
         let frame: [String: Int] = [
-            "x": Int(pt.x), "y": Int(pt.y), "w": Int(sz.width), "h": Int(sz.height)
+            "x": Int(f.origin.x), "y": Int(f.origin.y), "w": Int(f.size.width), "h": Int(f.size.height)
         ]
-        // String attrs (nil → NSNull so JSON.stringify yields null)
-        let titleVal:   Any = axStringAttribute(el, kAXTitleAttribute   as String) ?? NSNull()
-        let roleVal:    Any = axStringAttribute(el, kAXRoleAttribute    as String) ?? NSNull()
-        let subroleVal: Any = axStringAttribute(el, kAXSubroleAttribute as String) ?? NSNull()
-        // Bool attrs
-        var minRef: AnyObject?, fsRef: AnyObject?, mainRef: AnyObject?
-        AXUIElementCopyAttributeValue(el, kAXMinimizedAttribute as CFString, &minRef)
-        AXUIElementCopyAttributeValue(el, "AXFullScreen" as CFString,        &fsRef)
-        AXUIElementCopyAttributeValue(el, kAXMainAttribute as CFString,      &mainRef)
-        let isMin = (minRef as? Bool) ?? false
-        let isFs  = (fsRef  as? Bool) ?? false
-        // hasToolbar — same AXToolbar probe as the curated reader.
-        var toolbarRef: AnyObject?
-        AXUIElementCopyAttributeValue(el, "AXToolbar" as CFString, &toolbarRef)
-        let hasToolbar = toolbarRef != nil
-        // isStandard derived from subrole
-        let isStd = (subroleVal as? String) == (kAXStandardWindowSubrole as String)
+        let role = read.string(kAXRoleAttribute)
+        let subrole = read.string(kAXSubroleAttribute)
+        let radii: Any = Overlay.cornerRadii(of: windowID) ?? NSNull()
+        // Strings: nil → NSNull so JSON.stringify yields null.
         return [
             "frame":        frame,
-            "title":        titleVal,
-            "role":         roleVal,
-            "subrole":      subroleVal,
-            "isMinimized":  isMin,
-            "isFullscreen": isFs,
-            "isMain":       (mainRef as? Bool) ?? false,
-            "isStandard":   isStd,
-            "hasToolbar":   hasToolbar,
-            "cornerHints":  cornerHints(windowID: windowID)
+            "title":        read.string(kAXTitleAttribute) as Any? ?? NSNull(),
+            "role":         role as Any? ?? NSNull(),
+            "subrole":      subrole as Any? ?? NSNull(),
+            "isMinimized":  read.bool(kAXMinimizedAttribute) ?? false,
+            "isFullscreen": read.bool(fullScreenAttribute) ?? false,
+            "isMain":       read.bool(kAXMainAttribute) ?? false,
+            "isStandard":   isStandardSubrole(subrole),
+            // Any value under AXToolbar, unlike cornerHints' child walk.
+            "hasToolbar":   read.value(toolbarAttribute) != nil,
+            "cornerHints":  cornerHints(el, role: role, subrole: subrole, radii: radii)
         ].merging(WindowTraits.read(el).fields) { $1 }
     }
+
+    private static let fullScreenAttribute = "AXFullScreen"
+    private static let toolbarAttribute = "AXToolbar"
+    private static let infoAttributes = [
+        kAXPositionAttribute, kAXSizeAttribute, kAXTitleAttribute, kAXRoleAttribute, kAXSubroleAttribute,
+        kAXMinimizedAttribute, fullScreenAttribute, kAXMainAttribute, toolbarAttribute,
+    ]
 
     /// Traffic-light button frames in the same global, top-left-origin coord
     /// space as `frame()`. Returns nil when the window is unaddressable; each
