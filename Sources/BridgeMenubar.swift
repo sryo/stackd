@@ -109,13 +109,12 @@ extension Bridge {
 
             // Read-only AX walk of every visible menubar status item. Used by
             // menubar-manager stacks to enumerate what's in the bar — third-
-            // party app icons + Apple's Spotlight + clock. macOS 14+ Control
-            // Center cluster lives in a separate AXSystemUIServer process and
-            // is not enumerable from systemWide; documented as a limitation.
-            // Folded under the existing "menubar" permission (same gate as
-            // suppress/restore + the menubar.observe channel).
+            // party app icons + Apple's own items. Shares the observer's
+            // caches so a read between polls stays cheap. Folded under the
+            // existing "menubar" permission (same gate as suppress/restore +
+            // the menubar.observe channel).
             .sync("menubar.items", permission: "menubar", denyValue: [[String: Any]]()) { _ in
-                MenubarItems.items()
+                MenubarItemsObserver.shared.snapshot()
             },
         ]
     }

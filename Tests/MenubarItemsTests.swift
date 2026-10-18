@@ -134,4 +134,66 @@ func registerMenubarItemsTests() {
         try expect(!MenubarItemsObserver.shared.isActive,
                    "MenubarItemsObserver must not be active before any stack subscribes")
     }
+
+    // MARK: - MenubarExtrasCandidates (which processes to ask for status items)
+
+    let t0 = Date(timeIntervalSinceReferenceDate: 1_000)
+
+    test("MenubarExtrasCandidates probes every pid it has not seen") {
+        var c = MenubarExtrasCandidates()
+        let pids = c.pidsToProbe(running: [3, 1, 2], now: t0, recheckAfter: 30, staleBudget: 2)
+        try expectEqual(Set(pids), [1, 2, 3])
+    }
+
+    test("MenubarExtrasCandidates keeps asking owners and leaves recently empty pids alone") {
+        var c = MenubarExtrasCandidates()
+        c.record(pid: 1, hasExtras: true, now: t0)
+        c.record(pid: 2, hasExtras: false, now: t0)
+        let pids = c.pidsToProbe(running: [1, 2, 3], now: t0.addingTimeInterval(5),
+                                 recheckAfter: 30, staleBudget: 2)
+        try expectEqual(Set(pids), [1, 3])
+    }
+
+    test("MenubarExtrasCandidates re-asks stale empty pids oldest first, within the budget") {
+        var c = MenubarExtrasCandidates()
+        c.record(pid: 4, hasExtras: false, now: t0.addingTimeInterval(2))
+        c.record(pid: 2, hasExtras: false, now: t0)
+        c.record(pid: 3, hasExtras: false, now: t0.addingTimeInterval(1))
+        let pids = c.pidsToProbe(running: [2, 3, 4], now: t0.addingTimeInterval(40),
+                                 recheckAfter: 30, staleBudget: 2)
+        try expectEqual(pids, [2, 3])
+    }
+
+    test("MenubarExtrasCandidates forgets exited pids so a reused pid is asked again") {
+        var c = MenubarExtrasCandidates()
+        c.record(pid: 2, hasExtras: false, now: t0)
+        c.record(pid: 5, hasExtras: true, now: t0)
+        _ = c.pidsToProbe(running: [1], now: t0.addingTimeInterval(1), recheckAfter: 30, staleBudget: 2)
+        let pids = c.pidsToProbe(running: [2, 5], now: t0.addingTimeInterval(2),
+                                 recheckAfter: 30, staleBudget: 2)
+        try expectEqual(Set(pids), [2, 5])
+        try expect(!c.owners.contains(5), "an exited owner must not stay an owner")
+    }
+
+    test("MenubarExtrasCandidates: a failed read never demotes an owner") {
+        var c = MenubarExtrasCandidates()
+        c.record(pid: 1, hasExtras: true, now: t0)
+        c.record(pid: 1, hasExtras: false, now: t0.addingTimeInterval(1))
+        let pids = c.pidsToProbe(running: [1], now: t0.addingTimeInterval(2), recheckAfter: 30, staleBudget: 0)
+        try expectEqual(pids, [1])
+    }
+
+    // The live read: the system clock's menu extra is always in the bar, so
+    // a trusted process must see at least one item whichever route (system-
+    // wide or per-app) the running macOS supports.
+    test("MenubarItemsObserver.snapshot lists the bar's status items when Accessibility is granted") {
+        guard AXIsProcessTrusted() else { return }
+        let items = MenubarItemsObserver.shared.snapshot()
+        try expect(!items.isEmpty, "no status items read from a trusted process")
+        for item in items {
+            try expect(item["owner"] is String && item["x"] is Double && item["width"] is Double
+                       && item["hidden"] is Bool && item["title"] is String,
+                       "item lost its dict shape: \(item)")
+        }
+    }
 }

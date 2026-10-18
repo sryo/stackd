@@ -343,23 +343,17 @@ enum PopupMenu {
 // MARK: - Menubar items (sd.menubar.items / sd.menubar.observe)
 
 // Read-only enumeration of every visible status item in the system menubar.
-// Walks the AX tree from the system-wide AXUIElement: each running app with
-// status items exposes them as AXMenuBarItem children of an AXMenuBar.
-// Ice (https://github.com/jordanbaird/Ice) proves this is doable without
-// private API; we use the same path.
+// Where the system-wide AXExtrasMenuBar answers, one read returns every
+// item. Newer macOS releases refuse it (-25205), and then each running
+// process is asked for its own AXExtrasMenuBar instead; Apple's own items
+// (clock, Wi-Fi, battery, Control Center) are owned by com.apple.MenuBarAgent
+// there. Ice (https://github.com/jordanbaird/Ice) reads the bar the same way.
 //
-// macOS 14+ quirks:
-//   - Apple's Control Center group (Wi-Fi / Bluetooth / AirDrop / Sound /
-//     Focus / Screen Mirroring / etc.) lives in a separate AXSystemUIServer
-//     process and is NOT enumerable via the standard menubar walk. We
-//     surface third-party menubar items + Apple's Spotlight + clock; the
-//     Control Center cluster is documented as a limitation rather than
-//     special-cased.
-//   - Items pushed past the system's chevron (notch-induced overflow on
-//     MacBook Pro 14"/16", or just too many items for the bar width) live
-//     off-screen at negative X or beyond the right edge. The hidden field
-//     surfaces this so a menubar-manager UI can show "hidden" items
-//     separately.
+// Items pushed past the system's chevron (notch-induced overflow on
+// MacBook Pro 14"/16", or just too many items for the bar width) live
+// off-screen at negative X or beyond the right edge. The hidden field
+// surfaces this so a menubar-manager UI can show "hidden" items
+// separately.
 //
 // Performance: the AX walk happens on every poll (2s default). NSRunning-
 // Application lookup is the slow part of the per-item cost (per-PID dict
@@ -407,8 +401,8 @@ enum MenubarItems {
         return owner
     }
 
-    /// One-shot snapshot of every menubar status item visible to the AX
-    /// tree. Returns one dict per item:
+    /// Snapshot of every menubar status item visible to the AX tree.
+    /// Returns one dict per item:
     ///   { owner: String, title: String, x: Double, width: Double, hidden: Bool }
     /// `owner` is the bundle identifier (or localized name) of the app that
     /// owns the item. `title` is the displayed text (empty for icon-only
@@ -416,44 +410,14 @@ enum MenubarItems {
     /// left edge, `width` its width in points. `hidden` flags items
     /// pushed past the system's chevron / off-screen.
     ///
-    /// Requires Accessibility. Returns [] if not granted. macOS 14+
-    /// Control Center cluster is NOT included — that lives in a separate
-    /// AXSystemUIServer process not walkable from systemWide.
-    static func items() -> [[String: Any]] {
-        var cache: [pid_t: String] = [:]
-        return items(ownerCache: &cache)
-    }
-
-    /// Internal entry-point that accepts an external cache. The observer
-    /// keeps the cache alive across polls so NSRunningApplication lookups
-    /// don't repeat for the same PID every tick.
-    static func items(ownerCache: inout [pid_t: String]) -> [[String: Any]] {
-        let systemWide = AXUIElementCreateSystemWide()
-        AXUIElementSetMessagingTimeout(systemWide, 0.5)
-
-        var menuBarRef: AnyObject?
-        // kAXExtrasMenuBarAttribute carries the "status items" menubar
-        // (right-hand side: clock, Spotlight, Control Center entry,
-        // third-party icons). The vanilla kAXMenuBarAttribute on the
-        // system-wide element returns the active app's app-menubar
-        // (Apple/File/Edit/...) which is NOT what we want here.
-        let extrasErr = AXUIElementCopyAttributeValue(
-            systemWide, "AXExtrasMenuBar" as CFString, &menuBarRef
-        )
-        guard extrasErr == .success, let menuBar = menuBarRef else {
-            // Accessibility denied or the extras attribute isn't exposed
-            // (rare; older macOS). Empty array beats throwing — stacks see
-            // "no items" and can render the empty state.
-            return []
-        }
-        let menuBarEl = menuBar as! AXUIElement
-        AXUIElementSetMessagingTimeout(menuBarEl, 0.5)
-
-        var childrenRef: AnyObject?
-        guard AXUIElementCopyAttributeValue(menuBarEl, kAXChildrenAttribute as CFString, &childrenRef) == .success,
-              let children = childrenRef as? [AXUIElement] else {
-            return []
-        }
+    /// Requires Accessibility. Returns [] if not granted. The observer keeps
+    /// `ownerCache` and `candidates` alive across polls so steady-state
+    /// ticks neither repeat NSRunningApplication lookups nor ask every
+    /// process for its status items.
+    static func items(ownerCache: inout [pid_t: String],
+                      candidates: inout MenubarExtrasCandidates) -> [[String: Any]] {
+        guard AXIsProcessTrusted() else { return [] }
+        let children = systemWideExtras() ?? perAppExtras(&candidates)
 
         // Visible menubar bounds. Use the main screen's frame in AX
         // coordinate space (top-left origin, same as AXPosition values).
@@ -467,8 +431,7 @@ enum MenubarItems {
             AXUIElementSetMessagingTimeout(child, 0.1)
 
             // Owner: AXUIElementGetPid returns the PID of the app that
-            // created the status item (third-party app, SystemUIServer for
-            // Apple-owned items like Spotlight / clock).
+            // created the status item.
             var pid: pid_t = 0
             guard AXUIElementGetPid(child, &pid) == .success else { continue }
             let owner = resolveOwner(pid: pid, cache: &ownerCache) { p in
@@ -496,6 +459,62 @@ enum MenubarItems {
         // what the user sees in the menubar.
         out.sort { (Double(($0["x"] as? Double) ?? 0)) < (Double(($1["x"] as? Double) ?? 0)) }
         return out
+    }
+
+    /// The status items from the system-wide "extras" menubar (right-hand
+    /// side: clock, Spotlight, Control Center entry, third-party icons — the
+    /// plain kAXMenuBarAttribute is the active app's File/Edit menus, not
+    /// this). nil when this macOS won't answer the system-wide read.
+    private static func systemWideExtras() -> [AXUIElement]? {
+        let systemWide = AXUIElementCreateSystemWide()
+        AXUIElementSetMessagingTimeout(systemWide, 0.5)
+        var menuBarRef: AnyObject?
+        guard AXUIElementCopyAttributeValue(systemWide, "AXExtrasMenuBar" as CFString, &menuBarRef) == .success,
+              let menuBar = menuBarRef else { return nil }
+        let menuBarEl = menuBar as! AXUIElement
+        AXUIElementSetMessagingTimeout(menuBarEl, 0.5)
+        var childrenRef: AnyObject?
+        guard AXUIElementCopyAttributeValue(menuBarEl, kAXChildrenAttribute as CFString, &childrenRef) == .success,
+              let children = childrenRef as? [AXUIElement] else { return [] }
+        return children
+    }
+
+    /// The status items gathered process by process. A process with none
+    /// answers an error, and an AX round trip to every running process is
+    /// far too slow for a 2s poll, so `candidates` narrows each tick to the
+    /// known owners, processes never asked, and a few stale empty ones. The
+    /// reads run concurrently so one unresponsive app costs one timeout.
+    private static func perAppExtras(_ candidates: inout MenubarExtrasCandidates) -> [AXUIElement] {
+        let now = Date()
+        let running = NSWorkspace.shared.runningApplications.map(\.processIdentifier)
+        let pids = candidates.pidsToProbe(running: running, now: now, recheckAfter: 30, staleBudget: 8)
+        var found = [[AXUIElement]?](repeating: nil, count: pids.count)
+        let lock = NSLock()
+        DispatchQueue.concurrentPerform(iterations: pids.count) { i in
+            let children = extrasChildren(of: pids[i])
+            lock.lock(); found[i] = children; lock.unlock()
+        }
+        var out: [AXUIElement] = []
+        for (pid, children) in zip(pids, found) {
+            candidates.record(pid: pid, hasExtras: children != nil, now: now)
+            out += children ?? []
+        }
+        return out
+    }
+
+    /// One process's status items; nil when it has no extras menubar.
+    private static func extrasChildren(of pid: pid_t) -> [AXUIElement]? {
+        let app = AXUIElementCreateApplication(pid)
+        AXUIElementSetMessagingTimeout(app, 0.1)
+        var barRef: AnyObject?
+        guard AXUIElementCopyAttributeValue(app, "AXExtrasMenuBar" as CFString, &barRef) == .success,
+              let bar = barRef else { return nil }
+        let barEl = bar as! AXUIElement
+        AXUIElementSetMessagingTimeout(barEl, 0.1)
+        var childrenRef: AnyObject?
+        guard AXUIElementCopyAttributeValue(barEl, kAXChildrenAttribute as CFString, &childrenRef) == .success,
+              let children = childrenRef as? [AXUIElement] else { return [] }
+        return children
     }
 
     // MARK: - AX attribute helpers (file-local)
@@ -527,6 +546,40 @@ enum MenubarItems {
     }
 }
 
+/// Which running processes might own menubar status items. Owners are asked
+/// on every poll; a process never asked before is asked once; one that
+/// answered "none" is asked again only after `recheckAfter`, a few per poll,
+/// so an app that adds its status item after launch turns up without a
+/// full sweep each tick. Processes that exited are forgotten (pids get reused).
+struct MenubarExtrasCandidates {
+    private(set) var owners: Set<pid_t> = []
+    private var emptyAt: [pid_t: Date] = [:]
+
+    mutating func pidsToProbe(running: [pid_t], now: Date,
+                              recheckAfter: TimeInterval, staleBudget: Int) -> [pid_t] {
+        let alive = Set(running)
+        owners.formIntersection(alive)
+        emptyAt = emptyAt.filter { alive.contains($0.key) }
+        let unseen = alive.filter { !owners.contains($0) && emptyAt[$0] == nil }
+        let stale = emptyAt.filter { now.timeIntervalSince($0.value) >= recheckAfter }
+            .sorted { ($0.value, $0.key) < ($1.value, $1.key) }
+            .prefix(max(0, staleBudget))
+            .map(\.key)
+        return owners.sorted() + unseen.sorted() + stale
+    }
+
+    /// An owner stays an owner when a read fails (a busy app can miss the
+    /// timeout); it is dropped only when its process exits.
+    mutating func record(pid: pid_t, hasExtras: Bool, now: Date) {
+        if hasExtras {
+            owners.insert(pid)
+            emptyAt[pid] = nil
+        } else if !owners.contains(pid) {
+            emptyAt[pid] = now
+        }
+    }
+}
+
 /// 2s poll for menubar items. AX has no push notification for status-item
 /// add/remove (the AXLayoutChanged / AXCreated events fire only for window-
 /// scoped trees), so we pull on a timer and let `startChannel`'s dedupe
@@ -547,11 +600,12 @@ final class MenubarItemsObserver: RefCountedObserver {
     /// because stale entries are harmless — they're overwritten the next
     /// time the same PID is reused, which is rare).
     fileprivate var ownerCache: [pid_t: String] = [:]
+    fileprivate var candidates = MenubarExtrasCandidates()
 
-    /// Snapshot used by Bridge.startMenubarItems. Calls items() with the
-    /// shared cache so repeated polls stay cheap.
+    /// Snapshot used by Bridge.startMenubarItems and sd.menubar.items. Calls
+    /// items() with the shared caches so repeated reads stay cheap.
     func snapshot() -> [[String: Any]] {
-        MenubarItems.items(ownerCache: &ownerCache)
+        MenubarItems.items(ownerCache: &ownerCache, candidates: &candidates)
     }
 
     override func install() -> Token {
