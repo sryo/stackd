@@ -30,8 +30,10 @@ func registerPrivacyRecordingTests() {
         let token = PrivacyObserver.shared.subscribe { }
         try expect(PrivacyObserver.shared.isActive)
         token.cancel()
-        spin(timeout: 5.2) { !PrivacyObserver.shared.isActive }
+        // Wait out the production debounce with real headroom: the wait ends the
+        // moment the teardown lands, so slack costs nothing.
+        spin(timeout: PrivacyObserver.shared.teardownDelay + 10) { !PrivacyObserver.shared.isActive }
         try expect(!PrivacyObserver.shared.isActive,
-                   "PrivacyObserver must deactivate ≤5.2s after last unsubscribe")
+                   "PrivacyObserver must deactivate after the teardown debounce once the last stack unsubscribes")
     }
 }

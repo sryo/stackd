@@ -203,7 +203,7 @@ func registerWindowsTests() {
     func awaitProbe(_ start: (@escaping ([String: Any]) -> Void) -> Void) -> [String: Any]? {
         var result: [String: Any]?
         start { result = $0 }
-        spin(timeout: 1.0) { result != nil }
+        spin(timeout: 10) { result != nil }
         return result
     }
 

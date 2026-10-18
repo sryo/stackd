@@ -59,6 +59,13 @@ func registerHarnessTests() {
         try expect(ran, "a 20ms asyncAfter block did not run within a 300ms spin")
     }
 
+    test("harness: drainMainQueue runs everything already queued on main, in order") {
+        var order: [Int] = []
+        for i in 0..<5 { DispatchQueue.main.async { order.append(i) } }
+        drainMainQueue()
+        try expectEqual(order, [0, 1, 2, 3, 4])
+    }
+
     test("harness: a fast test prints only its name, a slow one adds its duration") {
         try expectEqual(resultLine("✓", "quick", seconds: 0.2), "✓ quick")
         try expectEqual(resultLine("✓", "slow one", seconds: 1.234), "✓ slow one (1.23s)")

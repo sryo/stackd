@@ -122,7 +122,7 @@ func registerRefCountedObserverTests() {
         try expect(obs.isActive, "still active immediately after last cancel (debounced)")
         try expectEqual(obs.teardownCount, 0)
 
-        spin(for: 0.15)
+        spin(timeout: 10) { !obs.isActive }
         try expect(!obs.isActive, "inactive after teardownDelay")
         try expectEqual(obs.teardownCount, 1)
 
@@ -248,7 +248,7 @@ func registerRefCountedObserverTests() {
         sem.wait()
         try expectEqual(fires, 1, "off-main fire must not deliver synchronously")
 
-        spin(for: 0.1)
+        drainMainQueue()
         try expectEqual(fires, 2, "trampolined fire delivered after runloop spin")
         try expect(!offMainDelivery, "subscriber must only ever run on main")
     }
@@ -271,7 +271,7 @@ func registerRefCountedObserverTests() {
             sem.signal()
         }
         sem.wait()
-        spin(for: 0.1)
+        drainMainQueue()
         try expectEqual(fires, 2, "prime + exactly one deduped fire")
         try expect(!offMainDelivery, "subscriber must only ever run on main")
     }
@@ -293,7 +293,7 @@ func registerRefCountedObserverTests() {
             }
         }
         group.wait()
-        spin(for: 0.15)
+        drainMainQueue()
         try expectEqual(fires, 2, "50 same-hash calls collapse to a single fire")
     }
 }

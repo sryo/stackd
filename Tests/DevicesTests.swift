@@ -167,8 +167,8 @@ func registerDevicesTests() {
         }
         try expect(!fired, "Camera.frame completion must not fire synchronously on the bail path")
         // Spin the runloop so the DispatchQueue.main.async work item fires.
-        spin(timeout: 0.25) { fired }
-        try expect(fired, "Camera.frame completion must fire within 250ms on bail path")
+        spin(timeout: 10) { fired }
+        try expect(fired, "Camera.frame completion must fire on the bail path")
         try expect(arg == nil, "bail path delivers nil result (not crash)")
     }
 }

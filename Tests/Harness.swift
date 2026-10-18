@@ -80,6 +80,16 @@ func spin(for seconds: TimeInterval) {
     spin(timeout: seconds) { false }
 }
 
+/// Returns once every block already queued on the main queue has run. The
+/// queue is FIFO, so a marker block queued now runs after them: a check that
+/// something was never delivered can wait on this instead of sleeping.
+/// Delayed work (`asyncAfter`, timers) is not covered.
+func drainMainQueue() {
+    var reached = false
+    DispatchQueue.main.async { reached = true }
+    spin(timeout: 30) { reached }
+}
+
 // MARK: - Running
 
 /// A test at least this slow prints its duration beside its name.

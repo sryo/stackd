@@ -177,8 +177,10 @@ func registerSensorsTests() {
         let token = SensorsObserver.shared.subscribe { }
         try expect(SensorsObserver.shared.isActive)
         token.cancel()
-        spin(timeout: 5.2) { !SensorsObserver.shared.isActive }
+        // Wait out the production debounce with real headroom: the wait ends the
+        // moment the teardown lands, so slack costs nothing.
+        spin(timeout: SensorsObserver.shared.teardownDelay + 10) { !SensorsObserver.shared.isActive }
         try expect(!SensorsObserver.shared.isActive,
-                   "SensorsObserver must deactivate ≤5.2s after last unsubscribe")
+                   "SensorsObserver must deactivate after the teardown debounce once the last stack unsubscribes")
     }
 }

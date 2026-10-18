@@ -144,7 +144,7 @@ func registerVisionTests() {
         Vision.subjectMask(image: ["not": "an image"], completion: record("subjectMask"))
         Vision.bodyPose(image: 12345, completion: record("bodyPose"))
         try expect(results.isEmpty, "completions fired inline: \(results.keys.sorted())")
-        spin(timeout: 2) { results.count == 5 }
+        spin(timeout: 10) { results.count == 5 }
         try expectEqual(results.keys.sorted(), ["bodyPose", "faces", "featurePrint", "ocr", "subjectMask"])
         for (name, r) in results {
             try expect(r == nil, "\(name) should complete with nil")

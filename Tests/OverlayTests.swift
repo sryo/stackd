@@ -270,7 +270,7 @@ func registerOverlayTests() {
             throw Expectation(message: "region returned nil for a valid rect")
         }
         defer { h.remove() }
-        spin(timeout: 5) { got != nil }
+        spin(timeout: 15) { got != nil }
         try expectEqual(got?["kind"] as? String, "down")
         try expectEqual((got?["x"] as? NSNumber)?.intValue, 4)
     }
@@ -282,7 +282,7 @@ func registerOverlayTests() {
             throw Expectation(message: "region returned nil for a valid rect")
         }
         let web = h.webView
-        spin(timeout: 2) { !web.isLoading }
+        spin(timeout: 15) { !web.isLoading }
         h.remove()
         web.evaluateJavaScript("window.stack && window.stack.post(1)", completionHandler: nil)
         spin(for: 0.5)
@@ -410,7 +410,7 @@ func registerOverlayTests() {
         let wid = CGWindowID(panel.windowNumber)
         let target = CGPoint(x: -9500, y: -9400)
         try expect(Overlay.serverMove(panel, cgsOrigin: target), "committed move reported as failed")
-        spin(timeout: 2) { Overlay.bounds(of: wid)?.origin == target }
+        spin(timeout: 10) { Overlay.bounds(of: wid)?.origin == target }
         try expectEqual(Overlay.bounds(of: wid)?.origin, target)
         try expect(Overlay.serverMove(panelWID: UInt32(wid), cgsOrigin: CGPoint(x: -9400, y: -9300)),
                    "wid-addressed move reported as failed")

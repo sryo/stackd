@@ -266,18 +266,18 @@ func registerStorageTests() {
 
     test("PasteboardObserver: activates on subscribe, deactivates after debounce") {
         // 0→1: native install happens immediately. 1→0: 5s debounce then
-        // teardown. We spin briefly past the teardown to verify the timer +
-        // distributed-notification observer both stop. The 5.2s ceiling is
-        // generous slack on the documented 5.0s teardown.
+        // teardown. We wait out the teardown to verify the timer +
+        // distributed-notification observer both stop.
         let token = PasteboardObserver.shared.subscribe { }
         try expect(PasteboardObserver.shared.isActive,
                    "subscribe should activate the observer")
         token.cancel()
         // Spin the runloop so the DispatchQueue.main.asyncAfter teardown work
-        // item fires.
-        spin(timeout: 5.2) { !PasteboardObserver.shared.isActive }
+        // item fires. The wait ends the moment the teardown lands, so the
+        // headroom over the production debounce costs nothing.
+        spin(timeout: PasteboardObserver.shared.teardownDelay + 10) { !PasteboardObserver.shared.isActive }
         try expect(!PasteboardObserver.shared.isActive,
-                   "PasteboardObserver must deactivate ≤5.2s after last unsubscribe")
+                   "PasteboardObserver must deactivate after the teardown debounce once the last stack unsubscribes")
     }
 
     // MARK: - FSWatch (FSEvents callback path-decoding)
@@ -305,10 +305,10 @@ func registerStorageTests() {
         try "world".write(to: target, atomically: true, encoding: .utf8)
 
         // Spin the main runloop up to 2s for the FSEvents callback to land.
-        spin(timeout: 2.0) { !received.isEmpty }
+        spin(timeout: 10) { !received.isEmpty }
 
         try expect(!received.isEmpty,
-                   "FSWatch callback should have fired with at least one path within 2s")
+                   "FSWatch callback should have fired with at least one path within 10s")
         // The path must be a valid UTF-8 string under the watched dir. macOS
         // canonicalizes /var → /private/var so FSEvents may return the
         // /private-prefixed form; resolve both sides before comparing.

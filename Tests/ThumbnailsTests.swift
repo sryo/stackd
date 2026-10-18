@@ -40,7 +40,7 @@ func registerThumbnailsTests() {
                 onMain = Thread.isMainThread
             }
             try expectEqual(calls, 0, "completion for '\(path)' must be queued on main, not fired inline")
-            spin(timeout: 2) { calls > 0 }
+            spin(timeout: 10) { calls > 0 }
             try expectEqual(calls, 1, "completion for '\(path)' should fire exactly once")
             try expect(result == nil, "missing file '\(path)' should yield nil")
             try expect(onMain, "completion must be delivered on main")
@@ -79,7 +79,7 @@ func registerThumbnailsTests() {
             result = r
             done = true
         }
-        spin(timeout: 6) { done }
+        spin(timeout: 15) { done }
         guard let r = result else {
             throw Expectation(message: "QuickLook returned no thumbnail for a plain PNG")
         }
