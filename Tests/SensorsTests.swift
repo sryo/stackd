@@ -177,10 +177,7 @@ func registerSensorsTests() {
         let token = SensorsObserver.shared.subscribe { }
         try expect(SensorsObserver.shared.isActive)
         token.cancel()
-        let deadline = Date().addingTimeInterval(5.2)
-        while SensorsObserver.shared.isActive && Date() < deadline {
-            RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.05))
-        }
+        spin(timeout: 5.2) { !SensorsObserver.shared.isActive }
         try expect(!SensorsObserver.shared.isActive,
                    "SensorsObserver must deactivate ≤5.2s after last unsubscribe")
     }

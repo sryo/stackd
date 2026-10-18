@@ -34,7 +34,7 @@ func registerDisplaysChangedTests() {
         try expectEqual(d.changed.count, 1)
     }
 
-    test("identical snapshot: nothing fires (regression guard against dict-key noise)") {
+    test("identical displays snapshot: nothing fires (regression guard against dict-key noise)") {
         let prev: [Int: [String: Any]] = [1: disp(1)]
         let d = Bridge.displaysDelta(snapshot: [disp(1)], previous: prev)
         try expectEqual(d.changed.count + d.added.count + d.removed.count, 0)

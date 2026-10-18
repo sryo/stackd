@@ -15,13 +15,6 @@ import ImageIO
 //
 // Not covered: the timeout watchdog (needs a file QuickLook hangs on).
 
-private func thumbSpin(timeout: TimeInterval, until done: () -> Bool) {
-    let deadline = Date().addingTimeInterval(timeout)
-    while !done() && Date() < deadline {
-        RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.01))
-    }
-}
-
 func registerThumbnailsTests() {
     test("generate on a missing path completes with nil, asynchronously on main") {
         let missing = [
@@ -47,7 +40,7 @@ func registerThumbnailsTests() {
                 onMain = Thread.isMainThread
             }
             try expectEqual(calls, 0, "completion for '\(path)' must be queued on main, not fired inline")
-            thumbSpin(timeout: 2) { calls > 0 }
+            spin(timeout: 2) { calls > 0 }
             try expectEqual(calls, 1, "completion for '\(path)' should fire exactly once")
             try expect(result == nil, "missing file '\(path)' should yield nil")
             try expect(onMain, "completion must be delivered on main")
@@ -86,7 +79,7 @@ func registerThumbnailsTests() {
             result = r
             done = true
         }
-        thumbSpin(timeout: 6) { done }
+        spin(timeout: 6) { done }
         guard let r = result else {
             throw Expectation(message: "QuickLook returned no thumbnail for a plain PNG")
         }

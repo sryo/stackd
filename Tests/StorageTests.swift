@@ -273,12 +273,9 @@ func registerStorageTests() {
         try expect(PasteboardObserver.shared.isActive,
                    "subscribe should activate the observer")
         token.cancel()
-        // Spin runloop for 5.2s so DispatchQueue.main.asyncAfter teardown work
-        // item fires. Pattern mirrors RefCountedObserverTests.spinRunLoop.
-        let deadline = Date().addingTimeInterval(5.2)
-        while PasteboardObserver.shared.isActive && Date() < deadline {
-            RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.05))
-        }
+        // Spin the runloop so the DispatchQueue.main.asyncAfter teardown work
+        // item fires.
+        spin(timeout: 5.2) { !PasteboardObserver.shared.isActive }
         try expect(!PasteboardObserver.shared.isActive,
                    "PasteboardObserver must deactivate ≤5.2s after last unsubscribe")
     }
@@ -308,10 +305,7 @@ func registerStorageTests() {
         try "world".write(to: target, atomically: true, encoding: .utf8)
 
         // Spin the main runloop up to 2s for the FSEvents callback to land.
-        let deadline = Date().addingTimeInterval(2.0)
-        while received.isEmpty && Date() < deadline {
-            RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.05))
-        }
+        spin(timeout: 2.0) { !received.isEmpty }
 
         try expect(!received.isEmpty,
                    "FSWatch callback should have fired with at least one path within 2s")

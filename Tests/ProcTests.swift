@@ -14,13 +14,6 @@ import Foundation
 //
 // Not covered: AppleScript.run (separate entry point, OSAKit).
 
-private func procSpin(timeout: TimeInterval, until done: () -> Bool) {
-    let deadline = Date().addingTimeInterval(timeout)
-    while !done() && Date() < deadline {
-        RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.01))
-    }
-}
-
 func registerProcTests() {
     // MARK: - Proc.exec
 
@@ -52,7 +45,7 @@ func registerProcTests() {
             result = r
         }
         try expect(result == nil, "success path must complete asynchronously, not inline")
-        procSpin(timeout: 5) { result != nil }
+        spin(timeout: 5) { result != nil }
         guard let r = result else { throw Expectation(message: "exec never completed") }
         try expect(onMain, "completion must be delivered on main")
         try expectEqual(r["code"] as? Int, 3)
@@ -63,7 +56,7 @@ func registerProcTests() {
     test("Proc.exec pipes input to the child's stdin") {
         var result: [String: Any]?
         Proc.exec(cmd: "/bin/cat", args: [], input: "piped-input") { result = $0 }
-        procSpin(timeout: 5) { result != nil }
+        spin(timeout: 5) { result != nil }
         try expectEqual(result?["code"] as? Int, 0)
         try expectEqual(result?["stdout"] as? String, "piped-input")
     }
@@ -73,7 +66,7 @@ func registerProcTests() {
         var result: [String: Any]?
         let start = Date()
         Proc.exec(cmd: "/bin/sleep", args: ["30"], timeoutSeconds: 0.2) { result = $0 }
-        procSpin(timeout: 5) { result != nil }
+        spin(timeout: 5) { result != nil }
         guard let r = result else { throw Expectation(message: "timeout watchdog never fired") }
         try expect(Date().timeIntervalSince(start) < 5, "child outlived its timeout")
         try expectEqual(r["code"] as? Int, 15)
@@ -86,7 +79,7 @@ func registerProcTests() {
         var result: [String: Any]?
         Proc.exec(cmd: "/bin/sh", args: ["-c", "head -c 200000 /dev/zero >&2; echo ok"],
                   timeoutSeconds: 4) { result = $0 }
-        procSpin(timeout: 8) { result != nil }
+        spin(timeout: 8) { result != nil }
         guard let r = result else { throw Expectation(message: "exec never completed") }
         try expectEqual(r["code"] as? Int, 0)
         try expectEqual(r["stdout"] as? String, "ok\n")
@@ -120,7 +113,7 @@ func registerProcTests() {
             }
         }
         try expect(handle != nil, "/bin/sh should launch")
-        procSpin(timeout: 5) { exitEvent != nil }
+        spin(timeout: 5) { exitEvent != nil }
         try expectEqual(exitEvent?["code"] as? Int, 0)
         try expect(exitEvent?["signal"] == nil, "clean exit must not carry a signal")
         let home = (NSHomeDirectory() as NSString).resolvingSymlinksInPath
@@ -140,8 +133,8 @@ func registerProcTests() {
         }
         handle.cancel()
         handle.cancel() // idempotent
-        procSpin(timeout: 5) { !exits.isEmpty }
-        procSpin(timeout: 0.1) { false } // let any duplicate exit event land
+        spin(timeout: 5) { !exits.isEmpty }
+        spin(for: 0.1) // let any duplicate exit event land
         try expectEqual(exits.count, 1, "exactly one exit event")
         try expectEqual(exits.first?["signal"] as? Int, 15)
     }
@@ -167,9 +160,9 @@ func registerProcTests() {
             }
         }
         try expect(handle != nil, "/bin/sh should launch")
-        procSpin(timeout: 5) { exited }
+        spin(timeout: 5) { exited }
         try expect(exited, "exit event never fired")
-        procSpin(timeout: 0.3) { false } // let any straggler land
+        spin(for: 0.3) // let any straggler land
         try expectEqual(chunksAfterExit, 0, "chunks delivered after exit")
         try expectEqual(stdout, "early\n1\n2\n3\n")
     }

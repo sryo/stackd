@@ -40,7 +40,7 @@ func registerAppsChangedTests() {
         try expectEqual(d.changed.count, 1)
     }
 
-    test("identical snapshot: nothing fires (regression guard against dict-key noise)") {
+    test("identical apps snapshot: nothing fires (regression guard against dict-key noise)") {
         let prev: [String: [String: Any]] = ["com.a": app("com.a", active: true, hidden: false, name: "A")]
         let d = Bridge.appsDelta(snapshot: [app("com.a", active: true, hidden: false, name: "A")], previous: prev)
         try expectEqual(d.changed.count + d.added.count + d.removed.count, 0)
@@ -68,7 +68,7 @@ func registerAppsChangedTests() {
         try expectEqual(d.nowByBundle["com.helper"]?["active"] as? Bool, true)
     }
 
-    test("mixed add+remove+change in one tick") {
+    test("mixed add+remove+change in one tick (apps)") {
         let prev: [String: [String: Any]] = [
             "com.a": app("com.a", active: false),   // will flip active
             "com.b": app("com.b"),                  // stays put

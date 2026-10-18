@@ -203,10 +203,7 @@ func registerWindowsTests() {
     func awaitProbe(_ start: (@escaping ([String: Any]) -> Void) -> Void) -> [String: Any]? {
         var result: [String: Any]?
         start { result = $0 }
-        let deadline = Date().addingTimeInterval(1.0)
-        while result == nil && Date() < deadline {
-            RunLoop.main.run(until: Date().addingTimeInterval(0.02))
-        }
+        spin(timeout: 1.0) { result != nil }
         return result
     }
 

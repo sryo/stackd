@@ -36,15 +36,9 @@ private final class StubObserver: RefCountedObserver {
     }
 }
 
-/// Spin the main runloop for the given duration so DispatchQueue.main.asyncAfter
-/// work items have a chance to run. Most tests here use ~20ms delays so a
-/// 100ms spin is generous slack without making the suite slow.
-private func spinRunLoop(_ seconds: TimeInterval) {
-    let deadline = Date().addingTimeInterval(seconds)
-    while Date() < deadline {
-        RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.005))
-    }
-}
+// Most tests here use ~20ms teardown delays, so a 100ms `spin(for:)` is
+// generous slack for the DispatchQueue.main.asyncAfter work items without
+// making the suite slow.
 
 func registerRefCountedObserverTests() {
     // MARK: - Lifecycle (install / teardown ref-counting)
@@ -65,7 +59,7 @@ func registerRefCountedObserverTests() {
         let obs = StubObserver()
         let t1 = obs.subscribe { }
         let t2 = obs.subscribe { }
-        defer { t1.cancel(); t2.cancel(); spinRunLoop(0.05) }
+        defer { t1.cancel(); t2.cancel(); spin(for: 0.05) }
 
         try expectEqual(obs.installCount, 1)
     }
@@ -101,7 +95,7 @@ func registerRefCountedObserverTests() {
         var gone = 0, kept = 0
         let t1 = obs.subscribe { gone += 1 }
         let t2 = obs.subscribe { kept += 1 }
-        defer { t2.cancel(); spinRunLoop(0.05) }
+        defer { t2.cancel(); spin(for: 0.05) }
 
         t1.cancel()
         obs.fire()
@@ -128,13 +122,13 @@ func registerRefCountedObserverTests() {
         try expect(obs.isActive, "still active immediately after last cancel (debounced)")
         try expectEqual(obs.teardownCount, 0)
 
-        spinRunLoop(0.15)
+        spin(for: 0.15)
         try expect(!obs.isActive, "inactive after teardownDelay")
         try expectEqual(obs.teardownCount, 1)
 
         // After a full teardown the next subscribe installs again.
         let t2 = obs.subscribe { }
-        defer { t2.cancel(); spinRunLoop(0.1) }
+        defer { t2.cancel(); spin(for: 0.1) }
         try expectEqual(obs.installCount, 2)
         try expect(obs.isActive)
     }
@@ -145,13 +139,13 @@ func registerRefCountedObserverTests() {
         let t1 = obs.subscribe { }
         t1.cancel()                 // schedules teardown ~300ms out
 
-        spinRunLoop(0.02)           // inside the gap
+        spin(for: 0.02)           // inside the gap
         try expect(obs.isActive, "still active mid-debounce")
 
         let t2 = obs.subscribe { }  // should cancel the pending teardown
         defer { t2.cancel() }
 
-        spinRunLoop(0.4)            // well past the original teardown time
+        spin(for: 0.4)            // well past the original teardown time
         try expect(obs.isActive, "resubscribe must keep observer active")
         try expectEqual(obs.installCount, 1, "should not reinstall when token was still live")
         try expectEqual(obs.teardownCount, 0, "teardown was cancelled, must not fire")
@@ -168,7 +162,7 @@ func registerRefCountedObserverTests() {
         // Next subscribe retries install — important for the "user grants
         // permission while a stack is already subscribed" path.
         let t2 = obs.subscribe { }
-        defer { t1.cancel(); t2.cancel(); spinRunLoop(0.1) }
+        defer { t1.cancel(); t2.cancel(); spin(for: 0.1) }
 
         try expect(obs.isActive, "second subscribe succeeded")
         try expectEqual(obs.installCount, 1)
@@ -183,7 +177,7 @@ func registerRefCountedObserverTests() {
         let obs = StubObserver()
         var callCount = 0
         let t = obs.subscribe { callCount += 1 }
-        defer { t.cancel(); spinRunLoop(0.05) }
+        defer { t.cancel(); spin(for: 0.05) }
         // subscribe primes once.
         try expectEqual(callCount, 1, "subscribe should prime once")
 
@@ -201,7 +195,7 @@ func registerRefCountedObserverTests() {
         let obs = StubObserver()
         var callCount = 0
         let t = obs.subscribe { callCount += 1 }
-        defer { t.cancel(); spinRunLoop(0.05) }
+        defer { t.cancel(); spin(for: 0.05) }
         try expectEqual(callCount, 1)
 
         obs.fireIfChanged("k", hash: 1)
@@ -216,7 +210,7 @@ func registerRefCountedObserverTests() {
         let obs = StubObserver()
         var callCount = 0
         let t = obs.subscribe { callCount += 1 }
-        defer { t.cancel(); spinRunLoop(0.05) }
+        defer { t.cancel(); spin(for: 0.05) }
         try expectEqual(callCount, 1)
 
         obs.fireIfChanged("a", hash: 1)
@@ -243,7 +237,7 @@ func registerRefCountedObserverTests() {
             fires += 1
             if !Thread.isMainThread { offMainDelivery = true }
         }
-        defer { t.cancel(); spinRunLoop(0.05) }
+        defer { t.cancel(); spin(for: 0.05) }
         try expectEqual(fires, 1, "subscribe primes once")
 
         let sem = DispatchSemaphore(value: 0)
@@ -254,7 +248,7 @@ func registerRefCountedObserverTests() {
         sem.wait()
         try expectEqual(fires, 1, "off-main fire must not deliver synchronously")
 
-        spinRunLoop(0.1)
+        spin(for: 0.1)
         try expectEqual(fires, 2, "trampolined fire delivered after runloop spin")
         try expect(!offMainDelivery, "subscriber must only ever run on main")
     }
@@ -267,7 +261,7 @@ func registerRefCountedObserverTests() {
             fires += 1
             if !Thread.isMainThread { offMainDelivery = true }
         }
-        defer { t.cancel(); spinRunLoop(0.05) }
+        defer { t.cancel(); spin(for: 0.05) }
         try expectEqual(fires, 1)
 
         let sem = DispatchSemaphore(value: 0)
@@ -277,7 +271,7 @@ func registerRefCountedObserverTests() {
             sem.signal()
         }
         sem.wait()
-        spinRunLoop(0.1)
+        spin(for: 0.1)
         try expectEqual(fires, 2, "prime + exactly one deduped fire")
         try expect(!offMainDelivery, "subscriber must only ever run on main")
     }
@@ -289,7 +283,7 @@ func registerRefCountedObserverTests() {
         let obs = StubObserver()
         var fires = 0
         let t = obs.subscribe { fires += 1 }
-        defer { t.cancel(); spinRunLoop(0.05) }
+        defer { t.cancel(); spin(for: 0.05) }
         try expectEqual(fires, 1)
 
         let group = DispatchGroup()
@@ -299,7 +293,7 @@ func registerRefCountedObserverTests() {
             }
         }
         group.wait()
-        spinRunLoop(0.15)
+        spin(for: 0.15)
         try expectEqual(fires, 2, "50 same-hash calls collapse to a single fire")
     }
 }

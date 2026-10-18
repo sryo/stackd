@@ -15,13 +15,6 @@ import WebKit
 // (unmapped)" is only readable via `footprint`/`vmmap` on the process —
 // verified by hand against the running daemon.
 
-private func spinEvalRunLoop(for seconds: TimeInterval, until done: () -> Bool) {
-    let deadline = Date().addingTimeInterval(seconds)
-    while !done() && Date() < deadline {
-        RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.02))
-    }
-}
-
 private func loadedWebView() throws -> WKWebView {
     let wv = WKWebView(frame: NSRect(x: 0, y: 0, width: 10, height: 10))
     final class Nav: NSObject, WKNavigationDelegate {
@@ -31,7 +24,7 @@ private func loadedWebView() throws -> WKWebView {
     let nav = Nav()
     wv.navigationDelegate = nav
     wv.loadHTMLString("<body></body>", baseURL: nil)
-    spinEvalRunLoop(for: 10) { nav.done }
+    spin(timeout: 10) { nav.done }
     wv.navigationDelegate = nil
     try expect(nav.done, "webview never finished loading")
     return wv
@@ -41,7 +34,7 @@ private func read(_ wv: WKWebView, _ expr: String) -> Any? {
     var out: Any?
     var done = false
     wv.evaluateJavaScript(expr) { v, _ in out = v; done = true }
-    spinEvalRunLoop(for: 10) { done }
+    spin(timeout: 10) { done }
     return out
 }
 
@@ -61,7 +54,7 @@ func registerWebViewEvalTests() {
         var got: Any?
         var done = false
         wv.sdEvaluate("'\(big)'.length + 1") { v, _ in got = v; done = true }
-        spinEvalRunLoop(for: 10) { done }
+        spin(timeout: 10) { done }
         try expectEqual((got as? NSNumber)?.intValue, big.count + 1)
     }
 

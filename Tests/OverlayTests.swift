@@ -15,13 +15,6 @@ import WebKit
 // Not covered: `Overlay.attach(...)` and the tick itself, which need a
 // live foreign target window.
 
-private func spinOverlayRunLoop(for seconds: TimeInterval, until done: () -> Bool = { false }) {
-    let deadline = Date().addingTimeInterval(seconds)
-    while !done() && Date() < deadline {
-        RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.02))
-    }
-}
-
 func registerOverlayTests() {
     // MARK: - SkyLight readers — negative branch for invalid CGWindowID
 
@@ -277,7 +270,7 @@ func registerOverlayTests() {
             throw Expectation(message: "region returned nil for a valid rect")
         }
         defer { h.remove() }
-        spinOverlayRunLoop(for: 5) { got != nil }
+        spin(timeout: 5) { got != nil }
         try expectEqual(got?["kind"] as? String, "down")
         try expectEqual((got?["x"] as? NSNumber)?.intValue, 4)
     }
@@ -289,10 +282,10 @@ func registerOverlayTests() {
             throw Expectation(message: "region returned nil for a valid rect")
         }
         let web = h.webView
-        spinOverlayRunLoop(for: 2) { !web.isLoading }
+        spin(timeout: 2) { !web.isLoading }
         h.remove()
         web.evaluateJavaScript("window.stack && window.stack.post(1)", completionHandler: nil)
-        spinOverlayRunLoop(for: 0.5)
+        spin(for: 0.5)
         try expectEqual(count, 0)
     }
 
@@ -417,13 +410,8 @@ func registerOverlayTests() {
         let wid = CGWindowID(panel.windowNumber)
         let target = CGPoint(x: -9500, y: -9400)
         try expect(Overlay.serverMove(panel, cgsOrigin: target), "committed move reported as failed")
-        let deadline = Date().addingTimeInterval(2)
-        var landed = Overlay.bounds(of: wid)?.origin
-        while landed != target, Date() < deadline {
-            RunLoop.current.run(until: Date().addingTimeInterval(0.02))
-            landed = Overlay.bounds(of: wid)?.origin
-        }
-        try expectEqual(landed, target)
+        spin(timeout: 2) { Overlay.bounds(of: wid)?.origin == target }
+        try expectEqual(Overlay.bounds(of: wid)?.origin, target)
         try expect(Overlay.serverMove(panelWID: UInt32(wid), cgsOrigin: CGPoint(x: -9400, y: -9300)),
                    "wid-addressed move reported as failed")
     }

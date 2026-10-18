@@ -29,13 +29,6 @@ private func deliver(_ url: String?) {
     SchemeRouter.shared.handleURLEvent(urlEvent(url), replyEvent: NSAppleEventDescriptor.null())
 }
 
-private func urlSpin(timeout: TimeInterval, until done: () -> Bool) {
-    let deadline = Date().addingTimeInterval(timeout)
-    while !done() && Date() < deadline {
-        RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.01))
-    }
-}
-
 func registerURLHandlerTests() {
     test("handleURLEvent parses the URL and delivers the payload on main, not inline") {
         // observe() lowercases the scheme, and so does the event side, so a
@@ -52,7 +45,7 @@ func registerURLHandlerTests() {
         let url = "\(scheme.uppercased())://host.example/some/path?k=v&k=w&flag#frag"
         deliver(url)
         try expect(payloads.isEmpty, "subscriber callbacks must be queued on main, not invoked synchronously")
-        urlSpin(timeout: 2) { !payloads.isEmpty }
+        spin(timeout: 2) { !payloads.isEmpty }
         try expectEqual(payloads.count, 1)
         try expect(onMain, "callback must run on main")
         let p = payloads[0]
@@ -76,8 +69,8 @@ func registerURLHandlerTests() {
         b.cancel() // idempotent
 
         deliver("\(scheme)://x")
-        urlSpin(timeout: 2) { hitsA > 0 && hitsC > 0 }
-        urlSpin(timeout: 0.05) { false }
+        spin(timeout: 2) { hitsA > 0 && hitsC > 0 }
+        spin(for: 0.05)
         try expectEqual(hitsA, 1)
         try expectEqual(hitsB, 0, "cancelled subscriber must not be called")
         try expectEqual(hitsC, 1)
@@ -92,7 +85,7 @@ func registerURLHandlerTests() {
         let token = URLHandler.observe(scheme: scheme) { _ in hits += 1 }
         defer { token.cancel() }
         deliver("\(scheme)://again")
-        urlSpin(timeout: 2) { hits > 0 }
+        spin(timeout: 2) { hits > 0 }
         try expectEqual(hits, 1)
     }
 
@@ -104,7 +97,7 @@ func registerURLHandlerTests() {
         deliver(nil)
         deliver("not a url with spaces")
         deliver("stackd-orphan-\(UUID().uuidString)://nowhere")
-        urlSpin(timeout: 0.1) { hits > 0 }
+        spin(timeout: 0.1) { hits > 0 }
         try expectEqual(hits, 0)
     }
 
@@ -136,7 +129,7 @@ func registerURLHandlerTests() {
         router.remove(scheme: "stackd-never-added-\(UUID().uuidString)", id: id)
         router.remove(scheme: scheme, id: id + 100_000)
         deliver("\(scheme)://still-here")
-        urlSpin(timeout: 2) { hits > 0 }
+        spin(timeout: 2) { hits > 0 }
         try expectEqual(hits, 1)
     }
 }

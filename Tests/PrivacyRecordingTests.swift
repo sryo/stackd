@@ -30,10 +30,7 @@ func registerPrivacyRecordingTests() {
         let token = PrivacyObserver.shared.subscribe { }
         try expect(PrivacyObserver.shared.isActive)
         token.cancel()
-        let deadline = Date().addingTimeInterval(5.2)
-        while PrivacyObserver.shared.isActive && Date() < deadline {
-            RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.05))
-        }
+        spin(timeout: 5.2) { !PrivacyObserver.shared.isActive }
         try expect(!PrivacyObserver.shared.isActive,
                    "PrivacyObserver must deactivate ≤5.2s after last unsubscribe")
     }

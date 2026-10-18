@@ -42,7 +42,7 @@ func registerWindowsChangedTests() {
         try expectEqual(d.removed.count, 0)
     }
 
-    test("mixed add+remove+change in one tick") {
+    test("mixed add+remove+change in one tick (windows)") {
         let prev: [Int: [String: Any]] = [
             10: win(10, title: "Stable"),
             11: win(11, title: "Renaming"),
