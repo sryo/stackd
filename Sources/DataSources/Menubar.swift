@@ -3,7 +3,7 @@ import ApplicationServices
 
 // Four menu-related subsystems folded into one domain file:
 //
-//   - StatusItemHandle / Menubar  — NSStatusBar items (sd.menubar.addItem)
+//   - StatusItemHandle           — NSStatusBar items (sd.menubar.addItem)
 //   - MenuBarVisibility          — system menu-bar suppress/restore via
 //                                  SLSSetMenuBarInsetAndAlpha (sd.menubar.suppress)
 //   - PopupMenu                  — transient cursor-position context menu
@@ -123,35 +123,45 @@ final class StatusItemHandle {
             installActionTargetIfNeeded()
             return
         }
-        let menu = NSMenu()
-        let delegate = MenuPickDelegate { [weak self] id in self?.onMenuPick?(id) }
-        menu.delegate = delegate
-        for entry in items {
-            menu.addItem(StatusItemHandle.buildItem(entry, picker: delegate))
-        }
-        item.menu = menu
+        let picker = MenuPickDelegate { [weak self] id in self?.onMenuPick?(id) }
         // Setting item.menu disconnects the button-click path; AppKit drives
         // menu open on click automatically.
-        self.menuDelegate = delegate
+        item.menu = MenuSpec.menu(items, target: picker, action: #selector(MenuPickDelegate.fire(_:)))
+        // Menu items hold their target weakly.
+        self.menuDelegate = picker
     }
+}
 
-    private static func buildItem(_ entry: [String: Any], picker: MenuPickDelegate) -> NSMenuItem {
-        if (entry["separator"] as? Bool) == true {
-            return NSMenuItem.separator()
+/// NSMenu from a declarative item list, shared by status-item menus and the
+/// cursor popup. Each entry is `{separator: true}` or `{id?, title, enabled?,
+/// checked?, submenu?}`; an item with no submenu picks through
+/// `target`/`action` with its id in `representedObject`.
+enum MenuSpec {
+    static func menu(_ items: [[String: Any]], title: String = "",
+                     target: AnyObject, action: Selector) -> NSMenu {
+        let menu = NSMenu(title: title)
+        // AppKit's autoenabling would recompute every item's enabled state
+        // from its target before showing, overriding `enabled: false`.
+        menu.autoenablesItems = false
+        for spec in items {
+            if (spec["separator"] as? Bool) == true {
+                menu.addItem(.separator())
+                continue
+            }
+            let title = spec["title"] as? String ?? ""
+            let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
+            item.target = target
+            item.representedObject = spec["id"] as? String
+            if let checked = spec["checked"] as? Bool { item.state = checked ? .on : .off }
+            if let enabled = spec["enabled"] as? Bool { item.isEnabled = enabled }
+            if let sub = spec["submenu"] as? [[String: Any]] {
+                item.submenu = MenuSpec.menu(sub, title: title, target: target, action: action)
+                item.action = nil
+                item.target = nil
+            }
+            menu.addItem(item)
         }
-        let title = entry["title"] as? String ?? ""
-        let mi = NSMenuItem(title: title, action: #selector(MenuPickDelegate.fire(_:)), keyEquivalent: "")
-        mi.target = picker
-        if let entryId = entry["id"] as? String { mi.representedObject = entryId }
-        if let enabled = entry["enabled"] as? Bool { mi.isEnabled = enabled }
-        if let checked = entry["checked"] as? Bool { mi.state = checked ? .on : .off }
-        if let submenu = entry["submenu"] as? [[String: Any]] {
-            let sub = NSMenu(title: title)
-            sub.delegate = picker
-            for e in submenu { sub.addItem(buildItem(e, picker: picker)) }
-            mi.submenu = sub
-        }
-        return mi
+        return menu
     }
 }
 
@@ -164,22 +174,13 @@ private final class ActionTarget: NSObject {
 }
 
 /// NSMenuItem target — picks the `representedObject` (the JS-side id) and
-/// passes it back through the JS callback. Also serves as menu delegate to
-/// hold the strong reference (NSMenu has weak `delegate`).
-private final class MenuPickDelegate: NSObject, NSMenuDelegate {
+/// passes it back through the JS callback.
+private final class MenuPickDelegate: NSObject {
     let onPick: (String) -> Void
     init(_ onPick: @escaping (String) -> Void) { self.onPick = onPick }
     @objc func fire(_ sender: NSMenuItem) {
         guard let id = sender.representedObject as? String else { return }
         onPick(id)
-    }
-}
-
-enum Menubar {
-    /// Creates the status item and returns the handle. Caller is expected to
-    /// wire `handle.onClick` / `handle.onMenuPick` immediately after.
-    static func addItem(id: Int, spec: StatusItemSpec) -> StatusItemHandle {
-        StatusItemHandle(id: id, spec: spec)
     }
 }
 
@@ -280,7 +281,7 @@ enum PopupMenu {
     static func present(items: [[String: Any]], completion: @escaping (String?) -> Void) {
         DispatchQueue.main.async {
             let coordinator = Coordinator(completion: completion)
-            let menu = build(items: items, coordinator: coordinator)
+            let menu = MenuSpec.menu(items, target: coordinator, action: #selector(Coordinator.picked(_:)))
             coordinator.menu = menu
 
             // popUpMenu(positioning:atLocation:inView:) is the no-event-needed
@@ -296,30 +297,6 @@ enum PopupMenu {
                 _ = coordinator
             }
         }
-    }
-
-    private static func build(items: [[String: Any]], coordinator: Coordinator) -> NSMenu {
-        let menu = NSMenu()
-        menu.autoenablesItems = false
-        for spec in items {
-            if (spec["separator"] as? Bool) == true {
-                menu.addItem(.separator())
-                continue
-            }
-            let title = spec["title"] as? String ?? ""
-            let item = NSMenuItem(title: title, action: #selector(Coordinator.picked(_:)), keyEquivalent: "")
-            item.target = coordinator
-            item.representedObject = spec["id"] as? String
-            if let checked = spec["checked"] as? Bool, checked { item.state = .on }
-            if let enabled = spec["enabled"] as? Bool, !enabled { item.isEnabled = false }
-            if let sub = spec["submenu"] as? [[String: Any]] {
-                item.submenu = build(items: sub, coordinator: coordinator)
-                item.action = nil
-                item.target = nil
-            }
-            menu.addItem(item)
-        }
-        return menu
     }
 
     final class Coordinator: NSObject {

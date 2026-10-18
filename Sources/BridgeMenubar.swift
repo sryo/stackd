@@ -11,8 +11,8 @@ import Foundation
 ///     hidden forever.
 ///
 ///   - `menubar.addItem` — async on main; mints an id, builds the
-///     StatusItemSpec via `Bridge.parseStatusItemSpec`, calls
-///     `Menubar.addItem` which creates the NSStatusItem, and wires
+///     StatusItemSpec via `Bridge.parseStatusItemSpec`, creates the
+///     NSStatusItem through a `StatusItemHandle`, and wires
 ///     onClick / onMenuPick back to JS via
 ///     `bridge.dispatchMenubarEvent` (which fires `__sd_menubar_event`).
 ///     Per-stack scope removes orphans on unload.
@@ -64,7 +64,7 @@ extension Bridge {
                     guard let bridge = bridge else { return }
                     let id = bridge.statusItems.mintId()
                     let spec = Bridge.parseStatusItemSpec(body)
-                    let handle = Menubar.addItem(id: id, spec: spec)
+                    let handle = StatusItemHandle(id: id, spec: spec)
                     handle.onClick = { [weak bridge] in
                         bridge?.dispatchMenubarEvent(itemId: id, type: "click", payload: nil)
                     }
