@@ -2,10 +2,10 @@ import Foundation
 import JavaScriptCore
 
 /// Tests for the JS template engine in `Runtime/api.js`. Exercises the
-/// `__sd*` internal functions through JSHarness's JSContext. DOM-coupled
-/// behavior (text-node mutation, sd-each cloning, sd-if toggling) needs a
-/// fuller harness — not in scope yet. For now we pin the pure-logic layer:
-/// placeholder scanning, expression compilation, dependency extraction.
+/// `__sd*` internal functions through JSHarness's JSContext: placeholder
+/// scanning, expression compilation, dependency extraction. DOM-coupled
+/// behavior (text-node mutation, sd-each cloning, sd-if toggling) runs in a
+/// real WKWebView in TemplateDOMTests.
 func registerTemplateEngineTests() {
     test("template scan: plain text returns null (no placeholders)") {
         let out = JSHarness.evalString("JSON.stringify(__sdScanPlaceholders('just text, no braces'))")
