@@ -12,7 +12,7 @@ func registerOverlayTickArmTests() {
     test("OverlayTickArm: starts disarmed with the backstop running") {
         let a = OverlayTickArm()
         try expect(!a.armed)
-        try expect(a.wantsBackstop)
+        try expect(a.wantsBackstop(now: 0))
     }
 
     test("OverlayTickArm: the first arm reports it, re-arming while armed does not") {
@@ -20,7 +20,7 @@ func registerOverlayTickArmTests() {
         try expect(a.arm(now: 0), "caller subscribes to vsync on this edge")
         try expect(!a.arm(now: 0.01), "already subscribed")
         try expect(a.armed)
-        try expect(!a.wantsBackstop, "vsync ticks cover it while armed")
+        try expect(!a.wantsBackstop(now: 0.01), "vsync ticks cover it while armed")
     }
 
     test("OverlayTickArm: stays armed while the frame keeps changing") {
@@ -40,7 +40,7 @@ func registerOverlayTickArmTests() {
         try expect(a.afterTick(now: 0.05 + idle - 0.01, changed: false, busy: { false }))
         try expect(!a.afterTick(now: 0.05 + idle + 0.01, changed: false, busy: { false }))
         try expect(!a.armed)
-        try expect(a.wantsBackstop)
+        try expect(a.wantsBackstop(now: 1))
     }
 
     test("OverlayTickArm: an event with no follow-up change still disarms") {
@@ -138,5 +138,60 @@ func registerOverlayTickArmTests() {
     test("OverlayArmEvents: unrelated bangs don't arm") {
         try expect(OverlayArmEvents.hold(forBang: "sd.window.created") == nil)
         try expect(OverlayArmEvents.hold(forBang: "sd.window.titleChanged") == nil)
+    }
+    test("OverlayTickArm: an armed spell with no tick for the stall window is stalled, and the backstop takes over") {
+        // The vsync link can go silent while subscribed (displays asleep,
+        // screen locked, a display reconfiguration). Armed forever with no
+        // tick would freeze the overlay on its last frame.
+        var a = OverlayTickArm()
+        _ = a.arm(now: 10)
+        try expect(!a.isStalled(now: 10 + OverlayTickArm.stallAfter - 0.01))
+        try expect(!a.wantsBackstop(now: 10 + OverlayTickArm.stallAfter - 0.01))
+        try expect(a.isStalled(now: 10 + OverlayTickArm.stallAfter + 0.01))
+        try expect(a.wantsBackstop(now: 10 + OverlayTickArm.stallAfter + 0.01))
+    }
+
+    test("OverlayTickArm: every tick postpones the stall") {
+        var a = OverlayTickArm()
+        _ = a.arm(now: 0, hold: 10)
+        var t = 0.0
+        for _ in 0..<200 {
+            t += 0.016
+            _ = a.afterTick(now: t, changed: true, busy: { false })
+            try expect(!a.isStalled(now: t))
+        }
+        try expect(a.isStalled(now: t + OverlayTickArm.stallAfter + 0.01))
+    }
+
+    test("OverlayTickArm: a disarmed overlay is never stalled") {
+        var a = OverlayTickArm()
+        try expect(!a.isStalled(now: 1_000))
+        _ = a.arm(now: 0)
+        _ = a.afterTick(now: idle + 0.01, changed: false, busy: { false })
+        try expect(!a.armed)
+        try expect(!a.isStalled(now: 1_000))
+    }
+
+    test("OverlayTickArm: recovering from a stall disarms, so the next arm reports the subscribe edge again") {
+        var a = OverlayTickArm()
+        _ = a.arm(now: 0)
+        try expect(!a.arm(now: 5), "wedged: still counts as subscribed")
+        a.recoverFromStall()
+        try expect(!a.armed)
+        try expect(a.arm(now: 5), "caller resubscribes to vsync")
+        try expect(!a.isStalled(now: 5.1))
+    }
+
+    test("OverlayHandle: the backstop recovers an armed overlay whose vsync link went silent") {
+        guard let text = try? String(contentsOfFile: "Sources/DataSources/OverlayHandle.swift", encoding: .utf8) else {
+            throw Expectation(message: "run the tests from the repo root")
+        }
+        guard let backstop = text.components(separatedBy: "private func backstopTick()").last?
+            .components(separatedBy: "\n    }\n").first else {
+            throw Expectation(message: "backstopTick moved; update this guard")
+        }
+        try expect(backstop.contains("wantsBackstop(now:"), "the backstop must ask whether the armed link is silent")
+        try expect(backstop.contains("recoverFromSilentLink()"), "a stalled overlay must recover, not wait for the link")
+        try expect(text.contains("DisplayLinkObserver.shared.relink()"), "recovery must restart the link itself")
     }
 }

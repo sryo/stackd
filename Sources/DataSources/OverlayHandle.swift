@@ -186,8 +186,27 @@ final class OverlayHandle: NSObject, WKNavigationDelegate {
     }
 
     private func backstopTick() {
-        guard tickArm.wantsBackstop else { return }
+        let now = CFAbsoluteTimeGetCurrent()
+        guard tickArm.wantsBackstop(now: now) else { return }
+        if tickArm.isStalled(now: now) {
+            recoverFromSilentLink()
+            return
+        }
         if step() { arm() }
+    }
+
+    /// Armed, yet no vsync tick has arrived for `OverlayTickArm.stallAfter`:
+    /// the link went silent (displays asleep, screen locked, a display
+    /// reconfiguration) and nothing would ever move or hide the panel again.
+    /// Drop the dead subscription, restart the link, and re-arm.
+    private func recoverFromSilentLink() {
+        trace.note("stalled")
+        linkToken?.cancel()
+        linkToken = nil
+        tickArm.recoverFromStall()
+        DisplayLinkObserver.shared.relink()
+        step()
+        arm()
     }
 
     /// A window-server move/resize for the target reached main: step now

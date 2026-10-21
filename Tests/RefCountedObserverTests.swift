@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 
 // Tests for RefCountedObserver.swift — the base class every DataSources/
@@ -399,5 +400,28 @@ func registerRefCountedObserverTests() {
         // idle tail after the last overlay or motion subscriber leaves is
         // pure cost; 0.5s still spans a hot-reload's off/on cycle.
         try expectEqual(DisplayLinkObserver.shared.teardownDelay, 0.5)
+    }
+
+    test("DisplayLinkObserver: relink replaces a running link and subscribers keep receiving frames") {
+        // The link can go silent after a display change or wake; relink is
+        // what brings it back without anyone resubscribing.
+        guard CGMainDisplayID() != 0, !NSScreen.screens.isEmpty else { return }
+        let observer = DisplayLinkObserver.forDisplay(CGMainDisplayID())
+        var frames = 0
+        let token = observer.subscribe { frames += 1 }
+        defer { token.cancel() }
+        try expect(spin(timeout: 10) { frames >= 5 }, "no vsync frames before the relink")
+        let before = frames
+        observer.relink()
+        try expect(spin(timeout: 10) { frames >= before + 5 }, "no vsync frames after the relink")
+    }
+
+    test("DisplayLinkObserver: relink with no running link does nothing") {
+        guard CGMainDisplayID() != 0 else { return }
+        let observer = DisplayLinkObserver.forDisplay(CGMainDisplayID())
+        spin(timeout: 5) { observer.snapshot() == nil }
+        observer.relink()
+        drainMainQueue()
+        try expect(observer.snapshot() == nil, "a relink without subscribers must not start a link")
     }
 }

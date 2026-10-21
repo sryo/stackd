@@ -377,6 +377,17 @@ final class DisplayLinkObserver: RefCountedObserver {
     private init(displayID: CGDirectDisplayID?) {
         self.displayID = displayID
         super.init()
+        // A link made for one set of displays can stay silent after the set
+        // changes or the displays sleep and wake, so each of these rebuilds
+        // it. The observers live for the process, so none are removed.
+        let center = NotificationCenter.default
+        center.addObserver(forName: NSApplication.didChangeScreenParametersNotification,
+                           object: nil, queue: .main) { [weak self] _ in self?.relink() }
+        let workspace = NSWorkspace.shared.notificationCenter
+        for name in [NSWorkspace.didWakeNotification, NSWorkspace.screensDidWakeNotification,
+                     NSWorkspace.sessionDidBecomeActiveNotification] {
+            workspace.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in self?.relink() }
+        }
     }
 
     private var link: CVDisplayLink?
@@ -416,11 +427,35 @@ final class DisplayLinkObserver: RefCountedObserver {
     }
     private var hopGate = HopGate()
 
+    /// True from a successful install until its token is cancelled: the base
+    /// class installs only on 0 → 1 subscribers, so a link that failed to
+    /// restart has to be retried by `relink()`, not by a later subscribe.
+    private var installed = false
+
     override func install() -> Token? {
+        guard startLink() else { return nil }
+        installed = true
+        return Token { [weak self] in
+            self?.installed = false
+            self?.teardown()
+        }
+    }
+
+    /// Replace a running link with a fresh one for the displays active now;
+    /// subscribers keep their tokens. No-op while the observer is not
+    /// installed (the next 0 → 1 subscribe creates a link). A failed restart
+    /// leaves the observer without a link until the next call. Main thread.
+    func relink() {
+        guard installed else { return }
+        teardown()
+        _ = startLink()
+    }
+
+    private func startLink() -> Bool {
         var newLink: CVDisplayLink?
         let createStatus = displayID.map { CVDisplayLinkCreateWithCGDisplay($0, &newLink) }
             ?? CVDisplayLinkCreateWithActiveCGDisplays(&newLink)
-        guard createStatus == kCVReturnSuccess, let link = newLink else { return nil }
+        guard createStatus == kCVReturnSuccess, let link = newLink else { return false }
 
         let retained = Unmanaged.passRetained(self)
         self.refconRetainer = retained
@@ -430,7 +465,7 @@ final class DisplayLinkObserver: RefCountedObserver {
         guard cbStatus == kCVReturnSuccess else {
             retained.release()
             self.refconRetainer = nil
-            return nil
+            return false
         }
 
         let startStatus = CVDisplayLinkStart(link)
@@ -438,12 +473,11 @@ final class DisplayLinkObserver: RefCountedObserver {
             _ = CVDisplayLinkSetOutputCallback(link, nil, nil)
             retained.release()
             self.refconRetainer = nil
-            return nil
+            return false
         }
 
         self.link = link
-
-        return Token { [weak self] in self?.teardown() }
+        return true
     }
 
     private func teardown() {

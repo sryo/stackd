@@ -449,10 +449,25 @@ struct OverlayTickArm {
     /// animation (minimize genie, app hide, space slide).
     static let visibilityHold: Double = 0.6
 
+    /// How long an armed overlay may go without a vsync tick before the
+    /// link is presumed silent. A live link ticks every ~16 ms.
+    static let stallAfter: Double = 1.0
+
     private(set) var armed = false
     private var deadline: Double = -.infinity
+    private var lastActivity: Double = -.infinity
 
-    var wantsBackstop: Bool { !armed }
+    /// The slow backstop runs while disarmed, and also while an armed
+    /// overlay's vsync link has gone silent (displays asleep, screen
+    /// locked, a display reconfiguration): armed with no tick would freeze
+    /// the overlay on its last frame.
+    func wantsBackstop(now: Double) -> Bool { !armed || isStalled(now: now) }
+
+    func isStalled(now: Double) -> Bool { armed && now - lastActivity > Self.stallAfter }
+
+    /// Drop the armed state of a silent link so the next `arm` reports the
+    /// subscribe edge and the caller resubscribes.
+    mutating func recoverFromStall() { armed = false }
 
     /// Keep ticking until at least `now + hold`. True on the disarmed →
     /// armed edge, where the caller subscribes to vsync.
@@ -460,6 +475,7 @@ struct OverlayTickArm {
         deadline = max(deadline, now + hold)
         if armed { return false }
         armed = true
+        lastActivity = now
         return true
     }
 
@@ -468,6 +484,7 @@ struct OverlayTickArm {
     /// mid system animation; it is only consulted once the idle spell has
     /// run out. False means disarmed: the caller unsubscribes.
     mutating func afterTick(now: Double, changed: Bool, busy: () -> Bool) -> Bool {
+        lastActivity = now
         if changed { deadline = max(deadline, now + Self.idle) }
         if now < deadline { return true }
         if busy() {
