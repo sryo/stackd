@@ -16,7 +16,7 @@ enum AX {
     static func focusedElement() -> [String: Any]? {
         guard let app = NSWorkspace.shared.frontmostApplication else { return nil }
         let appEl = appElement(pid: app.processIdentifier, timeout: 0.1)
-        guard let el = element(of: appEl, kAXFocusedUIElementAttribute) else { return nil }
+        guard let el = element(of: appEl, kAXFocusedUIElementAttribute, timeout: 0.1) else { return nil }
 
         var out: [String: Any] = [
             "app":  app.localizedName ?? "",
@@ -52,10 +52,14 @@ enum AX {
     /// The Bridge owns one of these and passes it in to every call. Handles
     /// are opaque to JS; stacks must release(h) or releaseAll() to free them.
     final class HandleStore {
+        /// Messaging timeout of every element a stack holds a handle to.
+        static let timeout: Float = 0.5
+
         private var map: [Int: AXUIElement] = [:]
         private var next: Int = 1
 
         func mint(_ el: AXUIElement) -> Int {
+            AX.bounded(el, Self.timeout)
             let h = next
             next += 1
             map[h] = el
@@ -96,7 +100,7 @@ enum AX {
     static func focusedElementHandle(store: HandleStore) -> Int? {
         guard let app = NSWorkspace.shared.frontmostApplication else { return nil }
         let appEl = appElement(pid: app.processIdentifier, timeout: 0.1)
-        guard let focused = element(of: appEl, kAXFocusedUIElementAttribute) else { return nil }
+        guard let focused = element(of: appEl, kAXFocusedUIElementAttribute, timeout: HandleStore.timeout) else { return nil }
         return store.mint(focused)
     }
 
@@ -111,7 +115,7 @@ enum AX {
     static func focusedElementSystemWideHandle(store: HandleStore) -> Int? {
         let sys = AXUIElementCreateSystemWide()
         AXUIElementSetMessagingTimeout(sys, 0.1)
-        guard let focused = element(of: sys, kAXFocusedUIElementAttribute) else { return nil }
+        guard let focused = element(of: sys, kAXFocusedUIElementAttribute, timeout: HandleStore.timeout) else { return nil }
         return store.mint(focused)
     }
 
@@ -198,12 +202,12 @@ enum AX {
     // MARK: - Convenience walks
 
     static func children(handle: Int, store: HandleStore) -> [Int]? {
-        guard let el = store.get(handle), let arr = elements(of: el, kAXChildrenAttribute) else { return nil }
+        guard let el = store.get(handle), let arr = elements(of: el, kAXChildrenAttribute, timeout: HandleStore.timeout) else { return nil }
         return arr.map { store.mint($0) }
     }
 
     static func parent(handle: Int, store: HandleStore) -> Int? {
-        guard let el = store.get(handle), let parent = element(of: el, kAXParentAttribute) else { return nil }
+        guard let el = store.get(handle), let parent = element(of: el, kAXParentAttribute, timeout: HandleStore.timeout) else { return nil }
         return store.mint(parent)
     }
 
@@ -340,7 +344,17 @@ enum AX {
     // is `from:` applied to the raw copy, and returns nil when the read fails
     // or the value has a different type — a wedged or incompatible app reads
     // as "no value", never as a trap. Callers set the messaging timeout that
-    // suits their walk on the element before reading.
+    // suits their walk on the element before reading. An element read out of
+    // another one does not inherit that timeout (it waits the system default,
+    // 1.5s or more, on a hung app), so the readers that return elements take
+    // the timeout to set on them.
+
+    /// `el` with its AX calls capped at `timeout` seconds.
+    @discardableResult
+    static func bounded(_ el: AXUIElement, _ timeout: Float) -> AXUIElement {
+        AXUIElementSetMessagingTimeout(el, timeout)
+        return el
+    }
 
     /// An application element whose AX calls give up after `timeout` seconds.
     static func appElement(pid: pid_t, timeout: Float) -> AXUIElement {
@@ -364,10 +378,16 @@ enum AX {
     static func string(of el: AXUIElement, _ attribute: String) -> String? { string(from: value(of: el, attribute)) }
     static func bool(of el: AXUIElement, _ attribute: String) -> Bool? { bool(from: value(of: el, attribute)) }
     static func int(of el: AXUIElement, _ attribute: String) -> Int? { int(from: value(of: el, attribute)) }
-    static func element(of el: AXUIElement, _ attribute: String) -> AXUIElement? { element(from: value(of: el, attribute)) }
-    static func elements(of el: AXUIElement, _ attribute: String) -> [AXUIElement]? { elements(from: value(of: el, attribute)) }
+    static func element(of el: AXUIElement, _ attribute: String, timeout: Float) -> AXUIElement? {
+        element(from: value(of: el, attribute)).map { bounded($0, timeout) }
+    }
+    static func elements(of el: AXUIElement, _ attribute: String, timeout: Float) -> [AXUIElement]? {
+        elements(from: value(of: el, attribute))?.map { bounded($0, timeout) }
+    }
     /// The element's children; empty when the read fails or it has none.
-    static func children(of el: AXUIElement) -> [AXUIElement] { elements(of: el, kAXChildrenAttribute) ?? [] }
+    static func children(of el: AXUIElement, timeout: Float) -> [AXUIElement] {
+        elements(of: el, kAXChildrenAttribute, timeout: timeout) ?? []
+    }
     static func point(of el: AXUIElement, _ attribute: String) -> CGPoint? { point(from: value(of: el, attribute)) }
     static func size(of el: AXUIElement, _ attribute: String) -> CGSize? { size(from: value(of: el, attribute)) }
     static func range(of el: AXUIElement, _ attribute: String) -> CFRange? { range(from: value(of: el, attribute)) }

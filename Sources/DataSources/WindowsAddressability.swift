@@ -35,8 +35,8 @@ struct WindowTraits: Equatable {
         switch btnErr {
         case .success:
             var enabledRef: AnyObject?
-            if let btn = btnRef, CFGetTypeID(btn) == AXUIElementGetTypeID(),
-               AXUIElementCopyAttributeValue(btn as! AXUIElement, kAXEnabledAttribute as CFString, &enabledRef) == .success,
+            if let btn = AX.element(from: btnRef).map({ AX.bounded($0, 0.1) }),
+               AXUIElementCopyAttributeValue(btn, kAXEnabledAttribute as CFString, &enabledRef) == .success,
                let enabled = enabledRef as? Bool {
                 button = enabled ? .enabled : .disabled
             } else {

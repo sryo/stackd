@@ -662,10 +662,7 @@ final class WindowsAXObserver {
     }
 
     private func seedExistingWindows(pid: pid_t, app: String, appElement: AXUIElement, firing: Bool) {
-        var raw: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(appElement, kAXWindowsAttribute as CFString, &raw) == .success,
-              let cf = raw, CFGetTypeID(cf) == CFArrayGetTypeID() else { return }
-        let arr = cf as! [AXUIElement]
+        guard let arr = AX.elements(of: appElement, kAXWindowsAttribute, timeout: 0.1) else { return }
         for win in arr {
             installPerWindow(pid: pid, app: app, window: win, firing: firing)
         }
@@ -691,6 +688,12 @@ final class WindowsAXObserver {
                                   subroleRetries: [TimeInterval] = WindowsAXObserver.subroleRetryDelays)
         -> WindowSubroleVerdict? {
         guard let observer = appObservers[pid] else { return nil }
+        // Install runs on main and asks the app eight times (id, attributes,
+        // six notifications): cap them so a hung app can't stall the daemon,
+        // then hand the element back at the system default, since it may be
+        // WindowsByID's cached write target.
+        AX.bounded(window, 0.1)
+        defer { AX.bounded(window, 0) }
         var w: CGWindowID = 0
         guard let getWindow = AXShim.getWindow, getWindow(window, &w) == .success, w != 0 else { return nil }
         let wid = w

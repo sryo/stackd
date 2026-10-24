@@ -124,7 +124,7 @@ enum Apps {
     // Element keyed by its kAXMenuBarAttribute (the app's AXMenuBar). Apps
     // that don't surface a menu bar (background helpers, agents) return nil.
     private static func menuBarElement(pid: pid_t) -> AXUIElement? {
-        AX.element(of: AX.appElement(pid: pid, timeout: 0.1), kAXMenuBarAttribute)
+        AX.element(of: AX.appElement(pid: pid, timeout: 0.1), kAXMenuBarAttribute, timeout: 0.1)
     }
 
     /// Recursive walk producing nested `{title, role, enabled?, marked?,
@@ -177,13 +177,13 @@ enum Apps {
         // Unwrap it the way Hammerspoon does so the JSON tree matches the
         // user's mental model ("File" -> ["New", "Open", ...] not
         // ["File" -> [AXMenu -> [...]]]).
-        let kids = AX.children(of: el)
+        let kids = AX.children(of: el, timeout: 1.0)
         if !kids.isEmpty {
             var effective = kids
             if kids.count == 1,
                let firstRole = AX.string(of: kids[0], kAXRoleAttribute),
                firstRole == (kAXMenuRole as String) {
-                effective = AX.children(of: kids[0])
+                effective = AX.children(of: kids[0], timeout: 1.0)
             }
             // Only emit `children` when the element actually has menu structure.
             // Leaves (AXMenuItem with no submenu) keep the key absent.
@@ -248,11 +248,11 @@ enum Apps {
         while !remaining.isEmpty && guardLoop > 0 {
             guardLoop -= 1
             AXUIElementSetMessagingTimeout(current, 0.1)
-            var kids = AX.children(of: current)
+            var kids = AX.children(of: current, timeout: 0.1)
             if kids.count == 1,
                let role = AX.string(of: kids[0], kAXRoleAttribute),
                role == (kAXMenuRole as String) {
-                kids = AX.children(of: kids[0])
+                kids = AX.children(of: kids[0], timeout: 0.1)
             }
             let target = remaining.removeFirst()
             var matched: AXUIElement?
@@ -346,7 +346,7 @@ enum Apps {
     /// when the app has none or the SPI shim is unavailable.
     private static func windowID(pid: pid_t, attribute: String) -> Int? {
         guard let getWindow = AXShim.getWindow,
-              let win = AX.element(of: AX.appElement(pid: pid, timeout: 0.1), attribute) else { return nil }
+              let win = AX.element(of: AX.appElement(pid: pid, timeout: 0.1), attribute, timeout: 0.1) else { return nil }
         var wid: CGWindowID = 0
         guard getWindow(win, &wid) == .success else { return nil }
         return Int(wid)
@@ -358,7 +358,7 @@ enum Apps {
     /// returns ids only.
     static func allWindows(pid: pid_t) -> [Int] {
         guard let getWindow = AXShim.getWindow,
-              let arr = AX.elements(of: AX.appElement(pid: pid, timeout: 0.1), kAXWindowsAttribute) else { return [] }
+              let arr = AX.elements(of: AX.appElement(pid: pid, timeout: 0.1), kAXWindowsAttribute, timeout: 0.1) else { return [] }
         var out: [Int] = []
         out.reserveCapacity(arr.count)
         for el in arr {

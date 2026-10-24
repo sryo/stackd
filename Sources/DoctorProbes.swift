@@ -298,7 +298,7 @@ struct LiveDoctorBackend: DoctorProbeBackend {
         guard error == .success else { return .refused(error.rawValue) }
         guard let bar = AX.element(from: value) else { return .empty }
         AXUIElementSetMessagingTimeout(bar, 0.5)
-        let count = AX.children(of: bar).count
+        let count = AX.children(of: bar, timeout: 0.5).count
         return count > 0 ? .items(count) : .empty
     }
 

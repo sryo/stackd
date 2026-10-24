@@ -445,9 +445,8 @@ enum MenubarItems {
     private static func systemWideExtras() -> [AXUIElement]? {
         let systemWide = AXUIElementCreateSystemWide()
         AXUIElementSetMessagingTimeout(systemWide, 0.5)
-        guard let menuBar = AX.element(of: systemWide, "AXExtrasMenuBar") else { return nil }
-        AXUIElementSetMessagingTimeout(menuBar, 0.5)
-        return AX.children(of: menuBar)
+        guard let menuBar = AX.element(of: systemWide, "AXExtrasMenuBar", timeout: 0.5) else { return nil }
+        return AX.children(of: menuBar, timeout: 0.5)
     }
 
     /// The status items gathered process by process. A process with none
@@ -475,9 +474,8 @@ enum MenubarItems {
 
     /// One process's status items; nil when it has no extras menubar.
     private static func extrasChildren(of pid: pid_t) -> [AXUIElement]? {
-        guard let bar = AX.element(of: AX.appElement(pid: pid, timeout: 0.1), "AXExtrasMenuBar") else { return nil }
-        AXUIElementSetMessagingTimeout(bar, 0.1)
-        return AX.children(of: bar)
+        guard let bar = AX.element(of: AX.appElement(pid: pid, timeout: 0.1), "AXExtrasMenuBar", timeout: 0.1) else { return nil }
+        return AX.children(of: bar, timeout: 0.1)
     }
 }
 

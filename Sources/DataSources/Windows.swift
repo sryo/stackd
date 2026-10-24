@@ -127,14 +127,8 @@ enum Windows {
     /// `pid`'s focused window, read over AX with a 0.1s cap so an
     /// unresponsive app can't hang the caller. Any thread.
     static func readFocusedWindow(pid: pid_t) -> FocusedWindowRead? {
-        let appEl = AXUIElementCreateApplication(pid)
-        AXUIElementSetMessagingTimeout(appEl, 0.1)
-
-        var focusedRef: AnyObject?
-        let err = AXUIElementCopyAttributeValue(appEl, kAXFocusedWindowAttribute as CFString, &focusedRef)
-        guard err == .success, let focused = focusedRef else { return nil }
-        // swiftlint:disable:next force_cast
-        let win = focused as! AXUIElement
+        let appEl = AX.appElement(pid: pid, timeout: 0.1)
+        guard let win = AX.element(of: appEl, kAXFocusedWindowAttribute, timeout: 0.1) else { return nil }
         let read = WindowAXRead(win, WindowAXRead.titleAndFrame)
         let frame = read.frameOrZero
 
@@ -718,12 +712,9 @@ enum WindowsByID {
     /// read without touching the element cache. nil when the app cannot be
     /// read (busy, not trusted).
     static func currentWindowIDs(pid: pid_t) -> Set<Int>? {
-        guard let getWindow = AXShim.getWindow else { return nil }
-        let appEl = AXUIElementCreateApplication(pid)
-        AXUIElementSetMessagingTimeout(appEl, 0.1)
-        var ref: AnyObject?
-        guard AXUIElementCopyAttributeValue(appEl, kAXWindowsAttribute as CFString, &ref) == .success,
-              let arr = ref as? [AXUIElement] else { return nil }
+        guard let getWindow = AXShim.getWindow,
+              let arr = AX.elements(of: AX.appElement(pid: pid, timeout: 0.1), kAXWindowsAttribute, timeout: 0.1)
+        else { return nil }
         var ids = Set<Int>()
         for el in arr {
             var wid: CGWindowID = 0
@@ -733,19 +724,20 @@ enum WindowsByID {
     }
 
     static func freshElement(windowID: CGWindowID, pid: pid_t) -> AXUIElement? {
-        guard let getWindow = AXShim.getWindow else { return nil }
-        let appEl = AXUIElementCreateApplication(pid)
-        AXUIElementSetMessagingTimeout(appEl, 0.1)
-        var ref: AnyObject?
-        guard AXUIElementCopyAttributeValue(appEl, kAXWindowsAttribute as CFString, &ref) == .success,
-              let arr = ref as? [AXUIElement] else { return nil }
+        guard let getWindow = AXShim.getWindow,
+              let arr = AX.elements(of: AX.appElement(pid: pid, timeout: 0.1), kAXWindowsAttribute, timeout: 0.1)
+        else { return nil }
 
+        // The id reads stay under the 0.1s cap; the cached element then goes
+        // back to the system default the write path expects (writeAxesAX
+        // sets its own cap per write and restores the default).
         var map: [CGWindowID: AXUIElement] = [:]
         for el in arr {
             var wid: CGWindowID = 0
             if getWindow(el, &wid) == .success {
                 map[wid] = el
             }
+            AX.bounded(el, 0)
         }
 
         cacheLock.lock()
@@ -1090,12 +1082,8 @@ enum WindowsByID {
 
     @discardableResult
     static func close(windowID: CGWindowID) -> Bool {
-        guard let el = elementFor(windowID: windowID) else { return false }
-        var btnRef: AnyObject?
-        guard AXUIElementCopyAttributeValue(el, "AXCloseButton" as CFString, &btnRef) == .success,
-              let btn = btnRef else { return false }
-        // swiftlint:disable:next force_cast
-        let button = btn as! AXUIElement
+        guard let el = elementFor(windowID: windowID),
+              let button = AX.element(of: el, kAXCloseButtonAttribute, timeout: 0.1) else { return false }
         return AXUIElementPerformAction(button, kAXPressAction as CFString) == .success
     }
 
@@ -1314,10 +1302,7 @@ enum WindowsByID {
         guard let el = elementFor(windowID: windowID) else { return nil }
         AXUIElementSetMessagingTimeout(el, 0.1)
         guard let group = tabGroup(in: el) else { return nil }
-        var childrenRef: AnyObject?
-        guard AXUIElementCopyAttributeValue(group, kAXChildrenAttribute as CFString, &childrenRef) == .success,
-              let children = childrenRef as? [AXUIElement] else { return [] }
-        return children.map { child -> [String: Any] in
+        return AX.children(of: group, timeout: 0.1).map { child -> [String: Any] in
             let title = axStringAttribute(child, kAXTitleAttribute) ?? ""
             var valRef: AnyObject?
             AXUIElementCopyAttributeValue(child, kAXValueAttribute as CFString, &valRef)
@@ -1337,29 +1322,21 @@ enum WindowsByID {
         guard let el = elementFor(windowID: windowID) else { return false }
         AXUIElementSetMessagingTimeout(el, 0.1)
         guard let group = tabGroup(in: el) else { return false }
-        var childrenRef: AnyObject?
-        guard AXUIElementCopyAttributeValue(group, kAXChildrenAttribute as CFString, &childrenRef) == .success,
-              let children = childrenRef as? [AXUIElement],
-              index >= 0, index < children.count else { return false }
+        let children = AX.children(of: group, timeout: 0.1)
+        guard index >= 0, index < children.count else { return false }
         return AXUIElementPerformAction(children[index], kAXPressAction as CFString) == .success
     }
 
     /// Direct-child AXTabGroup lookup. Tight strategy — does not recurse.
     private static func tabGroup(in el: AXUIElement) -> AXUIElement? {
-        var childrenRef: AnyObject?
-        guard AXUIElementCopyAttributeValue(el, kAXChildrenAttribute as CFString, &childrenRef) == .success,
-              let children = childrenRef as? [AXUIElement] else { return nil }
-        for child in children where axStringAttribute(child, kAXRoleAttribute) == (kAXTabGroupRole as String) {
+        for child in AX.children(of: el, timeout: 0.1) where axStringAttribute(child, kAXRoleAttribute) == (kAXTabGroupRole as String) {
             return child
         }
         return nil
     }
 
     private static func elementHasToolbar(_ el: AXUIElement) -> Bool {
-        var childrenRef: AnyObject?
-        guard AXUIElementCopyAttributeValue(el, kAXChildrenAttribute as CFString, &childrenRef) == .success,
-              let children = childrenRef as? [AXUIElement] else { return false }
-        for child in children where axStringAttribute(child, kAXRoleAttribute) == "AXToolbar" {
+        for child in AX.children(of: el, timeout: 0.1) where axStringAttribute(child, kAXRoleAttribute) == "AXToolbar" {
             return true
         }
         return false

@@ -111,11 +111,7 @@ enum InputAX {
     private static func focusedElement() -> AXUIElement? {
         let sys = AXUIElementCreateSystemWide()
         AXUIElementSetMessagingTimeout(sys, 0.1)
-        var ref: AnyObject?
-        guard AXUIElementCopyAttributeValue(sys, kAXFocusedUIElementAttribute as CFString, &ref) == .success,
-              let focused = ref else { return nil }
-        // swiftlint:disable:next force_cast
-        return (focused as! AXUIElement)
+        return AX.element(of: sys, kAXFocusedUIElementAttribute, timeout: 0.1)
     }
 
     private static func stringAttr(_ el: AXUIElement, _ key: String) -> String? {

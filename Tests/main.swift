@@ -4,6 +4,7 @@ import Foundation
 // register*Tests()` definitions in Tests/*Tests.swift. The old hand-written
 // call list had a silent failure mode: a test file added to TEST_SOURCES but
 // missing its call here compiled fine and never ran.
+runAXVictimIfAsked()
 __registerAllTests()
 // Optional CLI filters: --filter <regex> (include) and --exclude <regex>.
 // Used by CI to split the suite into "pure" (no macOS permission prompts) and
