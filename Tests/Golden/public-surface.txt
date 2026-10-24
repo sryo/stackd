@@ -143,6 +143,7 @@ ax.attribute perm=ax deny=null
 ax.attributeNames perm=ax deny=null
 ax.attributes perm=ax deny=null
 ax.children perm=ax deny=null
+ax.elementAtPosition perm=ax deny=null
 ax.focused perm=ax deny=null
 ax.focusedElement perm=ax deny=null
 ax.focusedElementSystemWide perm=ax deny=null
@@ -304,6 +305,7 @@ window.setAlpha perm=- deny=false
 window.setClickThrough perm=- deny=false
 window.setFrame perm=- deny=false
 window.setInteractiveRects perm=- deny=false
+windows.at perm=windows deny=null
 windows.batch.begin perm=windows deny=false
 windows.batch.commit perm=windows deny=false
 windows.byId.buttonFrames perm=windows deny=null
@@ -380,6 +382,7 @@ sd.ax.attribute fn/2
 sd.ax.attributeNames fn/1
 sd.ax.attributes fn/1
 sd.ax.children fn/1
+sd.ax.elementAtPosition fn/3
 sd.ax.focused fn/0
 sd.ax.focusedElement fn/0
 sd.ax.focusedElementSystemWide fn/0
@@ -610,6 +613,7 @@ sd.window.setInteractiveRects fn/1
 sd.windows object
 sd.windows.all signal
 sd.windows.animating signal
+sd.windows.at fn/2
 sd.windows.batch fn/1
 sd.windows.buttonFrames fn/1
 sd.windows.cancelAnimation fn/1

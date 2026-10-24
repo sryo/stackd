@@ -1,12 +1,12 @@
 import Foundation
 
 /// AX primitive group — extracted from Bridge.swift as part of the
-/// god-object breakup continuation (follow-up to A1+A4+A5). Eighteen
+/// god-object breakup continuation (follow-up to A1+A4+A5). Twenty-one
 /// `.ax` entries covering the per-Bridge AXUIElement surface:
 ///
 ///   - Discovery — `ax.focused`, `ax.application`, `ax.system`,
-///     `ax.systemElementAtPosition`, `ax.focusedElement`,
-///     `ax.focusedElementSystemWide`. The unhandled four mint
+///     `ax.systemElementAtPosition`, `ax.elementAtPosition`, `ax.focusedElement`,
+///     `ax.focusedElementSystemWide`. All but `ax.focused` mint
 ///     `AX.HandleStore` entries (per-Bridge ownership so a stack reload
 ///     doesn't strand handles); `ax.focused` is a one-shot snapshot.
 ///
@@ -49,6 +49,7 @@ extension Bridge {
             .ax("ax.application")             { b, body in AX.application(pid: pid_t((body["pid"] as? Int) ?? 0), store: b.axHandles) },
             .ax("ax.system")                  { b, _    in AX.systemWide(store: b.axHandles) },
             .ax("ax.systemElementAtPosition") { b, body in AX.systemElementAtPosition(x: Float((body["x"] as? Double) ?? 0), y: Float((body["y"] as? Double) ?? 0), store: b.axHandles) },
+            .ax("ax.elementAtPosition")       { b, body in AX.elementAtPosition(handle: (body["handle"] as? Int) ?? -1, x: Float((body["x"] as? Double) ?? 0), y: Float((body["y"] as? Double) ?? 0), store: b.axHandles) },
             .ax("ax.focusedElement")          { b, _    in AX.focusedElementHandle(store: b.axHandles) },
             .ax("ax.focusedElementSystemWide"){ b, _    in AX.focusedElementSystemWideHandle(store: b.axHandles) },
             .ax("ax.attributeNames")          { b, body in AX.attributeNames(handle: (body["handle"] as? Int) ?? -1, store: b.axHandles) },

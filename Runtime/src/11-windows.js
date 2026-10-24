@@ -77,6 +77,17 @@ sd.windows = {
     // Permission: "windows" (same as the union channel).
     focusedChanged: channel("focusedChanged"),
     titleChanged:   channel("titleChanged"),
+    // The window a click at (x, y) (global, top-left origin, the space of
+    // event payloads and frames) would land on, and which part of it:
+    //   { id, pid, app, frame: {x,y,w,h}, region, edges }   or null
+    // region: "edge" (within 5pt of an edge, inside or out; edges names
+    // them, two at a corner), "titlebar" (a part of the title bar that
+    // drags the window), "control" (anything else in the title bar: a tab,
+    // button or field, or a web-drawn bar Accessibility can't show drags),
+    // "content". null when nothing is there or a menu, panel, the
+    // Dock bar or one of stackd's own windows takes the click; screen-sized
+    // overlays that let clicks through are seen through.
+    at(x, y) { return request({ type: "windows.at", x, y }); },
     // Actions with no id operate on the AX focused window of the frontmost app.
     // Pass an id (CGWindowID from sd.windows.all / sd.windows.focused) to
     // target a specific window via the _AXUIElementGetWindow SPI.

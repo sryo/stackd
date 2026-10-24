@@ -31,6 +31,10 @@ import Foundation
 ///     `.ax`) because it doesn't touch AX. Distinct from
 ///     `sd.display.snapshot` (ScreenCaptureKit).
 ///
+///   - `windows.at` — hit test: the window under a point and which part
+///     of it (`edge` / `titlebar` / `control` / `content`). `.custom`:
+///     window list on main, Accessibility on the owning app's AX queue.
+///
 ///   - `windows.batch.{begin, commit}` — multi-window frame batch.
 ///     `begin` installs `WindowsByID.batchSink` (setFrame calls queue
 ///     full frames instead of writing); `commit` applies every queued
@@ -92,6 +96,19 @@ extension Bridge {
             .ax("windows.minimize",   permission: "windows", denyValue: false) { _, body in Windows.minimizeFocused(body["value"] as? Bool ?? true) },
             .ax("windows.fullscreen", permission: "windows", denyValue: false) { _, body in Windows.fullscreenFocused(body["value"] as? Bool ?? true) },
             .ax("windows.raise",      permission: "windows", denyValue: false) { _, _    in Windows.raiseFocused() },
+
+            // Hit test: the window under a global top-left point and the part
+            // of it there. `.custom` because the window list is read on main
+            // and the Accessibility half runs on the owning app's AX queue,
+            // so a hung app delays only its own answer.
+            .custom("windows.at", permission: "windows") { bridge, body, requestId in
+                let point = CGPoint(x: body["x"] as? Double ?? 0, y: body["y"] as? Double ?? 0)
+                DispatchQueue.main.async { [weak bridge] in
+                    WindowsByID.hitTest(at: point) { hit in
+                        bridge?.respond(requestId: requestId, value: hit as Any? ?? NSNull())
+                    }
+                }
+            },
 
             // Windows-by-id. setFrame is `.custom` (not `.ax`) because the
             // animated path resolves its promise at settle — potentially

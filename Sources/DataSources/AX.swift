@@ -97,6 +97,18 @@ enum AX {
         return store.mint(el)
     }
 
+    /// The element `handle`'s app (or the system, for the system-wide
+    /// element) reports under a global top-left point — hs.axuielement's
+    /// `elementAtPosition`. Asking an application element answers from that
+    /// app alone, so another app's transparent layer on top doesn't answer
+    /// instead. Accessibility only answers for a point on a display.
+    static func elementAtPosition(handle: Int, x: Float, y: Float, store: HandleStore) -> Int? {
+        guard let el = store.get(handle) else { return nil }
+        var ref: AXUIElement?
+        guard AXUIElementCopyElementAtPosition(el, x, y, &ref) == .success, let hit = ref else { return nil }
+        return store.mint(hit)
+    }
+
     static func focusedElementHandle(store: HandleStore) -> Int? {
         guard let app = NSWorkspace.shared.frontmostApplication else { return nil }
         let appEl = appElement(pid: app.processIdentifier, timeout: 0.1)

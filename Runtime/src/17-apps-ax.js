@@ -90,6 +90,10 @@ sd.ax = {
     application(pid)                  { return request({ type: "ax.application", pid }); },
     system()                          { return request({ type: "ax.system" }); },
     systemElementAtPosition(x, y)     { return request({ type: "ax.systemElementAtPosition", x, y }); },
+    // hs.axuielement:elementAtPosition — the element `handle`'s app reports
+    // under a point. An application handle answers from that app alone, so
+    // another app's transparent layer on top doesn't get in the way.
+    elementAtPosition(handle, x, y)   { return request({ type: "ax.elementAtPosition", handle, x, y }); },
     focusedElement()                  { return request({ type: "ax.focusedElement" }); },
     // System-wide focused element — mirrors HS's
     // ax.systemWideElement():attributeValue("AXFocusedUIElement"). Use this

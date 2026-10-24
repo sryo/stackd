@@ -119,6 +119,7 @@ The complete author-facing JavaScript API. Everything is on the global `sd`. Sou
 Handle-based; handles are opaque ints owned by this stack — release them.
 - `focused() → Promise<dict>` (back-compat focused element).
 - `application(pid)` · `system()` · `systemElementAtPosition(x,y)` · `focusedElement()` · `focusedElementSystemWide()` `→ Promise<handle>`.
+- `elementAtPosition(handle, x, y) → Promise<handle|null>` — the element `handle`'s app reports under a point (hs.axuielement's `elementAtPosition`). An application handle answers from that app alone, so another app's transparent layer on top doesn't answer instead. Only points on a display answer.
 - `attributeNames(h)` · `attribute(h,name)` · `attributes(h)` · `parameterizedAttributeNames(h)` · `parameterizedAttribute(h,name,param)`.
 - `actionNames(h)` · `isAttributeSettable(h,name)` · `setAttribute(h,name,value)` · `performAction(h,action)`.
 - `children(h)` · `parent(h)` · `role(h)` · `release(h)` · `releaseAll()`.
@@ -370,6 +371,7 @@ Operates on the stack's own NSPanel; no separate permission.
 - `minimize([id,] value?)` · `fullscreen([id,] value?)` · `raise([id])` · `focus(id)` · `close(id)` `→ Promise`.
 - `focus(id)` fronts the window's app with that window key and raises it. The raise lands asynchronously (at once for a window of the frontmost app, ~100 ms later for another app's), so `true` means fronted and key; z-order read immediately after may not show the raise yet.
 - `minSize(id) → Promise<{w,h}|null>` — minimum size learned from the app refusing probed writes below it (`w`/`h` null for an axis never clamped); clamp before writing.
+- `at(x, y) → Promise<{id,pid,app,frame,region,edges}|null>` — the window a click at a global top-left point would land on, and which part: `region` is `"edge"` (within 5pt of an edge, inside or out; `edges` names them, two at a corner), `"titlebar"` (a part of the title bar that drags the window), `"control"` (anything else in the title bar: a tab, button or field, or a web-drawn bar such as Electron's, which Accessibility can't show drags) or `"content"`. `null` when nothing is there or a menu, panel, the Dock bar or a stackd window takes the click; screen-sized overlays that let clicks through are seen through.
 - `frame(id) → Promise<{x,y,w,h}>` · `cornerHints(id) → Promise<{toolbarPresent,role,subrole}>`.
 - `buttonFrames(id) → Promise<{close,zoom,minimize}|null>` (traffic-light rects).
 - `info(id) → Promise<{frame,title,role,subrole,isMinimized,isFullscreen,isMain,isStandard,hasToolbar,cornerHints,isResizable,canFullscreen}|null>`.
