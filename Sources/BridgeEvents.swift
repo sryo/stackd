@@ -137,6 +137,8 @@ struct EventTapCapture {
     let gestureEvent: CGEvent?
     /// "enter" / "move" / "leave" for an `emitLeave` observer; nil otherwise.
     let phase: String?
+    /// Posted by stackd itself (sd.events.*), not the user.
+    let synthetic: Bool
 
     /// The pointer-motion types whose payload carries `deltaX` / `deltaY`.
     static let motionTypes: Set<CGEventType> = [.mouseMoved, .leftMouseDragged, .rightMouseDragged]
@@ -152,6 +154,7 @@ struct EventTapCapture {
         scroll = type == .scrollWheel ? ScrollWheel.read(event) : nil
         gestureEvent = type.rawValue == Gesture.cgEventType.rawValue ? event.copy() : nil
         self.phase = phase
+        synthetic = EventsSynth.isSynthetic(event)
     }
 
     var payload: [String: Any] {
@@ -178,6 +181,8 @@ struct EventTapCapture {
         // Present only when the manifest opted in via `emitLeave: true`, so
         // every other payload keeps the shape existing stacks read.
         if let phase = phase { payload["phase"] = phase }
+        // Same: present only on stackd's own posted events.
+        if synthetic { payload["synthetic"] = true }
         return payload
     }
 }

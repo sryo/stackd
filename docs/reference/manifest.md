@@ -92,7 +92,7 @@ Lowercased, split on `+`. Modifiers (any order): `cmd`/`command`/`meta` (⌘), `
 
 **Supported `event` names:** `keyDown`, `keyUp`, `flagsChanged`, `leftMouseDown`, `leftMouseUp`, `rightMouseDown`, `rightMouseUp`, `otherMouseDown`, `otherMouseUp`, `leftMouseDragged`, `rightMouseDragged`, `mouseMoved`, `scrollWheel`, `gesture`.
 
-**Callback payload:** `{ type, keyCode, flags, x, y }`, plus `deltaX`/`deltaY` for `mouseMoved` and dragged variants, gesture fields for `gesture`, and `phase` only when `emitLeave` is active.
+**Callback payload:** `{ type, keyCode, flags, x, y }`, plus `deltaX`/`deltaY` for `mouseMoved` and dragged variants, gesture fields for `gesture`, `phase` only when `emitLeave` is active, and `synthetic: true` only on events stackd itself posted (`sd.events.type/key/scroll/click`), so a stack can ignore its own input.
 
 `gesture` payloads carry `{ subtype, subtypeName, fingers, phases, touches, gesturePhase }` plus `magnification` (per-event scale delta) on `magnify`, `rotation` (degrees) on `rotate`, and `swipeDirection` (`"up"|"down"|"left"|"right"`) on `swipe`. `gesturePhase` uses the scroll phase names below.
 

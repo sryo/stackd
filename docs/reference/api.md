@@ -185,7 +185,7 @@ Handle-based; handles are opaque ints owned by this stack — release them.
 - `sd.displayLink` *(channel)* — `{ timestamp, frame, refreshRate }` per vsync (60/120Hz).
 
 ### `sd.events` — synthesize input + taps · `events`
-- `type(text)` · `key(spec)` · `scroll(dx, dy)` · `click(x, y, button?)` (button default `"left"`) `→ Promise`.
+- `type(text)` · `key(spec)` · `scroll(dx, dy)` · `click(x, y, button?)` (button default `"left"`) `→ Promise`. Every posted event is marked, so eventtap payloads for it carry `synthetic: true`.
 - `setTapRects(callback, rects) → Promise` — gate a manifest eventtap by cursor rects: `null`=clear, `[]`=never-fire, `[{x,y,w,h}]`=fire only inside.
 - `on(name, fn) → disposer` — register a handler for a manifest eventtap callback (replaces `window.onTap_<name>`).
 - `claimScroll(senderId?) → Promise<bool>` — swallow the current trackpad scroll session (remaining scroll + momentum events) of `senderId` (a scrollWheel tap's `senderId` or an sd.touchdevice frame's `device`; omitted = every trackpad) until that sender's next scroll `began`, which passes and ends the claim. Decided synchronously in the daemon's consuming tap; one claim at a time (last wins); released on unload. · `releaseScroll() → Promise<bool>`.
