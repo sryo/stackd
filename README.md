@@ -1,12 +1,10 @@
 # stackd
 
-A small macOS daemon for making your computer feel like yours.
+stackd turns folders of HTML and CSS into live pieces of your Mac's desktop. You get a status bar, a hotkey launcher or a window tiler that you write like a web page, and it updates the moment you save.
 
 <p align="center"><img src="assets/hero.gif" width="830" alt="Editing index.html in an editor; on save, a glass widget on the desktop hot-reloads with the change."></p>
 
-Drop a folder into `~/stackd/stacks/` and it becomes a live piece of your desktop — a status strip across the top, a launcher you summon with a hotkey, a script that fires when you close a window. The folder is a *stack*: a `stack.json`, an `index.html`, an `index.css`. stackd renders it in a transparent WKWebView and feeds it system state through a small JavaScript API.
-
-It's the successor to a Hammerspoon config that grew too tall. The native parts stay native (Accessibility, eventtaps, IOKit, CGEvent post); the visual layer is HTML/CSS — the same tools, the same dev tooling, the same gradients you can already write — instead of a paint-program's worth of `hs.canvas` arithmetic.
+Drop a folder into `~/stackd/stacks/` and it shows up on your desktop: a status strip across the top, a launcher you summon with a hotkey, a script that runs when you close a window. That folder is a *stack*: a `stack.json`, an `index.html` and an `index.css`. Your page reads what your Mac is doing, and acts on it, through a small JavaScript API called `sd`.
 
 > See **[BELIEFS.md](./BELIEFS.md)** for what stackd believes.
 
@@ -24,75 +22,42 @@ It's the successor to a Hammerspoon config that grew too tall. The native parts 
 
 These and the rest of a daily-driver config live in [stackd-stacks](https://github.com/sryo/stackd-stacks).
 
-## Contents
-
-- [Install](#install) · [Quick start](#quick-start) · [Concepts](#concepts)
-- [Writing a stack](#writing-a-stack) — templates, scripts, manifest fields
-- [System data (`sd.*`)](#system-data-sd) — what stacks can read and do
-- [CLI](#cli) · [Hot reload](#hot-reload) · [Examples](#examples)
-- [Status](#status) · [Project layout](#project-layout) · [Foundations](#foundations) · [Refusals](#refusals)
-
 ## Install
 
-Requires macOS 14+. Build from source:
+You need a Mac with Apple silicon, macOS 13 or later, and the Xcode command-line tools (`xcode-select --install`).
 
 ```
 git clone https://github.com/sryo/stackd ~/Documents/stackd
 cd ~/Documents/stackd
-./build.sh
-.build/stackd                                # starts the daemon
+scripts/package-app.sh
+STACKD_BIN=/Applications/stackd.app/Contents/MacOS/stackd scripts/daemonctl.sh install
+sudo mkdir -p /usr/local/bin && sudo ln -sf /Applications/stackd.app/Contents/MacOS/stackd /usr/local/bin/stackd
 ```
 
-On first launch stackd asks for **Accessibility** (hotkeys, event taps, window focus reads). Grant in System Settings → Privacy → Accessibility. The user folder `~/stackd/` is created automatically — your stacks live under `~/stackd/stacks/<name>/`.
+That puts `stackd.app` in Applications, starts it now and at every login, and puts the `stackd` command on your PATH.
 
-## Quick start
+The first time it runs, stackd asks for **Accessibility** access, which it needs for hotkeys and for reading and moving windows. Turn it on in System Settings → Privacy & Security → Accessibility. Your stacks go in `~/stackd/stacks/<name>/`; stackd makes the folder for you.
+
+## Use
+
+### Quick start
 
 ```
 stackd new hello
 ```
 
-Scaffolds `~/stackd/stacks/hello/` — three files, a transparent panel in your top-right showing the current battery percent and theme. FSEvents picks it up within ~300ms; no build step. Edit `index.html`, save, watch it change.
+This makes `~/stackd/stacks/hello/`: three files, and a see-through panel in the top-right corner showing your battery percentage and theme. It appears on its own, with no build step. Open `index.html`, change it, save, and watch the panel change.
 
 ```html
 <!doctype html><meta charset="utf-8">
 <div>{{ sd.battery.percent }}%</div>
 ```
 
-That's a complete stack body. The runtime walks the DOM at load time, finds every `{{ … }}` (in text *and* attributes), and re-renders whenever any `sd.*` signal it touches changes.
+That's a whole stack. Anything in `{{ … }}`, in text or in an attribute, updates itself whenever the value changes.
 
-## Concepts
+### The manifest
 
-The vocabulary, in one place. Everything below uses these terms in the strict sense.
-
-**Units**
-- **stack** — a loadable folder (`~/stackd/stacks/<id>/`) with a manifest (`stack.json`), a rendered surface (`index.html` + `index.css`), and optional permissions. The deployable unit.
-- **manifest** — `stack.json`. Declares region, size, anchor, material, permissions, handles, hotkeys, eventtap entries.
-- **panel** — the borderless NSPanel the daemon creates to host a stack's WebView. One stack = one panel (per display, for fullscreen stacks).
-
-**The reactive surface (what a stack sees)**
-- **primitive** — any general `sd.*` API. Every primitive has at least two unrelated callers (no `sd.spotify` — there's `sd.media`).
-- **channel** — a top-level `sd.*` namespace (`sd.battery`, `sd.windows`, `sd.media`). The unit of permission inference.
-- **signal** — reactive state. `sd.battery`, `sd.mouse`, `sd.windows.focused`. Subscribe or drop into `{{ }}`; the panel re-renders on change.
-- **action** — one-shot async write. `sd.windows.setFrame(...)`, `sd.pasteboard.set(...)`. Opposite of signal.
-- **bang** — one-shot pub/sub topic event. Any stack can fire (`sd.bang`); any stack that lists the topic in `handles` receives. CLI: `stackd bang my.topic key=value`. JS: `window.onBang_my_topic = (detail) => {…}`.
-
-**Native plumbing (daemon-side)**
-- **observer** — a daemon-side poller backing a signal (`BatteryObserver`, `AudioObserver`). Sheds itself when no stack subscribes.
-- **scope** / **StackScope** — per-stack container of native resources (observer subs, hotkeys, eventtaps). Drains on unload — nothing leaks.
-- **token** — a cancellable handle returned by registries, adopted into a StackScope.
-- **hotkey** — Carbon system-wide keybinding. Manifest-declared (`hotkeys: [...]`) or dynamic (`sd.hotkey.bind`).
-- **eventtap** — CGEventTap subscription. Manifest-declared, read-only or consuming.
-
-**CLI**
-- **verb** — a `stackd` subcommand (`list`, `reload`, `toggle`, `set`, `bang`, `new`, `doctor`, `help`). The `stackd` binary is both daemon and client; arguments mean "send to the running daemon."
-
-**Permissions** (BELIEFS #6 — reads inferred, writes declared)
-- Channel reads are auto-inferred from `sd.<channel>` references in your HTML/CSS/JS — the list is usually a *minimum* you don't have to maintain.
-- Actions that change the world (e.g. `menubar.item`, `overlay`) must be listed explicitly.
-
-## Writing a stack
-
-A stack is `stack.json` + `index.html` + `index.css`. The manifest says where the panel lives and what it can touch:
+`stack.json` says where the panel sits and what it can touch:
 
 <!-- include: examples/cursor/stack.json -->
 ```json
@@ -109,17 +74,17 @@ A stack is `stack.json` + `index.html` + `index.css`. The manifest says where th
 }
 ```
 
-Anchor edges are the eight standard corners + sides (`top-right`, `top-left`, `top`, `bottom`, `left`, `right`, …). Manifest also takes `region` (`fullscreen` for overlays), `clickThrough`, `invocable` (for hotkey-summoned panels), `hotkeys`, `handles`, and `material` (NSVisualEffectView under the WebView). See `Sources/StackTemplates.swift` for the full schema.
+A panel can sit at any corner or side (`top-right`, `top-left`, `top`, `bottom`, `left`, `right`, …), cover the whole screen, let clicks pass through it, or stay hidden until a hotkey calls it up. Things your stack only reads are worked out from the page, so you rarely list them. Things that change your Mac, like adding a menu bar item, you list under `permissions`. The [manifest reference](docs/reference/manifest.md) covers every field.
 
-### Templates: `{{ }}` and `sd-each`
+### Templates: `{{ }}`, `sd-each` and `sd-if`
 
-For putting a value on screen, write the expression in HTML. No `<script>`, no import, no callback:
+To show a value, write it in the HTML. No `<script>`, no import, no callback:
 
 ```html
 <div>{{ sd.mouse.x }}, {{ sd.mouse.y }}</div>
 ```
 
-`sd-each="<array-expr>"` clones the element per item. `item` and `index` are in scope inside any `{{ }}` on the element or its descendants:
+`sd-each="<list>"` repeats an element once per item, with `item` and `index` available inside:
 
 ```html
 <ul>
@@ -127,13 +92,13 @@ For putting a value on screen, write the expression in HTML. No `<script>`, no i
 </ul>
 ```
 
-`sd-if="<expr>"` conditionally renders. Expressions are null-safe — if anything in the chain is `undefined`, the result is `""` rather than an error.
+`sd-if="<expr>"` shows an element only when the expression is true. A missing value shows as nothing instead of an error.
 
-Runtime limits (v1): signal detection is regex-based, so refer to signals by full path (`{{ sd.battery.percent }}`, not `const b = sd.battery; b.percent`). Nested `sd-each` is not supported — the runtime warns and skips inner.
+Write values by their full name (`{{ sd.battery.percent }}`), and keep `sd-each` one level deep.
 
 ### Scripts: when you need more
 
-Reach for a `<script>` when you need async work, event handlers, state machines, or list transforms beyond simple filtering:
+Use a `<script>` for anything that waits, reacts to clicks, keeps state, or reshapes lists:
 
 ```html
 <div id="t"></div>
@@ -143,203 +108,166 @@ Reach for a `<script>` when you need async work, event handlers, state machines,
 </script>
 ```
 
-`sd.bind(target, signal, fmt?)` covers the common case (textContent, innerHTML, attributes, CSS vars, class toggles). For anything else, signals are subscribable: `sd.battery.subscribe(b => …)`. Template + script forms work side-by-side in the same stack.
+`sd.bind(target, signal, fmt?)` puts a value into text, HTML, an attribute, a CSS variable or a class. For anything else, subscribe: `sd.battery.subscribe(b => …)`. Templates and scripts work together in the same stack.
 
-`stackd doctor` checks every manifest in `~/stackd/stacks/` for missing fields, typo permissions, and a few other footguns. It also lists the trackpad gestures macOS itself handles (swipes, three-finger drag, pinches) and their finger counts, so a gesture stack can avoid competing with the system. Finally it checks that every private SkyLight function stackd calls still exists on this macOS, since a missing one makes its primitive silently do nothing.
+### The `stackd` command
 
-## System data (`sd.*`)
+```
+stackd list                               list running stacks
+stackd list --disabled                    list stacks you've set aside
+stackd reload                             reload every stack from disk
+stackd disable <id>                       stop a stack and set it aside in ~/stackd/disabled/
+stackd enable <id>                        bring a set-aside stack back and start it
+stackd toggle <id>                        stop or start a stack until the next reload
+stackd set <id|/regex/> --css <prop>=<value>
+                                          change a CSS variable on one or many stacks
+stackd bang <name> [KEY=VAL ...]          send a message to stacks that listen for it
+stackd new <name> [--template <hello|menubar|hud>]
+                                          make a new stack
+stackd doctor                             check every stack for mistakes
+stackd help                               show this list
+```
 
-Available inside `{{ }}` templates and `import { sd } from "sd://runtime/api.js"` in scripts. Reactive *signals* are subscribable / re-render on change; *actions* are one-shot async calls.
+`<id>` matches one stack by name; `/pattern/` matches every stack whose name fits the pattern. Settings in `~/stackd/defaults.json` apply to every stack, which is handy for a shared corner, material or permission.
+
+`new`, `doctor` and `help` work any time. The rest need stackd running, which it is after installing. You can call `stackd` from shell scripts, skhd or Karabiner.
+
+`stackd doctor` catches missing fields and misspelled permissions in your stacks. It also lists the trackpad gestures macOS already uses, so a gesture stack can avoid them, and warns when your macOS is missing something stackd relies on.
+
+## What stacks can read and do (`sd.*`)
+
+All of this works inside `{{ }}` and in scripts after `import { sd } from "sd://runtime/api.js"`. *Signals* update on their own; *actions* do one thing when you call them. The [API reference](docs/reference/api.md) lists every method.
 
 ### Hardware
 
 | API | What it gives you |
 |---|---|
-| `sd.battery` | % + charging + cycles + health + amperage + voltage + timeRemaining |
-| `sd.sensors` | per-die temps, per-rail voltage/current, fan RPM (IOHIDEventSystem) |
-| `sd.host.info()` / `sd.host.load` | hostname/os/arch/cpu/ram; live CPU/GPU/memory/swap/idle |
-| `sd.caffeinate` | `{ sleeping, locked }` — system sleep + screen lock signal |
-| `sd.displayLink` | vsync-locked frame tick (60/120 Hz, matches display) |
-| `sd.touchdevice` | raw per-finger trackpad frames via MultitouchSupport |
-| `sd.bluetooth.paired()` | paired peripherals + connection state + services |
-| `sd.usb` | attached USB devices, fires on attach/detach |
-| `sd.disks.list()` | mounted volumes (DiskArbitration) |
-| `sd.location` | GPS-style fix `{ lat, lon, accuracy, … }` (needs Location grant) |
+| `sd.battery` | percent, charging, cycles, health, current, voltage, time left |
+| `sd.sensors` | chip temperatures, power rails, fan speed |
+| `sd.host.info()` / `sd.host.load` | name, OS, chip and memory; live CPU, GPU, memory and idle time |
+| `sd.caffeinate` | `{ sleeping, locked }` — whether the Mac is asleep or the screen is locked |
+| `sd.displayLink` | a tick on every screen refresh |
+| `sd.touchdevice` | each finger on the trackpad, frame by frame |
+| `sd.bluetooth.paired()` | paired devices and whether they're connected |
+| `sd.usb` | plugged-in USB devices, updated as you plug and unplug |
+| `sd.disks.list()` | mounted drives |
+| `sd.location` | where you are `{ lat, lon, accuracy, … }` (asks for Location) |
 
 ### Display & windows
 
 | API | What it gives you |
 |---|---|
-| `sd.display.all` / `sd.display.setBrightness` / `sd.display.snapshot()` | per-display info; brightness; pixel capture |
-| `sd.appearance` | dark/light + accent color |
-| `sd.windows.focused` / `sd.windows.all` | focused window of frontmost app; every on-screen window |
-| `sd.windows.setFrame / minimize / fullscreen / raise / focus / close / cornerRadius / snapshot / batch` | per-window actions (by AX or CGWindowID) |
-| `sd.spaces.all` / `sd.spaces.windowSpaces(id)` / `sd.spaces.minimizedWindows(spaceID)` | Spaces info via SkyLight SPI |
-| `sd.overlay.attach(windowId, draw)` | CG-context overlay pinned to another app's window (JankyBorders pattern) |
-| `sd.desktop.hideIcons / showIcons` | hide/show desktop icons (the "Show Items: On Desktop" setting, restored afterwards) |
-| `sd.menubar.suppress / restore` | make the system menu bar transparent / restore it (it still takes clicks where no stack covers it) |
-| `sd.menubar.addItem(spec)` | add an NSStatusItem |
-| `sd.menu.popup(items)` | native NSMenu at the cursor |
+| `sd.display.all` / `sd.display.setBrightness` / `sd.display.snapshot()` | each display; brightness; a screenshot |
+| `sd.appearance` | dark or light, and the accent color |
+| `sd.windows.focused` / `sd.windows.all` | the focused window; every window on screen |
+| `sd.windows.setFrame / minimize / fullscreen / raise / focus / close / cornerRadius / snapshot / batch` | move, resize and manage any window |
+| `sd.spaces.all` / `sd.spaces.windowSpaces(id)` / `sd.spaces.minimizedWindows(spaceID)` | your Spaces and which windows are on each |
+| `sd.overlay.attach(windowId, draw)` | draw on top of another app's window, like a border around the focused one |
+| `sd.desktop.hideIcons / showIcons` | hide or show desktop icons (your setting comes back afterwards) |
+| `sd.menubar.suppress / restore` | hide or bring back the system menu bar |
+| `sd.menubar.addItem(spec)` | add your own menu bar item |
+| `sd.menu.popup(items)` | a native menu at the pointer |
 
 ### Input
 
 | API | What it gives you |
 |---|---|
-| `sd.mouse` | cursor x,y at 30 Hz (change-detected) |
-| `sd.cursor.setPosition({x,y}) / position()` | warp / read (top-left global, optional per-display) |
-| `sd.input.layout` | active keyboard layout (TIS) |
-| `sd.events.type / key / scroll / click` | synthesize input via CGEvent post |
-| `sd.hotkey.bind(spec, fn, opts)` / `sd.hotkey.mode.*` | dynamic Carbon hotkeys + modal keymaps (skhd parity) |
+| `sd.mouse` | where the pointer is |
+| `sd.cursor.setPosition({x,y}) / position()` | move or read the pointer |
+| `sd.input.layout` | the active keyboard layout |
+| `sd.events.type / key / scroll / click` | type, press keys, scroll and click for you |
+| `sd.hotkey.bind(spec, fn, opts)` / `sd.hotkey.mode.*` | hotkeys, and modes with their own set of keys |
 
 ### Apps & UI
 
 | API | What it gives you |
 |---|---|
-| `sd.app.frontmost` | frontmost app (NSWorkspace) |
-| `sd.apps.running` / `sd.apps.changed` | full list signal; transition deltas |
-| `sd.apps.launch / focus / kill / hide` | by bundle ID |
-| `sd.ax.focused()` + generic `sd.ax.*` | Accessibility tree access (handles, attributes, actions) |
-| `sd.icons.app(bundleId) / file(path)` | app + file icons as data URLs |
+| `sd.app.frontmost` | the app in front |
+| `sd.apps.running` / `sd.apps.changed` | every running app; apps as they open and quit |
+| `sd.apps.launch / focus / kill / hide` | control an app by its bundle ID |
+| `sd.ax.focused()` + `sd.ax.*` | read and press buttons, fields and menus in other apps |
+| `sd.icons.app(bundleId) / file(path)` | app and file icons as images |
 
 ### Network
 
 | API | What it gives you |
 |---|---|
-| `sd.net.wifi` | SSID + signal (needs Location grant for SSID) |
-| `sd.net.lan` | primary IPv4 + hostname (SCDynamicStore + Bonjour) |
-| `sd.net.path` | NWPathMonitor — `{ status, interfaces, isConstrained, isExpensive }` |
-| `sd.httpserver.serve({port, routes, …})` | long-running HTTP server (loopback or LAN + optional Bonjour) |
+| `sd.net.wifi` | network name and signal (the name asks for Location) |
+| `sd.net.lan` | your local address and computer name |
+| `sd.net.path` | `{ status, interfaces, isConstrained, isExpensive }` — whether you're online and how |
+| `sd.httpserver.serve({port, routes, …})` | a small web server, on this Mac or your local network |
 
 ### Audio, media, output
 
 | API | What it gives you |
 |---|---|
-| `sd.audio.output` / `sd.audio.setVolume / setMuted` | output volume + device |
-| `sd.media.nowPlaying` / `sd.media.command(name)` | Spotify/Music/Podcasts/browser (MediaRemote SPI) |
-| `sd.speech.speak / stop / voices()` | AVSpeechSynthesizer TTS |
-| `sd.sound.system / file / beep` | short NSSound playback |
-| `sd.haptic.perform(pattern?) / actuate(id, device?)` | Force Touch trackpad click |
-| `sd.notify.show(spec)` | banner notification |
+| `sd.audio.output` / `sd.audio.setVolume / setMuted` | output volume and device |
+| `sd.media.nowPlaying` / `sd.media.command(name)` | what's playing in Spotify, Music, Podcasts or a browser, and play/pause/skip |
+| `sd.speech.speak / stop / voices()` | read text aloud |
+| `sd.speech.listen(opts)` | turn speech into text (asks for Microphone and Speech Recognition) |
+| `sd.sound.system / file / beep` | play a short sound |
+| `sd.haptic.perform(pattern?) / actuate(id, device?)` | a tap on the Force Touch trackpad |
+| `sd.notify.show(spec)` | a notification banner |
 
-### Files, processes, persistence
+### Files, processes, saved data
 
 | API | What it gives you |
 |---|---|
-| `sd.fs.read / stat / list / write / mkdir / delete / move / watch` | atomic FS access + FSEvents watcher |
-| `sd.proc.exec(cmd, args, opts)` | one-shot subprocess |
-| `sd.applescript.run(source, opts)` | NSAppleScript (AppleScript / JXA) |
-| `sd.shortcuts.run(name, opts)` | invoke a macOS Shortcut by name |
-| `sd.defaults.read(bundleId, key)` | CFPreferences for any app |
-| `sd.settings.get / set / delete / all` | per-stack k/v (UserDefaults suite) |
-| `sd.sqlite.open(path)` → `.exec / query / close` | embedded libsqlite3 (FTS4/FTS5) |
-| `sd.pasteboard.changed` / `sd.pasteboard.get / set` | clipboard contents signal + r/w |
+| `sd.fs.read / stat / list / write / mkdir / delete / move / watch` | read, write and watch files |
+| `sd.proc.exec(cmd, args, opts)` | run a command |
+| `sd.applescript.run(source, opts)` | run AppleScript or JavaScript for Automation |
+| `sd.shortcuts.run(name, opts)` | run a Shortcut by name |
+| `sd.defaults.read(bundleId, key)` | read any app's settings |
+| `sd.settings.get / set / delete / all` | save your stack's own settings |
+| `sd.sqlite.open(path)` → `.exec / query / close` | a SQLite database, with full-text search |
+| `sd.pasteboard.changed` / `sd.pasteboard.get / set` | the clipboard, read and write |
 
 ### Intelligence
 
 | API | What it gives you |
 |---|---|
-| `sd.vision.ocr / faces / featurePrint / subjectMask / bodyPose` | Apple Vision framework |
-| `sd.nlp.language / tokens / lemmas / similarity` | NaturalLanguage framework |
-| `sd.spotlight.find({predicate, …})` | NSMetadataQuery — `kMDItem*` filters |
-| `sd.calendar.events({from, to}) / calendar.list()` | EventKit reads (needs Calendar grant) |
-| `sd.camera` (signal) / `sd.camera.frame(opts)` | device list (no TCC); `.frame()` triggers Camera prompt |
+| `sd.vision.ocr / faces / featurePrint / subjectMask / bodyPose` | text, faces, subjects and poses in images |
+| `sd.nlp.language / tokens / lemmas / similarity` | language, words and similarity in text |
+| `sd.spotlight.find({predicate, …})` | Spotlight searches |
+| `sd.calendar.events({from, to}) / list() / reminders() / createEvent(opts)` | your calendar and reminders; add events (asks for Calendar) |
+| `sd.camera` / `sd.camera.frame(opts)` / `sd.camera.stream(opts)` | your cameras; a still or a live feed (asks for Camera) |
 
 ### Stack control
 
 | API | What it gives you |
 |---|---|
-| `sd.bang(name, detail)` | fire a bang to every stack whose manifest `handles` it |
-| `sd.broadcasts.subscribe(name, fn)` | NSDistributedNotificationCenter subscription |
-| `sd.window.invoke() / dismiss()` | show/hide stacks declared `invocable` (palette pattern) |
+| `sd.bang(name, detail)` | send a message to every stack that listens for it |
+| `sd.broadcasts.subscribe(name, fn)` | system-wide notifications from other apps |
+| `sd.window.invoke() / dismiss()` | show or hide a stack that a hotkey calls up |
 
-Window lifecycle (`sd.window.created / destroyed / titleChanged / moved / resized / minimized / deminimized / reordered / focusedByMouse`) and disk mount/unmount fire as bangs — declare in `stack.json`:
+Window events (`sd.window.created / destroyed / focused / titleChanged / moved / resized / resizing / animating / minimized / deminimized / reordered / focusedByMouse`) and drives being mounted or unmounted (`sd.disk.mounted / unmounted`) arrive as bangs. List the ones you want in `stack.json`:
 
 ```json
 { "handles": ["sd.window.destroyed", "sd.disk.mounted"] }
 ```
 
-Hotkeys (Carbon) and event taps (CGEventTap, incl. private gesture decoding) are also declared in the manifest. See `examples/` for working patterns.
-
-## CLI
-
-```
-stackd                                            start the daemon (no args)
-stackd list                                       list loaded stacks
-stackd reload                                     tear down + re-discover from disk
-stackd toggle <id>                                enable / disable a single stack
-stackd set <id|/regex/> --css <prop>=<value>      live theme override
-stackd bang <name> [KEY=VAL ...]                  fire a bang
-stackd new <name> [--template <hello|menubar|hud>]
-                                                  scaffold a new stack
-stackd doctor                                     validate every manifest
-stackd help
-```
-
-Selectors: `<id>` is exact; `/pattern/` is a regex. `defaults.json` at the stackd root is shallow-merged under every stack manifest before decoding — useful for global anchors, materials, permissions.
-
-The CLI talks to the running daemon over a Unix socket at `~/Library/Application Support/stackd/daemon.sock`. Pidfile-guarded singleton; safe to invoke from shell scripts, skhd, Karabiner. `new` and `doctor` are local file ops and work without the daemon.
-
-## Hot reload
-
-FSEvents watches `~/stackd/stacks/`, `~/stackd/defaults.json`, and the runtime. Any save triggers a reload within ~300ms. No build step. Edit a CSS file, save, see the change.
-
-When a stack's HTML fails to load, the panel stays visible-but-empty instead of vanishing — easier to spot than a silent hide. `stackd doctor` validates every manifest in `~/stackd/stacks/`. The daemon logs to stderr; StackScope drains in reverse on unload, so a leak surfaces in teardown order.
+Hotkeys and trackpad or keyboard event listeners are listed in the manifest too. `examples/` has working patterns.
 
 ## Examples
 
-`examples/` holds <!-- count: examples/**/stack.json -->47<!-- /count --> working stacks covering most of the surface above. A few starting points:
+`examples/` holds <!-- count: examples/**/stack.json -->47<!-- /count --> working stacks covering most of the list above. A few places to start:
 
-- **`hello`** — the scaffolder output, three-file template panel.
-- **`menubar-item`** — `sd.menubar.addItem` for NSStatusItem widgets with submenus.
-- **`invocable-palette`** — hotkey-summoned overlay + AX reads + fuzzy app search.
-- **`fs-watcher`** — `sd.fs.watch` driving live UI.
-- **`bang-pair`** — two stacks talking via bangs.
-- **`overlay-border`** — `sd.overlay.attach` painting a focused-window border (JankyBorders).
-- **`sysinfo`** / **`sensors-test`** / **`displaylink-test`** — sampling the harder signals.
+- **`hello`** — what `stackd new` makes: a three-file panel.
+- **`menubar-item`** — your own menu bar item with submenus.
+- **`invocable-palette`** — a launcher you call up with a hotkey, with fuzzy app search.
+- **`fs-watcher`** — a panel that updates as files change.
+- **`bang-pair`** — two stacks talking to each other.
+- **`sysinfo`** / **`sensors-test`** / **`displaylink-test`** — the harder-to-get readings.
 
-Copy any of them into `~/stackd/stacks/` to play with.
+Copy any of them into `~/stackd/stacks/` to try it.
 
-## Status
+Stacks in daily use include `bar` (a replacement menu bar), `sysinfo`, `notunes`, `apptimeout`, `palette`, `timetrail`, `undoclose`, `autodmg`, `sideswipe`, `muse`, `cloudpad`, `digup`, `edgehopper`, `framecorners`, `tttaps` and `windowscape`.
 
-Working and in daily use:
+## Known gaps
 
-- **HS ports** — `notunes`, `apptimeout`, `palette`, `timetrail`, `undoclose`, `autodmg`, `sideswipe`, `muse`, `cloudpad`, `digup`, `edgehopper`, `framecorners`, `tttaps`, `windowscape`.
-- **Display stacks** — `bar`, `sysinfo`, `framecorners`, `overlay-border`.
+- AirPods and other Bluetooth battery levels aren't available yet.
+- Stacks can't yet be told when something changes inside another app's window or controls (`sd.ax.observe`).
 
-The discipline: every API in `sd.*` is a *general primitive* with at least two real consumers. No `sd.spotify` — there's `sd.media`, and Spotify is one feed of many (Apple Music, browser PiPs, Podcasts). No `sd.dock_orientation` — there's `sd.defaults.read("com.apple.dock", "orientation")`. If you find yourself wanting an escape hatch, propose the primitive that generalizes it.
+What stackd won't do: it never phones home, has no analytics, no auto-updater, no central stack store, and no closed stack format — a stack is a folder you can read and edit. It never takes focus away from the app you're using. Permission prompts (Accessibility, Calendar, Location, Camera) come from macOS itself; stackd doesn't stand in for them.
 
-Open items: STT (`sd.speech.listen`), AirPods battery, camera stream, calendar writes + reminders, modern menu-bar suppress API on Sequoia+ (CGSSetMenuBarVisibility removed), per-AX-observer parity, AX notification bus (`sd.ax.observe`).
-
-## Project layout
-
-```
-~/stackd/                     ← user content
-  defaults.json               ← global manifest defaults
-  stacks/
-    <id>/
-      stack.json
-      index.html
-      index.css
-
-~/Documents/stackd/           ← project source (this repo)
-  Sources/                    ← Swift host + data sources
-  Runtime/src/                ← the sd.* JavaScript runtime, one module per area;
-                                build.sh concatenates it into the generated Runtime/api.js
-                                that the daemon serves next to the binary
-  Tests/                      ← test suite (./tests.sh)
-  build.sh                    ← swiftc one-shot
-  .build/stackd               ← binary
-  examples/                   ← reference stacks, one folder each
-
-~/Library/Application Support/stackd/
-  daemon.sock                 ← CLI ↔ daemon Unix socket
-  daemon.pid                  ← singleton guard
-```
-
-## Foundations
-
-The substrate is whatever macOS already ships — Accessibility, IOKit, CGEvent, FSEvents, WebKit, CoreAudio, MultitouchSupport, AVFoundation, EventKit, Vision, NaturalLanguage. When Apple has a public API, stackd uses it; when only an SPI exists (DisplayServices, MediaRemote, SkyLight, MultitouchSupport), the header is vendored explicitly so the dependency is visible in the source tree. No kernel extensions, no privileged helpers, no daemons that aren't this one.
-
-## Refusals
-
-stackd never phones home, has no analytics, no auto-updater, no central stack registry, and no opaque binary stack format — a stack is a folder you can read and edit. The daemon never becomes frontmost (`.nonactivatingPanel` only, no `NSApp.activate` calls). Permission prompts (Accessibility, Calendar, Location, Camera) are the OS's; stackd doesn't broker or proxy them.
+How stackd works inside — its history, the macOS frameworks behind each API, where files live — is in [docs/internals.md](docs/internals.md).

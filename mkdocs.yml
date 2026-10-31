@@ -32,3 +32,4 @@ nav:
       - Manifest (stack.json): reference/manifest.md
       - Template engine: reference/template-engine.md
       - sd.* API: reference/api.md
+  - How it works inside: internals.md

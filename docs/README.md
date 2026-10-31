@@ -50,6 +50,10 @@ A stack is a folder in `~/stackd/stacks/<id>/`. The minimum is two files:
 - [Template engine](reference/template-engine.md) — `{{ }}`, `sd-each`, `sd-if`, `sd-on:click`, `sd.bind`, `sd.tpl`.
 - [`sd.*` API](reference/api.md) — every namespace, method, and channel.
 
+**Inside**
+
+- [How it works inside](internals.md) — history, vocabulary, the frameworks behind `sd.*`, hot reload, the CLI socket, project layout.
+
 ---
 
 *Generated against the source (`Runtime/src/`, `Sources/Channels.swift`, `Sources/Permissions.swift`, the manifest parser). If anything here disagrees with the daemon, the daemon is right — please file it.*
