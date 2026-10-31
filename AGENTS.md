@@ -21,6 +21,6 @@ A pointer for any agent landing in this repo. The authority is [CLAUDE.md](CLAUD
 - `./tests.sh` passes, and so does `docs/sync.py --check` (`tests.sh` runs it).
 - Never add `NSApp.activate`, and never use CSS `backdrop-filter` in stack HTML.
 
-How the daemon works inside (history, the frameworks behind `sd.*`, socket and pid paths, project layout) is in [docs/internals.md](docs/internals.md); the README stays user-facing.
+How the daemon works inside (history, the frameworks behind `sd.*`, socket and pid paths, project layout) is in [docs/internals.md](docs/internals.md); the README stays short and user-facing, and [docs/using-stackd.md](docs/using-stackd.md) holds the CLI list and `sd.*` tables.
 
 The user's day-to-day stacks live in `~/stackd/stacks/`, outside this repo; `examples/` is the in-repo reference set. A cross-stack change touches both when both have the stack.

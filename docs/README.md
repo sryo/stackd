@@ -37,6 +37,8 @@ A stack is a folder in `~/stackd/stacks/<id>/`. The minimum is two files:
 
 - [Getting started](getting-started.md) — build a stack from scratch; the ways to read and act on state.
 
+- [Using stackd](using-stackd.md) — the manifest, templates, the `stackd` command, what `sd.*` can read and do, the examples.
+
 **Concepts** — how the pieces work
 
 - [The reactive model](concepts/reactive-model.md) — channels, bangs, requests, replay on load.

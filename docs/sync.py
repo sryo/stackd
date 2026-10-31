@@ -40,6 +40,7 @@ def _collect_docs() -> list[Path]:
         REPO_ROOT / "BELIEFS.md",
         REPO_ROOT / "CLAUDE.md",
         REPO_ROOT / "AGENTS.md",
+        REPO_ROOT / "docs" / "using-stackd.md",
     ]
     globbed = list((REPO_ROOT / ".claude").glob("agents/*.md")) \
         + list((REPO_ROOT / ".claude").glob("commands/*.md")) \
