@@ -27,8 +27,3 @@ stackd new hello
 A small panel showing your battery appears in the top-right corner. Open `~/stackd/stacks/hello/index.html`, change it, save, and the panel changes. Anything in `{{ sd.battery.percent }}` updates itself.
 
 `stackd help` lists every command. [Using stackd](docs/using-stackd.md) covers writing stacks and everything `sd.*` can read and do, `examples/` has working stacks to copy, and [stackd-stacks](https://github.com/sryo/stackd-stacks) is a full daily setup.
-
-## Known gaps
-
-- AirPods and other Bluetooth battery levels aren't available yet.
-- Stacks can't yet be told when something changes inside another app's window or controls.
