@@ -6,8 +6,6 @@ stackd turns folders of HTML and CSS into live pieces of your Mac's desktop. You
 
 ## Install
 
-You need a Mac with Apple silicon, macOS 13 or later, and the Xcode command-line tools (`xcode-select --install`).
-
 ```
 git clone https://github.com/sryo/stackd ~/Documents/stackd
 cd ~/Documents/stackd
