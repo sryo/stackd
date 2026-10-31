@@ -149,9 +149,16 @@ func registerWindowsHitTestTests() {
             func region(_ x: CGFloat, _ y: CGFloat) -> (HitRegion, [WindowEdge]) {
                 WindowsByID.hitRegion(of: victim, at: CGPoint(x: x, y: y))
             }
-            try expectEqual(region(frame.midX, frame.minY + 10).0, .titlebar)
+            // A victim slow to answer reads as content, the fallback a click
+            // can't wait past, so the title bar reads wait for it to answer.
+            func settled(_ x: CGFloat, _ y: CGFloat, _ expected: HitRegion) -> HitRegion {
+                var got = HitRegion.content
+                _ = spin(timeout: 10, until: { got = region(x, y).0; return got == expected })
+                return got
+            }
+            try expectEqual(settled(frame.midX, frame.minY + 10, .titlebar), .titlebar)
             try expectEqual(region(frame.midX, frame.minY + 44).0, .content)
-            try expectEqual(region(frame.maxX - 40, frame.minY + 14).0, .control,
+            try expectEqual(settled(frame.maxX - 40, frame.minY + 14, .control), .control,
                             "a part of the bar too deep to walk is still in the bar")
             let edge = region(frame.minX + 1, frame.minY + 20)
             try expectEqual(edge.0, .edge)
