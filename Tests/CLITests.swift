@@ -13,6 +13,19 @@ import Foundation
 // The full CLI.dispatch round-trip needs a StackHost with live windows and
 // is not covered here.
 func registerCLITests() {
+    // MARK: - localHelp
+
+    test("localHelp: help verbs answer without the daemon") {
+        for verb in ["help", "-h", "--help"] {
+            try expect(CLI.localHelp([verb]) == CLI.helpText + "\n", "\(verb) prints the help text")
+        }
+    }
+
+    test("localHelp: daemon verbs are left to the daemon") {
+        try expect(CLI.localHelp(["list"]) == nil)
+        try expect(CLI.localHelp([]) == nil)
+    }
+
     // MARK: - isSafeId
 
     test("isSafeId: ASCII letters / digits / dash / underscore are accepted") {

@@ -24,8 +24,8 @@ enum CLI {
       manifest before decoding. Useful for global permissions, anchors, etc.
 
     The daemon must be running for verbs that talk to live stacks (list,
-    reload, disable, enable, toggle, set, bang). `new` and `doctor` are
-    local file ops and work without the daemon. Start the daemon with:
+    reload, disable, enable, toggle, set, bang). `new`, `doctor` and `help`
+    work without the daemon. Start the daemon with:
       stackd                                    (no args)
     """
 
@@ -33,6 +33,10 @@ enum CLI {
         // Verbs that don't need the daemon — pure file IO. FSEvents will
         // pick up the new files and trigger a reload automatically once the
         // daemon comes back online (or is already running).
+        if let help = localHelp(args) {
+            FileHandle.standardOutput.write(Data(help.utf8))
+            return 0
+        }
         if let verb = args.first {
             switch verb {
             case "new":    return runNew(Array(args.dropFirst()))
@@ -43,6 +47,11 @@ enum CLI {
         let result = IPCClient.send(argv: args)
         FileHandle.standardOutput.write(result.response.data(using: .utf8) ?? Data())
         return result.status
+    }
+
+    static func localHelp(_ args: [String]) -> String? {
+        guard let verb = args.first, ["help", "-h", "--help"].contains(verb) else { return nil }
+        return helpText + "\n"
     }
 
     // MARK: - new (scaffolder)
