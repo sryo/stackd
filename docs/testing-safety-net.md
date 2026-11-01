@@ -230,7 +230,7 @@ that window an agent prepares everything headlessly and waits.
 ### In the window (owner present, hands off)
 
 Preconditions: on AC power, heavy apps closed; no other bench running
-(`.build/bench/.lock`, `pgrep -fl bench.sh`) and no other session swapping
+(`~/.fium/runs/stackd/.lock`, `pgrep -fl bench.sh`) and no other session swapping
 the daemon (`pgrep -fl stackd`).
 
 1. **Bench A/B**: `scripts/bench/bench.sh $BASE HEAD --runs 5 --fresh-a`,
