@@ -96,4 +96,15 @@ func registerAppsTests() {
         }
         try expect(sawBundleURL, "no entry carried a bundleURL — field is missing from the payload")
     }
+
+    // MARK: - menu shortcut glyphs
+
+    test("menu shortcuts read Apple's modifier bits: shift 1, option 2, control 4, no-command 8") {
+        try expectEqual(Apps.shortcut(cmdChar: "S", modifiers: 0), "⌘S")
+        try expectEqual(Apps.shortcut(cmdChar: "S", modifiers: 1), "⇧⌘S")
+        try expectEqual(Apps.shortcut(cmdChar: "F", modifiers: 4 | 2), "⌃⌥⌘F")
+        try expectEqual(Apps.shortcut(cmdChar: "Z", modifiers: 1 | 2 | 4), "⌃⌥⇧⌘Z")
+        try expectEqual(Apps.shortcut(cmdChar: "X", modifiers: 8), "X", "no-command: the key alone")
+        try expectEqual(Apps.shortcut(cmdChar: "X", modifiers: 8 | 4), "⌃X")
+    }
 }

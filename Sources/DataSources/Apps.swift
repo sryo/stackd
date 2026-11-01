@@ -81,6 +81,19 @@ enum Apps {
         }
     }
 
+    /// A menu item's shortcut as glyphs ("⇧⌘S"). `modifiers` is
+    /// AXMenuItemCmdModifiers: kAXMenuItemModifierShift (1), Option (2),
+    /// Control (4) and NoCommand (8); ⌘ is part of the shortcut unless
+    /// NoCommand is set.
+    static func shortcut(cmdChar: String, modifiers mods: Int) -> String {
+        var s = ""
+        if mods & 4 != 0 { s += "⌃" }
+        if mods & 2 != 0 { s += "⌥" }
+        if mods & 1 != 0 { s += "⇧" }
+        if mods & 8 == 0 { s += "⌘" }
+        return s + cmdChar
+    }
+
     @discardableResult
     static func launch(bundleId: String) -> Bool {
         guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleId) else { return false }
@@ -159,18 +172,7 @@ enum Apps {
         // means no shortcut). Best-effort — apps without shortcut attributes
         // simply omit the key.
         if let cmdChar = AX.string(of: el, kAXMenuItemCmdCharAttribute), !cmdChar.isEmpty {
-            let mods = AX.int(of: el, kAXMenuItemCmdModifiersAttribute) ?? 0
-            // kAXMenuItemModifierNoCommand = 0x1 means "no shortcut". The
-            // remaining bits are shift (0x4), option/alt (0x2), control (0x8);
-            // cmd is always present unless NoCommand is set.
-            if (mods & 0x1) == 0 {
-                var shortcut = ""
-                if (mods & 0x8) != 0 { shortcut += "⌃" }
-                if (mods & 0x2) != 0 { shortcut += "⌥" }
-                if (mods & 0x4) != 0 { shortcut += "⇧" }
-                shortcut += "⌘" + cmdChar
-                out["shortcut"] = shortcut
-            }
+            out["shortcut"] = shortcut(cmdChar: cmdChar, modifiers: AX.int(of: el, kAXMenuItemCmdModifiersAttribute) ?? 0)
         }
         // Recurse — every AXMenuBar / AXMenuBarItem / AXMenuItem with a
         // submenu has its real children wrapped in a single AXMenu child.
