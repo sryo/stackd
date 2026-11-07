@@ -1,4 +1,9 @@
-# stackd
+<h1>
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/logo/stackd-dark.svg">
+    <img alt="stackd" src="docs/logo/stackd-light.svg" width="260">
+  </picture>
+</h1>
 
 stackd turns folders of HTML and CSS into live pieces of your Mac's desktop. You get a status bar, a hotkey launcher or a window tiler that you write like a web page, and it updates the moment you save.
 
